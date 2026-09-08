@@ -30,10 +30,16 @@ import {
   type QsoEditForm,
 } from "./logbook";
 import { applySelection, configToSelection, rigName, rigOptions } from "./rig";
+import { debounce } from "./debounce";
 
 type Tab = "decode" | "log" | "settings";
 type Filter = "all" | "cq" | "tome";
 const MAX_MESSAGES = 800;
+
+// Quiet period a gain slider must see before its value is sent to the
+// backend. Long enough to collapse a drag gesture, short enough that a
+// deliberate single adjustment still feels immediate.
+const GAIN_DEBOUNCE_MS = 120;
 
 // The live waterfall draws imperatively to a canvas (registered by WaterfallView)
 // so per-row spectrum events never go through React state.
@@ -109,17 +115,26 @@ export default function App() {
   // visual feedback; only the backend call waits for a short pause in
   // dragging. Safe to delay for both: TX gain is only read when the *next*
   // transmission starts (never applied to audio already playing), and RX
-  // gain landing ~120ms late has no practical effect either.
-  const txGainTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const rxGainTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function debouncedSetTxGain(pct: number) {
-    if (txGainTimer.current) clearTimeout(txGainTimer.current);
-    txGainTimer.current = setTimeout(() => api.setTxGain(pct / 100), 120);
-  }
-  function debouncedSetRxGain(pct: number) {
-    if (rxGainTimer.current) clearTimeout(rxGainTimer.current);
-    rxGainTimer.current = setTimeout(() => api.setRxGain(pct / 100), 120);
-  }
+  // gain landing ~120ms late has no practical effect either. This does change
+  // TX gain from "applied on the spot" to "applied after the drag settles" --
+  // deliberate, and invisible unless a slot boundary lands inside that window,
+  // in which case the previous level is used for one transmission.
+  // Held in refs so the debouncers survive re-renders (a fresh one per render
+  // would never accumulate a burst), and cancelled on unmount so a drag still
+  // in flight cannot fire IPC after teardown. See src/debounce.ts.
+  const debouncedSetTxGain = useRef(
+    debounce((pct: number) => api.setTxGain(pct / 100), GAIN_DEBOUNCE_MS)
+  ).current;
+  const debouncedSetRxGain = useRef(
+    debounce((pct: number) => api.setRxGain(pct / 100), GAIN_DEBOUNCE_MS)
+  ).current;
+  useEffect(
+    () => () => {
+      debouncedSetTxGain.cancel();
+      debouncedSetRxGain.cancel();
+    },
+    [debouncedSetTxGain, debouncedSetRxGain]
+  );
 
   useEffect(() => {
     // Register the event listener with cancellation-safe cleanup. Without this,

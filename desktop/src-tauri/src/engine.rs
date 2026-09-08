@@ -45,7 +45,16 @@ const MAX_TX_AUDIO_HZ: i32 = 3_000;
 const DEFAULT_TX_GAIN: f32 = 0.9;
 
 /// Clamp a requested TX gain into the valid 0.0–1.0 range (full scale).
+///
+/// Non-finite input falls back to the default rather than being clamped:
+/// `f32::clamp` propagates NaN, and the result is both stored in the engine
+/// and persisted to config, where `"NaN".parse::<f32>()` succeeds — so a
+/// single NaN would poison the gain across restarts with no way back short
+/// of editing the database.
 fn clamp_tx_gain(g: f32) -> f32 {
+    if !g.is_finite() {
+        return DEFAULT_TX_GAIN;
+    }
     g.clamp(0.0, 1.0)
 }
 
@@ -58,7 +67,13 @@ const DEFAULT_RX_GAIN: f32 = 1.0;
 /// a clip warning at 800%, silence at 0%) -- but adjustment past 100% wasn't
 /// doing anything practically useful, so finalized at 0-100% for finer
 /// control resolution across the range that actually matters.
+/// Non-finite input falls back to the default, for the same reason as
+/// `clamp_tx_gain` — and worse here, since a NaN gain multiplies every
+/// captured sample into NaN and silently kills RX entirely.
 fn clamp_rx_gain(g: f32) -> f32 {
+    if !g.is_finite() {
+        return DEFAULT_RX_GAIN;
+    }
     g.clamp(0.0, 1.0)
 }
 
@@ -215,8 +230,9 @@ pub enum EngineCommand {
     SetBaseFreq(i32),
     /// TX output level, 0.0–1.0 (drive into the soundcard/USB audio path).
     SetTxGain(f32),
-    /// RX input gain, 0.0–2.0 (post-ADC software trim, applied live without
-    /// restarting capture -- some bands are noisier than others).
+    /// RX input gain, 0.0–1.0 (post-ADC software trim, applied live without
+    /// restarting capture -- some bands are noisier than others). See
+    /// `clamp_rx_gain` for why the range stops at unity.
     SetRxGain(f32),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
@@ -391,7 +407,7 @@ struct Engine {
     tx_audio_hz: i32,
     /// TX output level (0.0–1.0) applied to the waveform before playback.
     tx_gain: f32,
-    /// RX input gain (0.0–2.0), applied live inside the capture callback.
+    /// RX input gain (0.0–1.0), applied live inside the capture callback.
     rx_gain: f32,
     /// Slot id (rx-corrected clock) most recently handed to the decode worker.
     /// Guards the once-per-slot early decode trigger in the run loop.
@@ -1299,8 +1315,9 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, wf_boundary_row, Engine, CYCLE_MS,
-        MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, SILENCE_DBFS,
+        clamp_rx_gain, clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, wf_boundary_row, Engine,
+        CYCLE_MS, DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ,
+        SILENCE_DBFS,
     };
     use crate::db::Db;
     use std::sync::Arc;
@@ -1373,6 +1390,25 @@ mod tests {
         assert_eq!(clamp_tx_gain(0.5), 0.5); // in range, untouched
         assert_eq!(clamp_tx_gain(1.4), 1.0); // never overdrives past full scale
         assert_eq!(clamp_tx_gain(-0.2), 0.0); // never negative (phase flip / garbage)
+    }
+
+    #[test]
+    fn rx_gain_clamps_to_unit_range() {
+        assert_eq!(clamp_rx_gain(0.5), 0.5); // in range, untouched
+        assert_eq!(clamp_rx_gain(1.4), 1.0); // attenuate-only, never past unity
+        assert_eq!(clamp_rx_gain(-0.2), 0.0); // never negative (phase flip / garbage)
+        assert_eq!(clamp_rx_gain(0.0), 0.0); // a deliberate mute is honored
+    }
+
+    #[test]
+    fn non_finite_gain_falls_back_to_the_default() {
+        // f32::clamp propagates NaN, and the clamped value is persisted --
+        // "NaN" parses back cleanly on the next launch, so an unguarded NaN
+        // would stick permanently (and zero RX, since NaN * sample is NaN).
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(clamp_tx_gain(bad), DEFAULT_TX_GAIN);
+            assert_eq!(clamp_rx_gain(bad), DEFAULT_RX_GAIN);
+        }
     }
 
     #[test]

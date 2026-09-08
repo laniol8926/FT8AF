@@ -27,7 +27,7 @@ pub struct AudioInput {
 
 impl AudioInput {
     /// Live-adjustable RX gain (a linear multiplier applied to each downmixed
-    /// sample, e.g. 1.0 = unity, 2.0 = +6 dB) -- some bands are noisier than
+    /// sample, e.g. 1.0 = unity, 0.5 = -6 dB) -- some bands are noisier than
     /// others, so this is expected to change often while decoding, not just
     /// at startup. Lock-free: the realtime audio callback only ever loads
     /// this, never blocks on it.
@@ -150,13 +150,24 @@ where
         return;
     }
     let g = f32::from_bits(gain.load(Ordering::Relaxed));
-    // Clamp to full scale, same as the TX gain path (audio/output.rs) -- gain
-    // can go well past unity (see clamp_rx_gain), and hard-clipping here
-    // mirrors what a real ADC does when overdriven, rather than passing
-    // arbitrarily large sample values into the resampler/decoder.
+    // Clamp to full scale, same as the TX gain path (audio/output.rs) --
+    // hard-clipping mirrors what a real ADC does when overdriven, rather than
+    // passing arbitrarily large sample values into the resampler/decoder.
+    //
+    // Only *above* unity though. A gain of 1.0 or less cannot push a sample
+    // past full scale that was not already there, so clamping unconditionally
+    // would only ever change the samples a device delivered out of range in
+    // the first place -- and F32 devices (CoreAudio, JACK/PipeWire) do hand
+    // out the occasional sample a hair over 1.0. Clipping those on a default,
+    // unity-gain install adds harmonics to RX audio that the capture path
+    // never introduced before the gain control existed. clamp_rx_gain caps at
+    // 1.0 today, so this is dormant; it keeps the guard correct if the range
+    // is ever widened.
+    let clip = g > 1.0;
+    let limit = |x: f32| if clip { x.clamp(-1.0, 1.0) } else { x };
     if channels == 1 {
         for &s in data {
-            let _ = prod.try_push((f32::from_sample(s) * g).clamp(-1.0, 1.0));
+            let _ = prod.try_push(limit(f32::from_sample(s) * g));
         }
         return;
     }
@@ -165,6 +176,68 @@ where
         for &s in frame {
             acc += f32::from_sample(s);
         }
-        let _ = prod.try_push(((acc / channels as f32) * g).clamp(-1.0, 1.0));
+        let _ = prod.try_push(limit((acc / channels as f32) * g));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::push_mono;
+    use ringbuf::traits::{Consumer, Split};
+    use ringbuf::HeapRb;
+    use std::sync::atomic::AtomicU32;
+
+    /// Run `push_mono` over `data` at the given gain and collect what landed.
+    fn pushed(data: &[f32], channels: usize, gain: f32) -> Vec<f32> {
+        let rb = HeapRb::<f32>::new(data.len().max(1) + 1);
+        let (mut prod, mut cons) = rb.split();
+        push_mono(data, channels, &mut prod, &AtomicU32::new(gain.to_bits()));
+        cons.pop_iter().collect()
+    }
+
+    #[test]
+    fn unity_gain_is_a_pure_pass_through() {
+        // The regression this guards: an unconditional clamp would hard-clip
+        // the over-full-scale samples F32 devices (CoreAudio, JACK/PipeWire)
+        // occasionally deliver, changing RX audio on a default install where
+        // the gain control was never touched.
+        let hot = [0.5, -0.5, 1.02, -1.04];
+        assert_eq!(pushed(&hot, 1, 1.0), hot.to_vec());
+    }
+
+    #[test]
+    fn gain_below_unity_scales_without_clipping() {
+        assert_eq!(pushed(&[0.5, -0.25], 1, 0.5), vec![0.25, -0.125]);
+        // Still no clamp: halving an over-scale sample leaves it over-scale,
+        // exactly as the pre-gain path delivered it.
+        assert_eq!(pushed(&[1.6], 1, 0.5), vec![0.8]);
+        assert_eq!(pushed(&[2.4], 1, 1.0), vec![2.4]);
+    }
+
+    #[test]
+    fn gain_above_unity_clips_to_full_scale() {
+        // Dormant while clamp_rx_gain caps at 1.0, but the guard has to be
+        // correct if that range is ever widened.
+        assert_eq!(pushed(&[0.8, -0.8, 0.1], 1, 2.0), vec![1.0, -1.0, 0.2]);
+    }
+
+    #[test]
+    fn multichannel_frames_are_averaged_then_gained() {
+        // Two stereo frames: (0.4, 0.8) -> 0.6, (-1.0, 0.0) -> -0.5.
+        assert_eq!(pushed(&[0.4, 0.8, -1.0, 0.0], 2, 1.0), vec![0.6, -0.5]);
+        assert_eq!(pushed(&[0.4, 0.8, -1.0, 0.0], 2, 0.5), vec![0.3, -0.25]);
+    }
+
+    #[test]
+    fn zero_channels_pushes_nothing() {
+        assert!(pushed(&[0.5, 0.5], 0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_trailing_partial_frame_is_dropped() {
+        // chunks_exact: three samples on a stereo stream yield one frame.
+        let got = pushed(&[0.2, 0.4, 0.9], 2, 1.0);
+        assert_eq!(got.len(), 1);
+        assert!((got[0] - 0.3).abs() < 1e-6, "got {got:?}");
     }
 }
