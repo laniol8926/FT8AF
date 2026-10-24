@@ -121,5 +121,13 @@ fun TopBarSubtitle(
         modifier = modifier.padding(top = 2.dp),
         color = TextMuted,
         fontSize = 12.sp,
+        // The title column now has a fixed weight(1f) width (shared with
+        // actions, see TopBar), not an unconstrained one -- a subtitle that
+        // used to always fit on one line can now wrap to two, pushing
+        // whatever sits below the top bar (e.g. Decode's filter chips) down
+        // unpredictably depending on live content (UTC time, decode count).
+        // Ellipsizing instead keeps the top bar's height fixed.
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }

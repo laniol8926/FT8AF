@@ -369,6 +369,14 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     // identical rig behavior from one set of callbacks.
     val slotMillis = ModeProfile.fromId(operatingMode).slotMillis.toLong()
     val bandModeLabel = "$frequencyLabel · $modeName"
+    // Band + mode only, no frequency -- the Decode screen's top-bar title has
+    // far less room than the always-visible TxStrip/drawer row bandModeLabel
+    // was designed for (measured on a real 1080px/432dp phone: ~160dp
+    // available next to the title bar's action icons, versus ~280dp needed
+    // for the full "7.074 MHz · 40m · FT8"). Band and mode are also the two
+    // things tapping the title actually lets the operator change; frequency
+    // stays visible in the drawer/TxStrip row and Settings.
+    val decodeTitleLabel = "$bandName · $modeName"
     val huntOptionLabel = if (huntEnabled) {
         stringResource(
             when (huntPriority) {
@@ -536,7 +544,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 when (activeTab) {
                     FT8AFTab.DECODE -> DecodeScreen(
                         mainViewModel,
-                        bandModeLabel = bandModeLabel,
+                        bandModeLabel = decodeTitleLabel,
                         onOpenBandMode = onOpenBandModeAction,
                     )
                     FT8AFTab.MAP -> MapScreen(mainViewModel)
