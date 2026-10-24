@@ -208,6 +208,7 @@
     <string name="qsopanel_qsoing_with">QSOing with %1$s</string>
     <string name="qsopanel_waiting_for">Waiting for %1$s</string>
     <string name="qsopanel_tap_to_view">tap to view ↗</string>
+    <string name="qsopanel_sent_report">sent %1$s</string>
     <string name="qsopanel_tx_message">TX: %1$s</string>
     <string name="qsopanel_waiting_messages">Waiting for messages...</string>
     <string name="qsopanel_log_action">LOG</string>
@@ -376,6 +377,14 @@
     <string name="log_sync_wrl_accepted">World Radio League: %1$d accepted</string>
     <string name="log_sync_nothing_to_upload">No QSOs in the logbook to upload yet.</string>
     <string name="log_sync_working">Working…</string>
+    <!-- Rejected-upload lines in the catch-up sync dialog; %1$s = the server's own reason -->
+    <string name="log_sync_cloudlog_rejected">Cloudlog / Wavelog / Nextlog rejected uploads: %1$s</string>
+    <string name="log_sync_qrz_rejected">QRZ rejected uploads: %1$s</string>
+    <string name="log_sync_wrl_rejected">World Radio League rejected uploads: %1$s</string>
+    <!-- Toast after a logged QSO (or a background catch-up) is refused by the logbook server -->
+    <string name="cloudlog_upload_rejected">Cloudlog / Wavelog rejected the QSO: %1$s</string>
+    <string name="cloudlog_hint_station_id">Check the Station ID in Settings › Logging › Cloudlog / Wavelog: tap Test Connection and pick it from the list. It must belong to the same user that created the API key.</string>
+    <string name="cloudlog_hint_api_key">Check the API key in Settings › Logging › Cloudlog / Wavelog. It must be enabled and have read/write rights.</string>
     <string name="log_cd_import_qsos">Import ADIF log</string>
     <string name="log_import_title_importing">IMPORTING ADIF LOG…</string>
     <string name="log_import_title_complete">IMPORT COMPLETE</string>
@@ -997,6 +1006,8 @@
     <string name="settings_loading_stations">Loading stations...</string>
     <string name="settings_station_id">Station ID</string>
     <string name="settings_station_id_hint">e.g. 1</string>
+    <string name="settings_station_id_missing">No Station ID entered. Every upload will be rejected without one.</string>
+    <string name="settings_station_id_not_on_server">Station ID %1$s isn\'t in the list the server returned for this API key (Wavelog may list only the active logbook\'s stations). If uploads are rejected, pick one from the list.</string>
     <string name="settings_select_a_station">Select a station</string>
     <string name="settings_enter_manually">Enter manually</string>
     <string name="settings_choose_from_server">Choose from server</string>

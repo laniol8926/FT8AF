@@ -11,6 +11,8 @@ import org.json.JSONStringer;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserFactory;
 
+import radio.ks3ckc.ft8af.sync.CloudlogFailureHint;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -311,10 +313,15 @@ public class ThirdPartyService {
                 , comment));
         return logStr.toString();
     }
-    public static boolean UploadToCloudLog(QSLRecord qslRecord){
+    /**
+     * Uploads one logged QSO to Cloudlog / Wavelog / Nextlog, recording why it failed into
+     * {@code failureOut} so the post-QSO path can toast the server's reason instead of
+     * failing silently.
+     */
+    public static boolean UploadToCloudLog(QSLRecord qslRecord, StringBuilder failureOut){
         // Convert to ADIF format
         String logStr = QSLRecordToADIF(qslRecord,ServiceType.Cloudlog);
-        return uploadAdifToCloudlog(logStr);
+        return uploadAdifToCloudlog(logStr, failureOut);
     }
 
     /**
@@ -345,6 +352,13 @@ public class ThirdPartyService {
             // HttpURLConnection won't follow on a POST.
             String clRes = cloudlogPost(base, "api/qso", result, failureOut);
             Log.d(TAG, "Cloudlog upload " + (clRes != null ? "succeeded" : "failed"));
+            if (clRes == null) {
+                // The station id is the one request field the server's reason can point
+                // at ("station id does not belong to the API key owner") and the one thing
+                // the POST log line above doesn't show. Not a secret, so log it plainly.
+                GeneralVariables.fileLog("Cloudlog: upload rejected with station_profile_id="
+                        + describeStationId(GeneralVariables.getCloudlogStationID()));
+            }
             return clRes != null;
         }catch (Exception k){
             Log.d(TAG, "Cloudlog upload error: " + k.getClass().getSimpleName());
@@ -639,6 +653,14 @@ public class ThirdPartyService {
         return 0;
     }
 
+    /** One Cloudlog ADIF upload; a seam so the catch-up loop is testable without a server. */
+    interface CloudlogUploader {
+        boolean upload(String adif, StringBuilder failureOut);
+    }
+
+    /** The uploader {@link #syncAllQSOs} uses. Tests swap it; production never does. */
+    static CloudlogUploader cloudlogUploader = ThirdPartyService::uploadAdifToCloudlog;
+
     /**
      * Re-upload every QSO in QSLTable to whichever third-party services the user has
      * enabled. Services dedupe by callsign+date+time+mode so repeated calls are safe.
@@ -676,20 +698,27 @@ public class ThirdPartyService {
             // key, no logbook, daily quota, offline): a 113-row backlog must not turn into 113
             // identical rejections against a rate-limited API.
             boolean wrlLive = wrl;
+            // Same for Cloudlog: a wrong Station ID or API key refuses every row identically.
+            boolean clLive = cl;
             int done = 0;
             while (cursor.moveToNext()) {
                 long rowId = idCol >= 0 ? cursor.getLong(idCol) : -1;
                 boolean alreadyCl = syncedClCol >= 0 && cursor.getInt(syncedClCol) == 1;
                 boolean alreadyQrz = syncedQrzCol >= 0 && cursor.getInt(syncedQrzCol) == 1;
                 boolean alreadyWrl = syncedWrlCol >= 0 && cursor.getInt(syncedWrlCol) == 1;
-                if (cl && !alreadyCl) {
+                if (clLive && !alreadyCl) {
                     String adif = buildAdifFromCursor(cursor, ServiceType.Cloudlog);
                     StringBuilder why = cloudlogError == null ? new StringBuilder() : null;
-                    if (uploadAdifToCloudlog(adif, why)) {
+                    if (cloudlogUploader.upload(adif, why)) {
                         cloudlogOk++;
                         if (rowId >= 0) markRowSynced(db, rowId, "synced_cloudlog");
                     } else if (why != null && why.length() > 0) {
                         cloudlogError = why.toString();
+                        if (CloudlogFailureHint.cloudlogFailureStopsBatch(cloudlogError)) {
+                            clLive = false;
+                            GeneralVariables.fileLog("Cloudlog: catch-up sync stopped after a "
+                                    + "Station ID / API key rejection; remaining rows stay queued");
+                        }
                     }
                 }
                 if (qrz && !alreadyQrz) {
@@ -947,6 +976,12 @@ public class ThirdPartyService {
         Log.d(TAG, "POST " + redactUrlApiKey(url) + " exceeded redirect limit");
         appendFailure(failureOut, "exceeded redirect limit");
         return null;
+    }
+
+    /** The configured station id for a log line: "(blank)" when unset, since "" vanishes. */
+    static String describeStationId(String stationId) {
+        if (stationId == null || stationId.trim().isEmpty()) return "(blank)";
+        return stationId.trim();
     }
 
     private static void appendFailure(StringBuilder failureOut, String reason) {

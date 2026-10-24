@@ -99,6 +99,7 @@
     <string name="qsopanel_qsoing_with">%1$s と QSO 中</string>
     <string name="qsopanel_waiting_for">%1$s を待機中</string>
     <string name="qsopanel_tap_to_view">タップして表示 ↗</string>
+    <string name="qsopanel_sent_report">送信 %1$s</string>
     <string name="qsopanel_tx_message">TX: %1$s</string>
     <string name="qsopanel_waiting_messages">メッセージを待機中...</string>
 

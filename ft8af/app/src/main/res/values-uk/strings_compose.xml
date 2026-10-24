@@ -128,6 +128,7 @@
     <string name="qsopanel_qsoing_with">QSO з %1$s</string>
     <string name="qsopanel_waiting_for">Очікування %1$s</string>
     <string name="qsopanel_tap_to_view">торкніться, щоб переглянути ↗</string>
+    <string name="qsopanel_sent_report">надіс. %1$s</string>
     <string name="qsopanel_tx_message">TX: %1$s</string>
     <string name="qsopanel_waiting_messages">Очікування повідомлень...</string>
     <string name="qsopanel_log_action">ЖУРНАЛ</string>

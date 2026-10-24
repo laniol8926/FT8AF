@@ -96,6 +96,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import radio.ks3ckc.ft8af.sync.cloudlogHintResId
+import radio.ks3ckc.ft8af.sync.cloudlogServerReason
 import radio.ks3ckc.ft8af.theme.*
 import radio.ks3ckc.ft8af.ui.components.AnimatedCounter
 import radio.ks3ckc.ft8af.ui.components.EmptyStateWaves
@@ -441,6 +443,9 @@ fun LogbookScreen(mainViewModel: MainViewModel) {
                                     cloudlogOk = result?.cloudlogOk ?: 0,
                                     qrzOk = result?.qrzOk ?: 0,
                                     wrlOk = result?.wrlOk ?: 0,
+                                    cloudlogError = result?.cloudlogError,
+                                    qrzError = result?.qrzError,
+                                    wrlError = result?.wrlError,
                                 )
                                 // Re-query QSLTable so the row chips pick up the
                                 // newly-set synced_cloudlog / synced_qrz / synced_wrl flags.
@@ -590,6 +595,10 @@ private data class SyncDialogState(
     val wrlAttempted: Boolean,
     val finished: Boolean,
     val noServicesEnabled: Boolean,
+    /** Why the first failed upload failed, per service (null = none failed). Shown when finished. */
+    val cloudlogError: String? = null,
+    val qrzError: String? = null,
+    val wrlError: String? = null,
 )
 
 @Composable
@@ -2476,6 +2485,13 @@ private fun CatchUpSyncDialog(
                         fontSize = 12.sp,
                     )
                 }
+                // "0 accepted" with no reason is what sends people to Discord. Show the
+                // server's own explanation, plus which setting to look at when we know.
+                if (state.finished) {
+                    SyncRejection(R.string.log_sync_cloudlog_rejected, state.cloudlogError, hint = true)
+                    SyncRejection(R.string.log_sync_qrz_rejected, state.qrzError, hint = false)
+                    SyncRejection(R.string.log_sync_wrl_rejected, state.wrlError, hint = false)
+                }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -2499,6 +2515,37 @@ private fun CatchUpSyncDialog(
                 )
             }
         }
+    }
+}
+
+/**
+ * One rejected-upload line in the catch-up dialog: the service's reason in red, and for
+ * Cloudlog-family servers the fix-it hint (Station ID / API key) underneath. Renders
+ * nothing when the service had no failure.
+ */
+@Composable
+private fun SyncRejection(
+    @StringRes labelRes: Int,
+    failure: String?,
+    hint: Boolean,
+) {
+    if (failure.isNullOrBlank()) return
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        text = stringResource(labelRes, cloudlogServerReason(failure)),
+        color = StatusBad,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+    )
+    val hintRes = if (hint) cloudlogHintResId(failure) else null
+    if (hintRes != null) {
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = stringResource(hintRes),
+            color = TextMuted,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+        )
     }
 }
 

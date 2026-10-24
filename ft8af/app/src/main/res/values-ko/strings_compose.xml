@@ -139,6 +139,7 @@
     <string name="qsopanel_qsoing_with">%1$s와 QSO 중</string>
     <string name="qsopanel_waiting_for">%1$s 대기 중</string>
     <string name="qsopanel_tap_to_view">탭하여 보기 ↗</string>
+    <string name="qsopanel_sent_report">보냄 %1$s</string>
     <string name="qsopanel_tx_message">TX: %1$s</string>
     <string name="qsopanel_waiting_messages">메시지 대기 중...</string>
     <string name="qsopanel_log_action">기록</string>

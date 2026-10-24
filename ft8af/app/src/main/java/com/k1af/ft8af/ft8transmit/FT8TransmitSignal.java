@@ -2425,6 +2425,15 @@ public class FT8TransmitSignal {
         return toCallsign != null ? toCallsign.callsign : null;
     }
 
+    /**
+     * The signal report recorded as sent to the current target (set when a
+     * "-NN" / "R-NN" message is built), or -100 when none has gone out yet.
+     * Raw value: SNR_UNKNOWN is left as-is. For UI display see sentReportOrNull.
+     */
+    public int getSentTargetReport() {
+        return sentTargetReport;
+    }
+
     public boolean isSynFrequency() {
         return GeneralVariables.synFrequency;
     }

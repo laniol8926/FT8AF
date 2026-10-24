@@ -56,6 +56,30 @@ internal class QsoSyncGate(private val minIntervalMs: Long = 15_000L) {
 }
 
 /**
+ * Keeps the background sync from toasting the same Cloudlog rejection on every run. A
+ * rejection is shown when its server reason differs from the last one shown; a run with no
+ * server rejection re-arms it, so a problem that comes back after being fixed is reported
+ * again. Transport failures (no signal) never toast and don't change the state. Pure, so it
+ * is unit-testable; synchronized because runs start from several threads.
+ */
+internal class CloudlogRejectionDedupe {
+    private var lastShown: String? = null
+
+    @Synchronized
+    fun shouldShow(failure: String?): Boolean {
+        if (failure.isNullOrBlank()) {
+            lastShown = null
+            return false
+        }
+        if (!isCloudlogServerRejection(failure)) return false
+        val key = cloudlogServerReason(failure)
+        if (key == lastShown) return false
+        lastShown = key
+        return true
+    }
+}
+
+/**
  * Render a finished sync run as the one line that goes into `debug.log`.
  *
  * Always reports the counts; appends each service's failure reason when it had one. The
@@ -89,6 +113,7 @@ internal fun summarize(result: ThirdPartyService.SyncResult): String {
 class QsoAutoSync(private val appContext: Context) {
 
     private val gate = QsoSyncGate()
+    private val rejectionDedupe = CloudlogRejectionDedupe()
     private val cm =
         appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
@@ -170,6 +195,13 @@ class QsoAutoSync(private val appContext: Context) {
                 log("start ($reason): $pending pending")
                 val result = ThirdPartyService.syncAllQSOs(db, null)
                 log("done ($reason): " + summarize(result))
+                // The operator never pressed anything for this run, so the only way they
+                // learn their logbook server is rejecting QSOs is if we say so here. Once
+                // per distinct reason: every app start / reconnect re-runs this sync, and
+                // the same rejection again is just nagging.
+                if (rejectionDedupe.shouldShow(result.cloudlogError)) {
+                    showCloudlogRejectionToast(result.cloudlogError)
+                }
             } catch (e: Exception) {
                 log("error ($reason): ${e.javaClass.simpleName} ${e.message}")
             } finally {

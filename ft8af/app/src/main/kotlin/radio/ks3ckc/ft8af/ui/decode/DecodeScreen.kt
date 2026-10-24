@@ -47,6 +47,7 @@ import radio.ks3ckc.ft8af.theme.*
 import radio.ks3ckc.ft8af.ui.components.EmptyStateWaves
 import radio.ks3ckc.ft8af.ui.components.FilterChips
 import radio.ks3ckc.ft8af.ui.components.TopBar
+import radio.ks3ckc.ft8af.ui.components.latestDecodeFrom
 import radio.ks3ckc.ft8af.ui.components.TopBarSubtitle
 
 /**
@@ -142,11 +143,10 @@ fun DecodeScreen(
     }
 
     // The message bound to the current sheet (latest decode from that
-    // callsign). Recomputes when the decode list updates.
+    // callsign). Recomputes when the decode list updates. Same lookup as the
+    // QSO banner, so the sheet's Signal and the banner's dB agree (#953).
     val selectedMessage: Ft8Message? = remember(sheetCallsign, messageList, messageList?.size) {
-        val cs = sheetCallsign ?: return@remember null
-        (messageList ?: arrayListOf())
-            .lastOrNull { it.callsignFrom.equals(cs, ignoreCase = true) }
+        latestDecodeFrom(messageList, sheetCallsign)
     }
     val sheetVisible = sheetCallsign != null && !sheetMinimized && selectedMessage != null
 

@@ -139,6 +139,7 @@
     <string name="qsopanel_qsoing_with">QSO s %1$s</string>
     <string name="qsopanel_waiting_for">Čekání na %1$s</string>
     <string name="qsopanel_tap_to_view">klepnutím zobrazit ↗</string>
+    <string name="qsopanel_sent_report">odesláno %1$s</string>
     <string name="qsopanel_tx_message">TX: %1$s</string>
     <string name="qsopanel_waiting_messages">Čekání na zprávy...</string>
     <string name="qsopanel_log_action">ZAPSAT</string>

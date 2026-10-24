@@ -99,6 +99,7 @@
     <string name="qsopanel_qsoing_with">QSO con %1$s</string>
     <string name="qsopanel_waiting_for">Esperando a %1$s</string>
     <string name="qsopanel_tap_to_view">toca para ver ↗</string>
+    <string name="qsopanel_sent_report">enviado %1$s</string>
     <string name="qsopanel_tx_message">TX: %1$s</string>
     <string name="qsopanel_waiting_messages">Esperando mensajes...</string>
 

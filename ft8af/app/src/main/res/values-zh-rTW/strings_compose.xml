@@ -99,6 +99,7 @@
     <string name="qsopanel_qsoing_with">正在與 %1$s 通聯</string>
     <string name="qsopanel_waiting_for">等待 %1$s 中</string>
     <string name="qsopanel_tap_to_view">點按以檢視 ↗</string>
+    <string name="qsopanel_sent_report">已發 %1$s</string>
     <string name="qsopanel_tx_message">TX：%1$s</string>
     <string name="qsopanel_waiting_messages">等待訊息中…</string>
 
