@@ -376,7 +376,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     // for the full "7.074 MHz · 40m · FT8"). Band and mode are also the two
     // things tapping the title actually lets the operator change; frequency
     // stays visible in the drawer/TxStrip row and Settings.
-    val decodeTitleLabel = "$bandName · $modeName"
+    val decodeTitleLabel = if (bandName.isNotBlank()) "$bandName · $modeName" else modeName
     val huntOptionLabel = if (huntEnabled) {
         stringResource(
             when (huntPriority) {
