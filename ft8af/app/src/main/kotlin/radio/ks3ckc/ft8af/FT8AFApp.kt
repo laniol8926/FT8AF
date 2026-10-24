@@ -534,7 +534,11 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                     .fillMaxWidth(),
             ) {
                 when (activeTab) {
-                    FT8AFTab.DECODE -> DecodeScreen(mainViewModel)
+                    FT8AFTab.DECODE -> DecodeScreen(
+                        mainViewModel,
+                        bandModeLabel = bandModeLabel,
+                        onOpenBandMode = onOpenBandModeAction,
+                    )
                     FT8AFTab.MAP -> MapScreen(mainViewModel)
                     FT8AFTab.WATERFALL -> WaterfallScreen(mainViewModel)
                     FT8AFTab.POTA -> PotaScreen(mainViewModel)
