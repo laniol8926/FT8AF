@@ -114,8 +114,12 @@ class FrequencyPickerSheetLayoutTest {
         val lastIndex = 9 * 10 + 3
         val lastLabel = formatMhz(30_000_000L + 3_000L)
         var picked: Int? = null
+        // Inside the real sheet, as on screen: the sheet does the scrolling. Rendering the content
+        // alone once hid a nested-scroll crash (the content scrolled inside the scrolling sheet).
         composeRule.setContent {
-            FrequencyPickerContent(groups = groups, currentBandIndex = 0, onSelect = { picked = it })
+            FT8AFBottomSheet(visible = true, onDismiss = {}) {
+                FrequencyPickerContent(groups = groups, currentBandIndex = 0, onSelect = { picked = it })
+            }
         }
 
         composeRule.onNodeWithText(context.getString(R.string.freq_show_alternates))
