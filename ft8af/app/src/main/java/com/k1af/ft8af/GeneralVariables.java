@@ -1456,6 +1456,51 @@ public class GeneralVariables {
         return b + "|" + m + "|" + s;
     }
 
+    /** The 50 US states plus DC (USPS codes), for validating a logged ADIF STATE. */
+    private static final java.util.Set<String> US_STATE_CODES = new HashSet<>(java.util.Arrays.asList(
+            "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN",
+            "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH",
+            "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT",
+            "VT", "VA", "WA", "WV", "WI", "WY"));
+
+    /** US amateur callsign prefixes: K, N, W, AA-AL (incl. KH/KL/KP). */
+    private static final java.util.regex.Pattern US_CALL =
+            java.util.regex.Pattern.compile("^(?:[KNW]|A[A-L])[0-9A-Z]*[0-9][A-Z]+$");
+
+    /**
+     * The US state a logged QSO counts for. The logged ADIF STATE wins when it is a US state
+     * code and the QSO is with a US station (its grid is a US grid, or with no grid, its callsign
+     * has a US prefix) — STATE also holds other countries' subdivisions, e.g. Western
+     * Australia's "WA", which must not count as Washington. Otherwise the state is derived from
+     * the grid ({@link #stateForGrid}), as before. The logged state also covers the states the
+     * grid table can't tell apart (DE, RI share grid squares with their neighbours).
+     *
+     * @return USPS code, or null when neither source gives a US state
+     */
+    public static String workedStateFor(String loggedState, String grid, String callsign) {
+        String fromGrid = stateForGrid(grid);
+        if (loggedState != null) {
+            String s = loggedState.trim().toUpperCase();
+            boolean usStation = fromGrid != null
+                    || ((grid == null || grid.trim().length() < 4) && callsign != null
+                        && US_CALL.matcher(baseCallsign(callsign)).matches());
+            if (US_STATE_CODES.contains(s) && usStation) return s;
+        }
+        return fromGrid;
+    }
+
+    /** The home callsign part of a portable/prefixed call ("W1AW/4" -> "W1AW", "KH6/W1AW" -> "W1AW"). */
+    private static String baseCallsign(String callsign) {
+        String c = callsign.trim().toUpperCase().replace("<", "").replace(">", "");
+        String best = "";
+        for (String part : c.split("/")) {
+            // A callsign-shaped part has a digit and ends in a letter; the longest one is the
+            // home call (prefixes like "KH6" and suffixes like "4"/"P"/"QRP" are shorter).
+            if (part.matches(".*[0-9].*[A-Z]") && part.length() > best.length()) best = part;
+        }
+        return best.isEmpty() ? c : best;
+    }
+
     /** Record a US state as worked on [band] in [mode] (see {@link #stateBandModeKey}). */
     public static void addStateWorked(String band, String mode, String state) {
         String key = stateBandModeKey(band, mode, state);

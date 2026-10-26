@@ -79,8 +79,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * {@code doInsertQSLData} threw "table QSLTable has no column named my_lat" on every
      * logged QSO for anyone upgrading rather than installing clean.
      * v21 adds {@code QSLTable.synced_wrl} (World Radio League upload state, issue #800).
+     * v22 adds {@code QSLTable.state} (the worked station's ADIF STATE, from imports).
      */
-    static final int SCHEMA_VERSION = 21;
+    static final int SCHEMA_VERSION = 22;
 
     public static synchronized DatabaseOpr getInstance(@Nullable Context context, @Nullable String databaseName) {
         if (instance == null) {
@@ -295,6 +296,10 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     , "sig TEXT");
             alterTable(sqLiteDatabase, "QSLTable", "sig_info"
                     , "sig_info TEXT");
+            // Worked station's ADIF STATE as logged (imports). Used for worked US states in
+            // preference to the grid-derived state; empty for in-app QSOs.
+            alterTable(sqLiteDatabase, "QSLTable", "state"
+                    , "state TEXT");
 
         } else {
             sqLiteDatabase.execSQL("CREATE TABLE QSLTable (\n" +
@@ -324,7 +329,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     "my_sig TEXT,\n" +//POTA: activator's program ("POTA")
                     "my_sig_info TEXT,\n" +//POTA: activator's park ref
                     "sig TEXT,\n" +//POTA: worked station's program
-                    "sig_info TEXT)");//POTA: worked station's park ref
+                    "sig_info TEXT,\n" +//POTA: worked station's park ref
+                    "state TEXT)");//Worked station's ADIF STATE (imports)
         }
 
 
@@ -1388,19 +1394,26 @@ public class DatabaseOpr extends SQLiteOpenHelper {
             public void run() {
                 Log.d(TAG, "run: starting zone import...");
 
-                // Worked US states, per band and mode: derive each logged QSO's state from its
-                // grid square, using the same grid->state table the decode/display paths use.
-                // Done first and on its own: it needs only the logbook, not the callsign
-                // database, so "new state" is right within seconds instead of after the slow
-                // callsign pass below (~2 minutes on a 54k-QSO log).
+                // Worked US states, per band and mode: each logged QSO's state is its logged
+                // ADIF STATE when that's a US state on a US station, else derived from its grid
+                // square (GeneralVariables.workedStateFor). Done first and on its own: it needs
+                // only the logbook, not the callsign database, so "new state" is right within
+                // seconds instead of after the slow callsign pass below (~2 minutes on a
+                // 54k-QSO log). The callsign is only needed (and selected) for gridless rows.
                 Cursor gridCursor = db.rawQuery(
-                        "SELECT DISTINCT band, mode, substr(gridsquare, 1, 4) AS grid4 FROM QSLTable "
-                                + "WHERE gridsquare IS NOT NULL AND length(gridsquare) >= 4",
+                        "SELECT DISTINCT band, mode, upper(trim(coalesce(state, ''))) AS st, "
+                                + "substr(coalesce(gridsquare, ''), 1, 4) AS grid4, "
+                                + "CASE WHEN length(coalesce(gridsquare, '')) < 4 THEN call ELSE '' END AS c "
+                                + "FROM QSLTable WHERE length(coalesce(gridsquare, '')) >= 4 "
+                                + "OR (state IS NOT NULL AND state <> '')",
                         null);
                 int stateCount = 0;
                 while (gridCursor.moveToNext()) {
-                    String state = GeneralVariables.stateForGrid(
-                            gridCursor.getString(gridCursor.getColumnIndex("grid4")));
+                    String logged = gridCursor.getString(gridCursor.getColumnIndex("st"));
+                    String state = GeneralVariables.workedStateFor(
+                            logged == null || logged.isEmpty() ? null : logged,
+                            gridCursor.getString(gridCursor.getColumnIndex("grid4")),
+                            gridCursor.getString(gridCursor.getColumnIndex("c")));
                     if (state == null) continue;
                     GeneralVariables.addState(state);
                     GeneralVariables.addStateWorked(
@@ -1590,8 +1603,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         if (!checkIsQSL(record)) {//If log data doesn't exist, add it
             querySQL = "INSERT INTO QSLTable(call, isQSL,isLotW_import,isLotW_QSL,gridsquare, mode, rst_sent, rst_rcvd, qso_date, " +
                     "time_on, qso_date_off, time_off, band, freq, station_callsign, my_gridsquare," +
-                    "comment,my_sig,my_sig_info,sig,sig_info)" +
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                    "comment,my_sig,my_sig_info,sig,sig_info,state)" +
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
             db.execSQL(querySQL, new String[]{record.getToCallsign()
                     , String.valueOf(record.isQSL ? 1 : 0)
@@ -1614,7 +1627,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     , record.getMySig()
                     , record.getMySigInfo()
                     , record.getSig()
-                    , record.getSigInfo()});
+                    , record.getSigInfo()
+                    , record.getState()});
             // If this QSO was logged during an active POTA activation, refresh its
             // qso_count. This is a dupe-aware recount, not a blind increment: POTA
             // doesn't credit a repeat contact with the same station on the same band.
@@ -1662,6 +1676,17 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 db.execSQL("UPDATE  QSLTable  SET isLotW_QSL=? " +
                                 " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)"
                         , new Object[]{1, record.getToCallsign()
+                                , record.getQso_date()
+                                , record.getTime_on()
+                                , record.getMode()});
+            }
+            // Re-importing a log fills in the logged STATE on rows that don't have one yet
+            // (e.g. QSOs imported before the state column existed).
+            if (record.getState() != null) {
+                db.execSQL("UPDATE  QSLTable  SET state=? " +
+                                " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)" +
+                                " and (state IS NULL OR state='')"
+                        , new Object[]{record.getState(), record.getToCallsign()
                                 , record.getQso_date()
                                 , record.getTime_on()
                                 , record.getMode()});

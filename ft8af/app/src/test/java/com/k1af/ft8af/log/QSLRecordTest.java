@@ -21,6 +21,27 @@ import java.util.HashMap;
  */
 public class QSLRecordTest {
 
+    @Test
+    public void adifImport_readsTheLoggedState() {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("CALL", "W5ORC");
+        map.put("COMMENT", "imported");
+        map.put("MODE", "FT8");
+        map.put("STATE", " ar ");
+        assertThat(new QSLRecord(map).getState()).isEqualTo("AR");
+    }
+
+    @Test
+    public void adifImport_missingOrBlankStateIsNull() {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("CALL", "W1AW");
+        map.put("COMMENT", "imported");
+        map.put("MODE", "FT8");
+        assertThat(new QSLRecord(map).getState()).isNull();
+        map.put("STATE", "  ");
+        assertThat(new QSLRecord(map).getState()).isNull();
+    }
+
     private static final long EPOCH = 0L;            // 1970-01-01 00:00:00 UTC
     private static final long PLUS_15S = 15_000L;    // +15 s
 

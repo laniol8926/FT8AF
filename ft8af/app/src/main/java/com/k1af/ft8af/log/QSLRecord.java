@@ -48,6 +48,9 @@ public class QSLRecord {
     private String mySigInfo;
     private String sig;
     private String sigInfo;
+    // The worked station's ADIF STATE (US state / other countries' subdivision), as logged.
+    // Null when the log row has none; QSOs made in-app have none (FT8 only carries a grid).
+    private String state;
     public boolean isQSL = false;//Manual confirmation
     public boolean isLotW_import = false;//Whether imported from external data; requires database comparison to determine
     public boolean isLotW_QSL = false;//Whether confirmed via LoTW
@@ -255,6 +258,10 @@ public class QSLRecord {
         if (map.containsKey("MY_SIG_INFO")) mySigInfo = map.get("MY_SIG_INFO");
         if (map.containsKey("SIG")) sig = map.get("SIG");
         if (map.containsKey("SIG_INFO")) sigInfo = map.get("SIG_INFO");
+        if (map.containsKey("STATE")) {//Worked station's state/subdivision (LoTW, QRZ, most loggers)
+            String s = map.get("STATE");
+            state = s == null || s.trim().isEmpty() ? null : s.trim().toUpperCase();
+        }
     }
 
     /**
@@ -438,6 +445,11 @@ public class QSLRecord {
 
     public String getSigInfo() {
         return sigInfo;
+    }
+
+    /** The worked station's ADIF STATE as logged (upper-cased), or null. */
+    public String getState() {
+        return state;
     }
 
     public void setSigInfo(String sigInfo) {
