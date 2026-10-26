@@ -182,10 +182,10 @@ fun DecodeScreen(
     val timeGroupDividers = remember(collapsedMessages) {
         computeTimeGroupDividers(collapsedMessages)
     }
-    // Each divider's count is its own slot's decodes, taken from the filtered
-    // list before collapsing (see countDecodesPerSlot for why not the collapsed one).
-    val decodesPerSlot = remember(filteredMessages) {
-        countDecodesPerSlot(filteredMessages)
+    // Each divider's count is the number of rows drawn under it, so it always
+    // agrees with what the operator sees (see countRowsPerSlot).
+    val rowsPerSlot = remember(collapsedMessages) {
+        countRowsPerSlot(collapsedMessages)
     }
 
     // Track which station rows are new-or-just-updated since the previous render
@@ -248,7 +248,7 @@ fun DecodeScreen(
         stringResource(R.string.decode_utc_placeholder)
     }
     // The "N decoded" count sits here UNLESS sortMode is LAST_HEARD, where every
-    // time-group divider shows its own slot's count instead (countDecodesPerSlot)
+    // time-group divider shows its own slot's count instead (countRowsPerSlot)
     // -- those per-slot dividers only exist in that mode (showTimeGroupDividers).
     val subtitleText = if (showDecodedCountInSubtitle(sortMode)) {
         stringResource(R.string.decode_subtitle, utcString, decodedCount)
@@ -389,7 +389,7 @@ fun DecodeScreen(
                             TimeGroupDivider(
                                 utcTime = message.utcTime,
                                 compact = compactMode,
-                                decodedCount = decodesPerSlot[decodeSlotKey(message)],
+                                decodedCount = rowsPerSlot[decodeSlotKey(message)],
                             )
                         }
 
@@ -486,16 +486,17 @@ internal fun decodeSlotKey(message: Ft8Message): DecodeSlotKey {
 }
 
 /**
- * How many decodes each receive slot produced, for the count on that slot's
- * time-group divider. Pass the filtered list but NOT the one-row-per-station
- * collapsed one: collapsing keeps only a station's latest decode, so a station
- * heard in several slots would count only toward its newest, and older
- * dividers would undercount and keep shrinking as their stations reappeared.
- * Counting per slot this way gives every divider its own slot's number,
- * stable as newer slots arrive. It follows the active filter chip, the same as
- * the rows (hence "stations" in the divider text rather than raw decodes).
+ * How many rows sit under each receive slot's time-group divider, for the
+ * count on that divider. Pass the same collapsed (one-row-per-station) list
+ * the rows are drawn from, so the number always matches the lines shown.
+ *
+ * Counting the uncollapsed decodes instead overcounted (found on device): a
+ * station heard again in a later slot moves its row there but still counted
+ * toward the older slot, as did callsign-less decodes (dropped from the rows)
+ * and a station decoded twice in one slot. The trade-off, chosen by the user:
+ * an older slot's count drops as its stations reappear in newer slots.
  */
-internal fun countDecodesPerSlot(messages: List<Ft8Message>): Map<DecodeSlotKey, Int> =
+internal fun countRowsPerSlot(messages: List<Ft8Message>): Map<DecodeSlotKey, Int> =
     messages.groupingBy { decodeSlotKey(it) }.eachCount()
 
 @Composable

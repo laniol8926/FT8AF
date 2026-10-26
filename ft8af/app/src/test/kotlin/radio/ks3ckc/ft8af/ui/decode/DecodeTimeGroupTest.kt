@@ -117,7 +117,7 @@ class DecodeTimeGroupTest {
     // ---- per-slot decode counts (one on every divider) ----------------------
 
     @Test
-    fun countDecodesPerSlot_givesEverySlotItsOwnCount() {
+    fun countRowsPerSlot_givesEverySlotItsOwnCount() {
         val messages = listOf(
             msg(FT8Common.FT8_MODE, 30_000L),
             msg(FT8Common.FT8_MODE, 31_000L),
@@ -127,7 +127,7 @@ class DecodeTimeGroupTest {
             msg(FT8Common.FT8_MODE, 61_000L),
         )
 
-        val counts = countDecodesPerSlot(messages)
+        val counts = countRowsPerSlot(messages)
 
         assertThat(counts[decodeSlotKey(messages[0])]).isEqualTo(3)
         assertThat(counts[decodeSlotKey(messages[3])]).isEqualTo(1)
@@ -136,32 +136,46 @@ class DecodeTimeGroupTest {
     }
 
     @Test
-    fun countDecodesPerSlot_olderSlotKeepsItsCountWhenItsStationsReappear() {
-        // The real-device complaint: only the newest slot showed a count. Counting
-        // over the uncollapsed list means a station heard again in a later slot
-        // still counts toward the earlier one too, so that slot's number is stable.
-        val older = listOf(
-            msg(FT8Common.FT8_MODE, 15_000L),
-            msg(FT8Common.FT8_MODE, 16_000L),
+    fun countRowsPerSlot_matchesTheRowsDrawnUnderEachDivider() {
+        // The real-device bug: dividers counted every decode, but the rows are one
+        // per station at its latest decode. K1ABC heard again at 30s moved its row
+        // out of the 15s slot, and a callsign-less decode had no row at all, yet
+        // both still counted toward the 15s slot.
+        val decodes = listOf(
+            station("K1ABC", 15_000L),
+            station("K2DEF", 16_000L),
+            station(null, 17_000L),
+            station("K1ABC", 30_000L),
         )
-        val newer = listOf(msg(FT8Common.FT8_MODE, 30_000L))
+        val rows = collapseByStation(decodes, DecodeSortMode.LAST_HEARD)
+        val dividers = computeTimeGroupDividers(rows)
 
-        val before = countDecodesPerSlot(older)
-        val after = countDecodesPerSlot(older + newer)
+        val counts = countRowsPerSlot(rows)
 
-        assertThat(after[decodeSlotKey(older[0])]).isEqualTo(before[decodeSlotKey(older[0])])
-        assertThat(after[decodeSlotKey(older[0])]).isEqualTo(2)
-        assertThat(after[decodeSlotKey(newer[0])]).isEqualTo(1)
+        // Each divider's count is exactly the rows up to the next divider.
+        var i = 0
+        while (i < rows.size) {
+            assertThat(dividers[i]).isTrue()
+            var end = i + 1
+            while (end < rows.size && !dividers[end]) end++
+            assertThat(counts[decodeSlotKey(rows[i])]).isEqualTo(end - i)
+            i = end
+        }
+        assertThat(counts[decodeSlotKey(decodes[0])]).isEqualTo(1)
+        assertThat(counts[decodeSlotKey(decodes[3])]).isEqualTo(1)
     }
 
+    private fun station(call: String?, utcMs: Long) =
+        msg(FT8Common.FT8_MODE, utcMs).apply { callsignFrom = call }
+
     @Test
-    fun countDecodesPerSlot_keysByModeLikeTheDividers() {
+    fun countRowsPerSlot_keysByModeLikeTheDividers() {
         // FT8 utc=15000 and FT4 utc=7500 share slot index 1 but are different
         // slots (different lengths), matching modeChange_forcesDividerEvenWhenSlotIndexCoincides.
         val ft8 = msg(FT8Common.FT8_MODE, 15_000L)
         val ft4 = msg(FT8Common.FT4_MODE, 7_500L)
 
-        val counts = countDecodesPerSlot(listOf(ft8, ft4))
+        val counts = countRowsPerSlot(listOf(ft8, ft4))
 
         assertThat(decodeSlotKey(ft8)).isNotEqualTo(decodeSlotKey(ft4))
         assertThat(counts[decodeSlotKey(ft8)]).isEqualTo(1)
@@ -169,7 +183,7 @@ class DecodeTimeGroupTest {
     }
 
     @Test
-    fun countDecodesPerSlot_emptyListHasNoCounts() {
-        assertThat(countDecodesPerSlot(emptyList())).isEmpty()
+    fun countRowsPerSlot_emptyListHasNoCounts() {
+        assertThat(countRowsPerSlot(emptyList())).isEmpty()
     }
 }

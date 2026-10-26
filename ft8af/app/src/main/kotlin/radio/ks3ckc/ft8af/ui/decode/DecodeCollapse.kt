@@ -211,7 +211,7 @@ internal fun autoScrollTargetIndex(
  * Whether the "N decoded" count belongs in the Decode screen's top-bar
  * subtitle for [sortMode]. False only for [DecodeSortMode.LAST_HEARD],
  * where every time-group divider carries its own slot's count instead (see
- * `countDecodesPerSlot`) -- the per-slot time dividers only exist in that
+ * `countRowsPerSlot`) -- the per-slot time dividers only exist in that
  * mode (see [showTimeGroupDividers]).
  */
 internal fun showDecodedCountInSubtitle(sortMode: DecodeSortMode): Boolean =
