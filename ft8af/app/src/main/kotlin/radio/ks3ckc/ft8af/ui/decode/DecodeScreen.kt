@@ -44,6 +44,7 @@ import com.k1af.ft8af.ModeProfile
 import com.k1af.ft8af.timer.UtcTimer
 import com.k1af.ft8af.ui.WaterfallTimestampGate
 import radio.ks3ckc.ft8af.theme.*
+import radio.ks3ckc.ft8af.ui.components.ClickableTopBarTitle
 import radio.ks3ckc.ft8af.ui.components.EmptyStateWaves
 import radio.ks3ckc.ft8af.ui.components.FilterChips
 import radio.ks3ckc.ft8af.ui.components.TopBar
@@ -58,6 +59,8 @@ import radio.ks3ckc.ft8af.ui.components.TopBarSubtitle
 @Composable
 fun DecodeScreen(
     mainViewModel: MainViewModel,
+    bandModeLabel: String,
+    onOpenBandMode: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // Observe LiveData
@@ -179,6 +182,11 @@ fun DecodeScreen(
     val timeGroupDividers = remember(collapsedMessages) {
         computeTimeGroupDividers(collapsedMessages)
     }
+    // Each divider's count is the number of rows drawn under it, so it always
+    // agrees with what the operator sees (see countRowsPerSlot).
+    val rowsPerSlot = remember(collapsedMessages) {
+        countRowsPerSlot(collapsedMessages)
+    }
 
     // Track which station rows are new-or-just-updated since the previous render
     // (animated once). Keyed by normalized station + utcTime so a station
@@ -199,12 +207,14 @@ fun DecodeScreen(
     // where the newest station sits); the other sorts would yank the viewport.
     val listState = rememberLazyListState()
     var previousCount by remember { mutableIntStateOf(0) }
+    var previousSortMode by remember { mutableStateOf(sortMode) }
     LaunchedEffect(collapsedMessages.size, sortMode) {
-        val target = autoScrollTargetIndex(sortMode, collapsedMessages.size, previousCount)
+        val target = autoScrollTargetIndex(sortMode, previousSortMode, collapsedMessages.size, previousCount)
         if (target != null) {
             listState.animateScrollToItem(target)
         }
         previousCount = collapsedMessages.size
+        previousSortMode = sortMode
     }
 
     // A tapped Needed-DX notification asks us to pre-select that station: reset to the
@@ -237,6 +247,19 @@ fun DecodeScreen(
     } else {
         stringResource(R.string.decode_utc_placeholder)
     }
+    // The "N decoded" count sits here UNLESS sortMode is LAST_HEARD, where every
+    // time-group divider shows its own slot's count instead (countRowsPerSlot)
+    // -- those per-slot dividers only exist in that mode (showTimeGroupDividers).
+    val subtitleText = if (showDecodedCountInSubtitle(sortMode)) {
+        stringResource(R.string.decode_subtitle, utcString, decodedCount)
+    } else {
+        utcString
+    }
+    // Landscape has more width to spare and less height: the subtitle moves
+    // onto the title's own row (next to the band/mode label) instead of
+    // sitting on a second line below it.
+    val isLandscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -247,10 +270,21 @@ fun DecodeScreen(
             // Top bar
             TopBar(
                 title = stringResource(R.string.decode_title),
-                subtitle = {
-                    TopBarSubtitle(
-                        text = stringResource(R.string.decode_subtitle, utcString, decodedCount),
+                titleContent = {
+                    ClickableTopBarTitle(
+                        text = bandModeLabel,
+                        onClick = onOpenBandMode,
+                        trailing = if (isLandscape) {
+                            { TopBarSubtitle(text = subtitleText, modifier = Modifier.padding(start = 8.dp)) }
+                        } else {
+                            null
+                        },
                     )
+                },
+                subtitle = if (isLandscape) {
+                    null
+                } else {
+                    { TopBarSubtitle(text = subtitleText) }
                 },
                 actions = {
                     IconButton(
@@ -352,7 +386,11 @@ fun DecodeScreen(
                         // timeGroupDividers above over this same collapsed list, so
                         // index is always in bounds.
                         if (showTimeGroupDividers(sortMode) && timeGroupDividers[index]) {
-                            TimeGroupDivider(utcTime = message.utcTime, compact = compactMode)
+                            TimeGroupDivider(
+                                utcTime = message.utcTime,
+                                compact = compactMode,
+                                decodedCount = rowsPerSlot[decodeSlotKey(message)],
+                            )
                         }
 
                         // Target highlight: this row is from the station the
@@ -425,20 +463,44 @@ fun DecodeScreen(
  */
 internal fun computeTimeGroupDividers(messages: List<Ft8Message>): BooleanArray {
     val dividers = BooleanArray(messages.size)
-    var prevSlotMillis = -1L
-    var prevSlotIndex = 0L
+    var prevKey: DecodeSlotKey? = null
     for (i in messages.indices) {
-        val slotMillis = ModeProfile.fromId(messages[i].signalFormat).slotMillis.toLong()
-        val slotIndex = WaterfallTimestampGate.slotPeriod(messages[i].utcTime, slotMillis)
-        dividers[i] = i == 0 || slotMillis != prevSlotMillis || slotIndex != prevSlotIndex
-        prevSlotMillis = slotMillis
-        prevSlotIndex = slotIndex
+        val key = decodeSlotKey(messages[i])
+        dividers[i] = i == 0 || key != prevKey
+        prevKey = key
     }
     return dividers
 }
 
+/**
+ * The receive slot a decode belongs to: its mode's slot length paired with the
+ * slot index on that grid. Two decodes share a time group exactly when their
+ * keys are equal, so the divider grouping above and the per-slot counts below
+ * always agree on what "a slot" is.
+ */
+internal data class DecodeSlotKey(val slotMillis: Long, val slotIndex: Long)
+
+internal fun decodeSlotKey(message: Ft8Message): DecodeSlotKey {
+    val slotMillis = ModeProfile.fromId(message.signalFormat).slotMillis.toLong()
+    return DecodeSlotKey(slotMillis, WaterfallTimestampGate.slotPeriod(message.utcTime, slotMillis))
+}
+
+/**
+ * How many rows sit under each receive slot's time-group divider, for the
+ * count on that divider. Pass the same collapsed (one-row-per-station) list
+ * the rows are drawn from, so the number always matches the lines shown.
+ *
+ * Counting the uncollapsed decodes instead overcounted (found on device): a
+ * station heard again in a later slot moves its row there but still counted
+ * toward the older slot, as did callsign-less decodes (dropped from the rows)
+ * and a station decoded twice in one slot. The trade-off, chosen by the user:
+ * an older slot's count drops as its stations reappear in newer slots.
+ */
+internal fun countRowsPerSlot(messages: List<Ft8Message>): Map<DecodeSlotKey, Int> =
+    messages.groupingBy { decodeSlotKey(it) }.eachCount()
+
 @Composable
-private fun TimeGroupDivider(utcTime: Long, compact: Boolean = false) {
+private fun TimeGroupDivider(utcTime: Long, compact: Boolean = false, decodedCount: Int? = null) {
     val timeStr = remember(utcTime) { UtcTimer.getTimeHHMMSS(utcTime) }
     Row(
         modifier = Modifier
@@ -453,7 +515,11 @@ private fun TimeGroupDivider(utcTime: Long, compact: Boolean = false) {
                 .background(Border),
         )
         Text(
-            text = stringResource(R.string.decode_time_group_utc, timeStr),
+            text = if (decodedCount != null) {
+                stringResource(R.string.decode_time_group_utc_with_count, timeStr, decodedCount)
+            } else {
+                stringResource(R.string.decode_time_group_utc, timeStr)
+            },
             color = TextFaint,
             fontSize = 9.sp,
             fontWeight = FontWeight.SemiBold,

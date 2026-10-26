@@ -113,4 +113,77 @@ class DecodeTimeGroupTest {
 
         assertThat(result.toList()).containsExactly(true, true).inOrder()
     }
+
+    // ---- per-slot decode counts (one on every divider) ----------------------
+
+    @Test
+    fun countRowsPerSlot_givesEverySlotItsOwnCount() {
+        val messages = listOf(
+            msg(FT8Common.FT8_MODE, 30_000L),
+            msg(FT8Common.FT8_MODE, 31_000L),
+            msg(FT8Common.FT8_MODE, 32_000L),
+            msg(FT8Common.FT8_MODE, 45_000L),
+            msg(FT8Common.FT8_MODE, 60_000L),
+            msg(FT8Common.FT8_MODE, 61_000L),
+        )
+
+        val counts = countRowsPerSlot(messages)
+
+        assertThat(counts[decodeSlotKey(messages[0])]).isEqualTo(3)
+        assertThat(counts[decodeSlotKey(messages[3])]).isEqualTo(1)
+        assertThat(counts[decodeSlotKey(messages[4])]).isEqualTo(2)
+        assertThat(counts).hasSize(3)
+    }
+
+    @Test
+    fun countRowsPerSlot_matchesTheRowsDrawnUnderEachDivider() {
+        // The real-device bug: dividers counted every decode, but the rows are one
+        // per station at its latest decode. K1ABC heard again at 30s moved its row
+        // out of the 15s slot, and a callsign-less decode had no row at all, yet
+        // both still counted toward the 15s slot.
+        val decodes = listOf(
+            station("K1ABC", 15_000L),
+            station("K2DEF", 16_000L),
+            station(null, 17_000L),
+            station("K1ABC", 30_000L),
+        )
+        val rows = collapseByStation(decodes, DecodeSortMode.LAST_HEARD)
+        val dividers = computeTimeGroupDividers(rows)
+
+        val counts = countRowsPerSlot(rows)
+
+        // Each divider's count is exactly the rows up to the next divider.
+        var i = 0
+        while (i < rows.size) {
+            assertThat(dividers[i]).isTrue()
+            var end = i + 1
+            while (end < rows.size && !dividers[end]) end++
+            assertThat(counts[decodeSlotKey(rows[i])]).isEqualTo(end - i)
+            i = end
+        }
+        assertThat(counts[decodeSlotKey(decodes[0])]).isEqualTo(1)
+        assertThat(counts[decodeSlotKey(decodes[3])]).isEqualTo(1)
+    }
+
+    private fun station(call: String?, utcMs: Long) =
+        msg(FT8Common.FT8_MODE, utcMs).apply { callsignFrom = call }
+
+    @Test
+    fun countRowsPerSlot_keysByModeLikeTheDividers() {
+        // FT8 utc=15000 and FT4 utc=7500 share slot index 1 but are different
+        // slots (different lengths), matching modeChange_forcesDividerEvenWhenSlotIndexCoincides.
+        val ft8 = msg(FT8Common.FT8_MODE, 15_000L)
+        val ft4 = msg(FT8Common.FT4_MODE, 7_500L)
+
+        val counts = countRowsPerSlot(listOf(ft8, ft4))
+
+        assertThat(decodeSlotKey(ft8)).isNotEqualTo(decodeSlotKey(ft4))
+        assertThat(counts[decodeSlotKey(ft8)]).isEqualTo(1)
+        assertThat(counts[decodeSlotKey(ft4)]).isEqualTo(1)
+    }
+
+    @Test
+    fun countRowsPerSlot_emptyListHasNoCounts() {
+        assertThat(countRowsPerSlot(emptyList())).isEmpty()
+    }
 }
