@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -93,6 +94,90 @@ internal fun txStripActionState(isActivated: Boolean, huntEnabled: Boolean) = Tx
  */
 internal fun tuneChipLabel(label: String, isTuning: Boolean, remainingSec: Int): String =
     if (isTuning) "$label ${remainingSec.coerceAtLeast(0)}s" else label
+
+/**
+ * Whether the TUNE button can be pressed: always while tuning (to stop it), otherwise only when
+ * no CQ/QSO is running and nothing is transmitting. Shared by the drawer's TUNE and the landscape
+ * title row's [CompactTuneButton] so the two can't drift.
+ */
+internal fun tuneButtonEnabled(isTuning: Boolean, isActivated: Boolean, isTransmitting: Boolean): Boolean =
+    isTuning || (!isActivated && !isTransmitting)
+
+/**
+ * TUNE for the Decode screen's top row in landscape, beside the Radio linked chip: the drawer's
+ * TUNE button at the title row's button height, with the same label ("Tune 7s" while the carrier
+ * is up), toggle and enable rule ([tuneButtonEnabled]).
+ */
+@Composable
+internal fun CompactTuneButton(
+    isTuning: Boolean,
+    isActivated: Boolean,
+    isTransmitting: Boolean,
+    tuneRemainingSec: Int,
+    onToggleTune: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    SecondaryButton(
+        // Fixed width so the row doesn't shift when "TUNE" becomes "Tune 7s" (which wraps onto
+        // two lines at this width, as the drawer's TUNE already allows).
+        modifier = modifier.height(CompactCallCqHeight).width(56.dp),
+        label = tuneChipLabel(stringResource(R.string.tune_button), isTuning, tuneRemainingSec),
+        active = isTuning,
+        enabled = tuneButtonEnabled(isTuning, isActivated, isTransmitting),
+        onClick = onToggleTune,
+    )
+}
+
+/**
+ * Fixed width of [OperateStatusRow]'s status part when it sits inline on the landscape Decode
+ * title row: pulse dot + "Transmitting", or "Listening" over "Next TX in 30s". Longer text
+ * ellipsizes rather than widening it.
+ */
+internal val InlineStatusWidth = 116.dp
+
+/** The other TX slot: 0 (1st / even) <-> 1 (2nd / odd). */
+internal fun otherTxSlot(txSlot: Int): Int = if (txSlot == 0) 1 else 0
+
+/**
+ * A single TX-period button for the Decode screen's top row in landscape, beside
+ * [CompactTuneButton], replacing the drawer's two-segment [TxPeriodControl] there. It reads
+ * "Even" or "Odd" for the slot currently selected, and a tap switches to the other one through
+ * the same [onSelectTxPeriod] the segmented control uses (which also drops an in-progress QSO,
+ * as switching slots there does).
+ */
+@Composable
+internal fun CompactTxPeriodButton(
+    txSlot: Int,
+    onSelectTxPeriod: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label = stringResource(if (txSlot == 0) R.string.tx_period_even_short else R.string.tx_period_odd_short)
+    val description = stringResource(R.string.tx_period_label)
+    Box(
+        modifier = modifier
+            .height(CompactCallCqHeight)
+            .width(56.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(BgSurface3)
+            .border(1.dp, Border, RoundedCornerShape(12.dp))
+            .clickable(role = Role.Button) { onSelectTxPeriod(otherTxSlot(txSlot)) }
+            .semantics {
+                contentDescription = description
+                stateDescription = label
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = InterFamily,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
 
 /**
  * The small subtitle shown under "Call CQ" that reflects which CQ variant is queued.
@@ -275,7 +360,12 @@ internal fun OperateStatusRow(
         horizontalArrangement = if (fillWidth) Arrangement.SpaceBetween else Arrangement.spacedBy(12.dp),
     ) {
         Row(
-            modifier = Modifier.weight(1f, fill = false),
+            // Inline (the landscape Decode title row) the status takes a fixed width, sized for
+            // its widest state, so the CAT chip and the TUNE / Even-Odd buttons after it don't
+            // shift under the operator's finger when "Listening" becomes "Tuning" or
+            // "Transmitting". Real-device testing showed a tap landing on the wrong spot after
+            // such a shift.
+            modifier = if (fillWidth) Modifier.weight(1f, fill = false) else Modifier.width(InlineStatusWidth),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -296,7 +386,7 @@ internal fun OperateStatusRow(
             }
         }
         if (showCatChip) {
-            CatStatusChip(state = catState, onReconnect = onReconnectCat)
+            CatStatusChip(state = catState, onReconnect = onReconnectCat, stacked = !fillWidth)
         }
     }
 }
@@ -418,12 +508,11 @@ internal fun PeriodTuneDxRow(
             txSlot = txSlot,
             onSelect = onSelectTxPeriod,
         )
-        val tuneEnabled = isTuning || (!isActivated && !isTransmitting)
         SecondaryButton(
             modifier = Modifier.weight(0.45f),
             label = tuneChipLabel(stringResource(R.string.tune_button), isTuning, tuneRemainingSec),
             active = isTuning,
-            enabled = tuneEnabled,
+            enabled = tuneButtonEnabled(isTuning, isActivated, isTransmitting),
             onClick = onToggleTune,
         )
         SecondaryButton(

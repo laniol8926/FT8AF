@@ -101,9 +101,14 @@ fun CatStatusChip(
     state: CatConnectionState,
     onReconnect: () -> Unit,
     modifier: Modifier = Modifier,
+    // The landscape Decode title row: the label stacked on two lines ("Radio" / "linked",
+    // split like the compact Call CQ, see twoLineLabel) with tighter padding, so the chip is
+    // about half as wide.
+    stacked: Boolean = false,
 ) {
     val visuals = catChipVisuals(state)
     val description = stringResource(visuals.contentDescriptionRes)
+    val label = stringResource(visuals.labelRes)
 
     Row(
         modifier = modifier
@@ -111,20 +116,34 @@ fun CatStatusChip(
             .background(BgSurface3)
             .clickable(onClickLabel = description) { onReconnect() }
             .semantics { contentDescription = description }
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = if (stacked) 8.dp else 10.dp, vertical = if (stacked) 4.dp else 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         StatusDot(color = visuals.dotColor, pulsing = visuals.pulsing)
-        Text(
-            text = stringResource(visuals.labelRes),
-            color = TextMuted,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = InterFamily,
-            maxLines = 1,
-            softWrap = false,
-        )
+        if (stacked) {
+            val (firstLine, secondLine) = twoLineLabel(label)
+            Text(
+                text = if (secondLine != null) "$firstLine\n$secondLine" else firstLine,
+                color = TextMuted,
+                fontSize = 11.sp,
+                lineHeight = 13.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = InterFamily,
+                maxLines = 2,
+                softWrap = false,
+            )
+        } else {
+            Text(
+                text = label,
+                color = TextMuted,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = InterFamily,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
     }
 }
 

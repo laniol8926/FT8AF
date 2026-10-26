@@ -29,6 +29,17 @@ class TuneChipLabelTest {
     }
 
     @Test
+    fun tuneButtonEnabled_onlyWhenIdleOrAlreadyTuning() {
+        // Idle: can start tuning.
+        assertThat(tuneButtonEnabled(isTuning = false, isActivated = false, isTransmitting = false)).isTrue()
+        // A CQ/QSO is running, or a transmission is on air: can't start tuning.
+        assertThat(tuneButtonEnabled(isTuning = false, isActivated = true, isTransmitting = false)).isFalse()
+        assertThat(tuneButtonEnabled(isTuning = false, isActivated = false, isTransmitting = true)).isFalse()
+        // Already tuning: always enabled, so the carrier can be stopped.
+        assertThat(tuneButtonEnabled(isTuning = true, isActivated = true, isTransmitting = true)).isTrue()
+    }
+
+    @Test
     fun active_negativeRemaining_clampsToZero() {
         // A racing final post must never render "-1s".
         assertThat(tuneChipLabel("TUNE", isTuning = true, remainingSec = -1))

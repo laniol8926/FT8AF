@@ -73,6 +73,8 @@ import radio.ks3ckc.ft8af.ui.components.OperateStatusRow
 import radio.ks3ckc.ft8af.ui.components.OperateDrawerPeekHeight
 import radio.ks3ckc.ft8af.ui.components.CompactCallCqButton
 import radio.ks3ckc.ft8af.ui.components.CompactHuntButton
+import radio.ks3ckc.ft8af.ui.components.CompactTuneButton
+import radio.ks3ckc.ft8af.ui.components.CompactTxPeriodButton
 import radio.ks3ckc.ft8af.ui.components.txStripActionState
 import radio.ks3ckc.ft8af.ui.components.VoiceCommandButton
 import radio.ks3ckc.ft8af.ui.components.selectBandIndex
@@ -580,7 +582,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                 )
                                 // The status line ("Listening / Next transmit window") and the
                                 // CAT chip move up here too, freeing their docked row below.
-                                Spacer(modifier = Modifier.width(16.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
                                 OperateStatusRow(
                                     isTransmitting = isTransmitting,
                                     isTuning = isTuning,
@@ -590,6 +592,19 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                     catState = catState,
                                     onReconnectCat = onReconnectCatAction,
                                     fillWidth = false,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                CompactTuneButton(
+                                    isTuning = isTuning,
+                                    isActivated = isActivated,
+                                    isTransmitting = isTransmitting,
+                                    tuneRemainingSec = tuneRemainingSec,
+                                    onToggleTune = onToggleTuneAction,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                CompactTxPeriodButton(
+                                    txSlot = txSlot,
+                                    onSelectTxPeriod = onSelectTxPeriodAction,
                                 )
                             }
                         } else {
