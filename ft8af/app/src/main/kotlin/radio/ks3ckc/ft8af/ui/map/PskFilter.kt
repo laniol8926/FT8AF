@@ -61,6 +61,14 @@ internal data class PskFilter(
  */
 internal fun initialPskFilter(dialHz: Long): PskFilter = PskFilter(band = freqHzToBand(dialHz))
 
+/**
+ * The bands offered in the PSK filter's Band row: those the operator hasn't hidden
+ * ([isExcluded], by label such as "17m"), plus [selected] even if hidden so the current choice
+ * never disappears from the row.
+ */
+internal fun pskFilterBands(selected: Band?, isExcluded: (String) -> Boolean): List<Band> =
+    Band.entries.filter { !isExcluded(it.label) || it == selected }
+
 /** Anything carrying an absolute frequency the band filter can read. */
 internal interface HasFrequencyHz {
     val frequencyHz: Long

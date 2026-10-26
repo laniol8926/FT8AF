@@ -65,6 +65,22 @@ class PskFilterTest {
     }
 
     @Test
+    fun pskFilterBands_offersOnlyEnabledBands() {
+        val enabled = setOf("80m", "60m", "40m", "30m", "20m")
+        assertThat(pskFilterBands(Band.M20) { it !in enabled })
+            .containsExactly(Band.M80, Band.M60, Band.M40, Band.M30, Band.M20).inOrder()
+        // Nothing hidden: every band, as before.
+        assertThat(pskFilterBands(null) { false }).containsExactlyElementsIn(Band.entries).inOrder()
+    }
+
+    @Test
+    fun pskFilterBands_keepsAHiddenSelectedBand() {
+        val enabled = setOf("20m")
+        assertThat(pskFilterBands(Band.M17) { it !in enabled })
+            .containsExactly(Band.M20, Band.M17).inOrder()
+    }
+
+    @Test
     fun pskTimeLabel_mapsPresets() {
         assertThat(pskTimeLabel(900)).isEqualTo("15m")
         assertThat(pskTimeLabel(3600)).isEqualTo("1h")

@@ -1056,7 +1056,9 @@ private fun PskFilterSheet(
                 FilterChip(stringResource(R.string.map_filter_all), filter.band == null) {
                     onFilterChange(filter.copy(band = null))
                 }
-                for (b in Band.entries) {
+                // Only the operator's enabled bands (Settings' band exclusions), like the Band &
+                // Mode sheet.
+                for (b in pskFilterBands(filter.band) { GeneralVariables.isBandExcluded(it) }) {
                     FilterChip(b.label, filter.band == b) { onFilterChange(filter.copy(band = b)) }
                 }
             }
