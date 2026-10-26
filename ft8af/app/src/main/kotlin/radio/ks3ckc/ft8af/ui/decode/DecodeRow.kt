@@ -30,11 +30,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -190,30 +193,55 @@ fun DecodeRow(
                         showHeading = GeneralVariables.showBeamHeading,
                     )
                     val emphasis = compactMessageEmphasis(isToMe = isToMe, isTarget = isTarget)
+                    val messageStyle = TextStyle(
+                        fontFamily = GeistMonoFamily,
+                        fontSize = 12.sp,
+                        letterSpacing = 0.02.sp,
+                    )
+                    // The message slot is COMPACT_MESSAGE_CHARS characters of the row's own mono
+                    // font, so the numbers sit right after the message instead of at the far
+                    // right of a wide (landscape) screen; spare width goes to the end of the row.
+                    // On a row too narrow for that (portrait) the slot shrinks as before.
+                    val textMeasurer = rememberTextMeasurer()
+                    val density = LocalDensity.current
+                    val messageSlotDp = remember(messageStyle, density) {
+                        with(density) {
+                            textMeasurer.measure("0".repeat(COMPACT_MESSAGE_CHARS), messageStyle)
+                                .size.width.toDp()
+                        }
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(COMPACT_GAP_DP.dp),
                     ) {
-                        for (label in labels) {
-                            DecodeRowLabelChip(label)
+                        // A CALLING chip shares the message slot, so its row's columns still line
+                        // up with every other row's; its message just shows fewer characters.
+                        Row(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .width(messageSlotDp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(COMPACT_GAP_DP.dp),
+                        ) {
+                            for (label in labels) {
+                                DecodeRowLabelChip(label)
+                            }
+                            Text(
+                                text = hoistedMsgText,
+                                color = when (emphasis) {
+                                    CompactMessageEmphasis.TO_YOU -> Signal
+                                    CompactMessageEmphasis.TARGET -> Target
+                                    CompactMessageEmphasis.NORMAL -> TextMuted
+                                },
+                                fontWeight = if (emphasis == CompactMessageEmphasis.NORMAL) null else FontWeight.Bold,
+                                style = messageStyle,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
                         }
-                        Text(
-                            text = hoistedMsgText,
-                            color = when (emphasis) {
-                                CompactMessageEmphasis.TO_YOU -> Signal
-                                CompactMessageEmphasis.TARGET -> Target
-                                CompactMessageEmphasis.NORMAL -> TextMuted
-                            },
-                            fontWeight = if (emphasis == CompactMessageEmphasis.NORMAL) null else FontWeight.Bold,
-                            fontFamily = GeistMonoFamily,
-                            fontSize = 12.sp,
-                            letterSpacing = 0.02.sp,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
 
                         // Fixed-width slots (reserved even when the cell's content
                         // is absent, e.g. no heading for a station without a
@@ -522,6 +550,13 @@ internal const val COMPACT_PILL_DOT_DP = 16
  * than that so a ~384dp phone still keeps DT next to the full pill.
  */
 internal const val COMPACT_MIN_MESSAGE_DP = 160
+
+/**
+ * Width of the compact row's message slot, in characters of its mono font: room for a full
+ * standard frame plus a little more ("<VP9/AH0CO> K5YT R-12" is 21). Where the row has the room
+ * (landscape) the numbers follow right after it; where it does not, the slot shrinks.
+ */
+internal const val COMPACT_MESSAGE_CHARS = 30
 
 /**
  * The compact row's fixed-width metadata columns, in display order. Distance

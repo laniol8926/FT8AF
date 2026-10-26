@@ -27,13 +27,55 @@ so are the other tabs except where noted.
 |---|---|---|
 | Title row | band/mode label, "UTC : 04:02:39" on a second line, action icons | band/mode label, Zulu clock "04:02:39Z", **compact Call CQ**, **compact Hunt**, **status line + stacked CAT chip**, **TUNE**, **Even/Odd**, action icons, all on one line with tighter padding |
 | Under the title row | filter chips | **slot timer bar** (DT / GPS pill, progress, seconds), then the filter chips |
-| Decode list | saved compact/expanded choice | **always opens compact** |
+| Decode list | saved compact/expanded choice | **always opens compact**, 30-character message column, in the left panel of a **split view** with the map or waterfall on the right |
 | Above the tab bar | slot bar, status line, drawer peek | nothing; the list runs down to the tab bar |
 | Tab bar | icon above label, 30 dp spare at the bottom | icon beside label, 8 dp at the bottom, plus a **More controls** entry |
 | More controls drawer | peek with Call CQ + Hunt, expands upward | hidden until opened from the tab bar; holds Band & Mode, TX period / Tune / DX and power |
 
 Result on a motorola edge 2022: about 12 compact decode lines in landscape,
 up from none.
+
+### Split view: decode list + map or waterfall
+
+In landscape the **Decode, Map and Waterfall tabs all show the Decode
+screen**, split below the filter chips (`DecodeScreen(landscapeSidePanel = …)`):
+
+- **Left:** the decode list, `DecodeListPanelWidth` (480 dp) wide, enough for a
+  compact row's 30-character message plus its columns and badge.
+- **Right:** the rest of the width. The **Map** tab shows the map there, the
+  **Waterfall** tab the waterfall, and the **Decode** tab whichever of the two
+  was picked last (`sidePanelTab` in `FT8AFApp`; it starts on Waterfall and is
+  not remembered across an app restart). The tab bar highlights the tab that
+  was tapped.
+
+All three tabs land on the same `DecodeScreen` branch in `FT8AFApp`
+(`screenTab`), so the decode list keeps its rows and scroll position while
+the right panel switches. The QSO panel uses `screenTab` too, so it docks
+as on Decode rather than floating as on the full-screen Waterfall. POTA,
+Logbook and Settings stay full screen.
+
+In the panel:
+
+- **Waterfall** (`WaterfallScreen(showSpectrum = false)`): no columnar
+  spectrum strip, just the frequency ruler, the waterfall and its bottom
+  strip. The tap-cursor timeout now runs outside the spectrum's update so it
+  still clears without the strip.
+- **Map** (`MapScreen(compactHeader = true)`): no "Map" title and no
+  "N decoded · N worked this session" line; the Decodes / PSK spots / Worked
+  chips sit on the settings button's row, and both are 30 dp tall
+  (`MapCompactButtonHeight`) instead of 44 dp.
+
+The full-screen Map and Waterfall (portrait, or with the drawer off) are
+unchanged.
+
+### 30-character message column
+
+The compact row's message slot is `COMPACT_MESSAGE_CHARS` (30) characters of
+its own mono font, measured with a `TextMeasurer`, so SNR / Hz / DT and the
+badge follow right after the message instead of sitting at the far right of
+a wide row; spare width goes to the end of the row. On a row too narrow for
+that (portrait) the slot shrinks as before. A CALLING chip shares the slot,
+so its row stays aligned with the others.
 
 ### Compact Call CQ (`CompactCallCqButton`, `TxStrip.kt`)
 

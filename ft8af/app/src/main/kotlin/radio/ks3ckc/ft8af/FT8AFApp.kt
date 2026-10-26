@@ -159,6 +159,9 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
         controlsDrawerEnabled = controlsDrawerLive ?: GeneralVariables.controlsDrawerEnabled
     }
     var controlsExpanded by rememberSaveable { mutableStateOf(false) }
+    // Which of Map / Waterfall the landscape split view shows beside the decode list (the one
+    // last picked from the tab bar; see actionsOnDecodeTitle).
+    var sidePanelTab by rememberSaveable { mutableStateOf(FT8AFTab.WATERFALL) }
     // Landscape is too short for the drawer's peek (Call CQ + Hunt) plus the status line and tab
     // bar: the decode list got no rows. There the drawer collapses out of sight and opens from a
     // "More controls" entry in the tab bar, and on the Decode tab Call CQ and Hunt move to
@@ -496,9 +499,18 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     val onOpenHuntOptionsAction: () -> Unit = { showHuntOptions = true }
     val onReconnectCatAction: () -> Unit = { mainViewModel.reconnectRig() }
     val onOpenBandModeAction: () -> Unit = { showBandModeSheet = true }
-    // Call CQ and Hunt move out of the drawer onto the Decode title row only in landscape on the
-    // Decode tab; other tabs have no such row, so there they stay in the drawer.
-    val actionsOnDecodeTitle = controlsDrawerEnabled && isLandscape && activeTab == FT8AFTab.DECODE
+    // Landscape split view: on the Decode, Map and Waterfall tabs the Decode screen shows, with the
+    // map or waterfall in a panel to the right of the decode list. Map and Waterfall pick the
+    // panel; Decode keeps the last one picked. Call CQ, Hunt and the status line move onto the
+    // Decode title row there; other tabs have no such row, so they stay in the drawer.
+    val actionsOnDecodeTitle = controlsDrawerEnabled && isLandscape &&
+        (activeTab == FT8AFTab.DECODE || activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL)
+    LaunchedEffect(activeTab) {
+        if (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) sidePanelTab = activeTab
+    }
+    val panelTab = if (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) activeTab else sidePanelTab
+    // The screen actually shown in the content area: the Decode screen for the whole split view.
+    val screenTab = if (actionsOnDecodeTitle) FT8AFTab.DECODE else activeTab
 
     Box(modifier = Modifier.fillMaxSize().background(BgApp)) {
         // Keep the content clear of the display cutout (and the status bar, should it
@@ -557,11 +569,23 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-                when (activeTab) {
+                // In the landscape split view all three tabs land on the DECODE branch, so the
+                // decode list keeps its state while the right panel switches.
+                when (screenTab) {
                     FT8AFTab.DECODE -> DecodeScreen(
                         mainViewModel,
                         bandModeLabel = decodeTitleLabel,
                         onOpenBandMode = onOpenBandModeAction,
+                        landscapeSidePanel = if (actionsOnDecodeTitle) {
+                            {
+                                when (panelTab) {
+                                    FT8AFTab.MAP -> MapScreen(mainViewModel, compactHeader = true)
+                                    else -> WaterfallScreen(mainViewModel, showSpectrum = false)
+                                }
+                            }
+                        } else {
+                            null
+                        },
                         landscapeActions = if (actionsOnDecodeTitle) {
                             {
                                 val actions = txStripActionState(isActivated, huntEnabled)
@@ -635,7 +659,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 // own bottom info/toggle strip (offset by WaterfallBottomStripHeight)
                 // so those controls stay reachable during an active QSO instead of
                 // being covered — still without resizing the AndroidView.
-                if (qsoPanelOverlaysContent(activeTab)) {
+                if (qsoPanelOverlaysContent(screenTab)) {
                     qsoPanel(
                         Modifier
                             .align(Alignment.BottomCenter)
@@ -660,7 +684,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             // in progress. On the Waterfall tab it is floated over the content
             // above instead (see qsoPanelOverlaysContent) so it never resizes
             // the waterfall.
-            if (!qsoPanelOverlaysContent(activeTab)) {
+            if (!qsoPanelOverlaysContent(screenTab)) {
                 qsoPanel(Modifier)
             }
 

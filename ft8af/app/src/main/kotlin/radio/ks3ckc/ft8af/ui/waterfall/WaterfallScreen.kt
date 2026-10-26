@@ -85,7 +85,12 @@ private class ViewHolder {
  * views — exactly matching the old SpectrumFragment's drawSpectrum() pattern.
  */
 @Composable
-fun WaterfallScreen(mainViewModel: MainViewModel) {
+fun WaterfallScreen(
+    mainViewModel: MainViewModel,
+    // False in the landscape Decode split view's side panel: only the waterfall (with its
+    // frequency ruler and bottom strip), no columnar spectrum strip above it.
+    showSpectrum: Boolean = true,
+) {
     var touchedFreqHz by remember { mutableIntStateOf(-1) }
     var updateCount by remember { mutableIntStateOf(0) }
 
@@ -121,15 +126,18 @@ fun WaterfallScreen(mainViewModel: MainViewModel) {
                 displayTxFrequencyHz(touchedFreqHz, GeneralVariables.getBaseFrequency())
             val currentTxActive = mainViewModel.ft8TransmitSignal.mutableIsTransmitting.value ?: false
 
+            // The tap cursor's timeout runs whether or not the spectrum strip is shown (it is
+            // hidden in the landscape split view; see showSpectrum).
+            if (viewHolder.frequencyLineTimeout > 0) {
+                viewHolder.frequencyLineTimeout--
+            }
+            if (viewHolder.frequencyLineTimeout == 0) {
+                viewHolder.columnar?.setTouch_x(-1)
+                viewHolder.waterfall?.setTouch_x(-1)
+                touchedFreqHz = -1
+            }
+
             viewHolder.columnar?.let { cView ->
-                if (viewHolder.frequencyLineTimeout > 0) {
-                    viewHolder.frequencyLineTimeout--
-                }
-                if (viewHolder.frequencyLineTimeout == 0) {
-                    cView.setTouch_x(-1)
-                    viewHolder.waterfall?.setTouch_x(-1)
-                    touchedFreqHz = -1
-                }
                 cView.setSpectrumWidth(GeneralVariables.getSpectrumWidth())
                 cView.setTxFrequency(currentTxFreq)
                 cView.setTxActive(currentTxActive)
@@ -200,7 +208,7 @@ fun WaterfallScreen(mainViewModel: MainViewModel) {
         val displayTxFreq = displayTxFrequencyHz(touchedFreqHz, txFreq)
 
         // Spectrum strip (columnar view)
-        ColumnarStrip(
+        if (showSpectrum) ColumnarStrip(
             spectrumWidth = spectrumWidth,
             txFrequency = displayTxFreq,
             txActive = isTransmitting,

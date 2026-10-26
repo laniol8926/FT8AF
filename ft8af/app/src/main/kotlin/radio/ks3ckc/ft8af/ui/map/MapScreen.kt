@@ -223,7 +223,12 @@ internal fun rangeRingRadiusPx(km: Double, r: Float, scale: Float): Float =
 // ---------------------------------------------------------------------------
 
 @Composable
-fun MapScreen(mainViewModel: MainViewModel) {
+fun MapScreen(
+    mainViewModel: MainViewModel,
+    // The landscape Decode split view's map panel: no "Map" title or "N decoded · N worked"
+    // line; the layer chips sit on the settings button's row instead, so the map gets the height.
+    compactHeader: Boolean = false,
+) {
     val messages by mainViewModel.mutableFt8MessageList.observeAsState(arrayListOf())
     val myGrid by GeneralVariables.mutableMyMaidenheadGrid.observeAsState(
         GeneralVariables.getMyMaidenheadGrid() ?: ""
@@ -475,6 +480,28 @@ fun MapScreen(mainViewModel: MainViewModel) {
             .fillMaxSize()
             .background(BgApp),
     ) {
+        val layerChips: @Composable (Modifier) -> Unit = { chipsModifier ->
+            LayerChipRow(
+                decodesOn = decodesLayer,
+                onDecodes = { decodesLayer = !decodesLayer },
+                pskOn = pskOverlayEnabled,
+                onPsk = { newVal ->
+                    pskOverlayEnabled = newVal
+                    if (!newVal) filterSheetOpen = false
+                    GeneralVariables.pskOverlayEnabled = newVal
+                    mainViewModel.databaseOpr.writeConfig(
+                        "pskOverlayEnabled",
+                        if (newVal) "1" else "0",
+                        null,
+                    )
+                },
+                workedOn = workedLayer,
+                onWorked = { workedLayer = !workedLayer },
+                modifier = chipsModifier,
+                compact = compactHeader,
+            )
+        }
+
         MapHeader(
             decoded = stations.size,
             worked = workedCount,
@@ -493,25 +520,21 @@ fun MapScreen(mainViewModel: MainViewModel) {
                     null,
                 )
             },
+            // Compact header: the layer chips take the title's place beside the settings button.
+            leading = if (compactHeader) {
+                { layerChips(Modifier) }
+            } else {
+                null
+            },
         )
 
-        LayerChipRow(
-            decodesOn = decodesLayer,
-            onDecodes = { decodesLayer = !decodesLayer },
-            pskOn = pskOverlayEnabled,
-            onPsk = { newVal ->
-                pskOverlayEnabled = newVal
-                if (!newVal) filterSheetOpen = false
-                GeneralVariables.pskOverlayEnabled = newVal
-                mainViewModel.databaseOpr.writeConfig(
-                    "pskOverlayEnabled",
-                    if (newVal) "1" else "0",
-                    null,
-                )
-            },
-            workedOn = workedLayer,
-            onWorked = { workedLayer = !workedLayer },
-        )
+        if (!compactHeader) {
+            layerChips(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+            )
+        }
 
         // Inset, rounded map card — the map fills it; controls float inside.
         // Pinch to zoom, drag to pan, double-tap to toggle 2× zoom in/out.
@@ -703,6 +726,9 @@ fun MapScreen(mainViewModel: MainViewModel) {
 
 private val BorderSubtle = Color(0x2494A3B8)
 
+/** Height of the map's layer chips and settings button in the compact (split-view panel) header. */
+private val MapCompactButtonHeight = 30.dp
+
 @Composable
 private fun MapHeader(
     decoded: Int,
@@ -714,33 +740,45 @@ private fun MapHeader(
     onMenuDismiss: () -> Unit,
     onProjectionChange: (MapViewMode) -> Unit,
     onGrayLineToggle: (Boolean) -> Unit,
+    // Shown instead of the "Map" title and "N decoded · N worked" line, which the landscape
+    // Decode split view's map panel leaves out (it carries the layer chips here instead).
+    leading: (@Composable () -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 10.dp),
+            .padding(
+                start = if (leading != null) 14.dp else 18.dp,
+                end = 12.dp,
+                top = if (leading != null) 4.dp else 14.dp,
+                bottom = if (leading != null) 6.dp else 10.dp,
+            ),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column {
-            Text(
-                text = stringResource(R.string.map_title),
-                color = TextPrimary,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 24.sp,
-            )
-            Text(
-                text = stringResource(R.string.map_header_subtitle, decoded, worked),
-                color = TextMuted,
-                fontSize = 12.5.sp,
-                modifier = Modifier.padding(top = 4.dp),
-            )
+        if (leading != null) {
+            leading()
+        } else {
+            Column {
+                Text(
+                    text = stringResource(R.string.map_title),
+                    color = TextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 24.sp,
+                )
+                Text(
+                    text = stringResource(R.string.map_header_subtitle, decoded, worked),
+                    color = TextMuted,
+                    fontSize = 12.5.sp,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
         }
         Box {
             val menuCd = stringResource(R.string.map_menu_cd)
             Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(if (leading != null) MapCompactButtonHeight else 44.dp)
                     .clip(RoundedCornerShape(14.dp))
                     .background(BgSurface2)
                     .border(1.dp, BorderSubtle, RoundedCornerShape(14.dp))
@@ -784,24 +822,32 @@ private fun LayerChipRow(
     onPsk: (Boolean) -> Unit,
     workedOn: Boolean,
     onWorked: () -> Unit,
+    modifier: Modifier = Modifier
+        .fillMaxWidth()
+        .padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+    compact: Boolean = false,
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+        modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        LayerChip(stringResource(R.string.map_layer_decodes), decodesOn, Accent, onDecodes)
-        LayerChip(stringResource(R.string.map_layer_psk), pskOn, Signal) { onPsk(!pskOn) }
-        LayerChip(stringResource(R.string.map_layer_worked), workedOn, StatusConfirmed, onWorked)
+        LayerChip(stringResource(R.string.map_layer_decodes), decodesOn, Accent, compact, onDecodes)
+        LayerChip(stringResource(R.string.map_layer_psk), pskOn, Signal, compact) { onPsk(!pskOn) }
+        LayerChip(stringResource(R.string.map_layer_worked), workedOn, StatusConfirmed, compact, onWorked)
     }
 }
 
 @Composable
-private fun LayerChip(label: String, active: Boolean, accent: Color, onClick: () -> Unit) {
+private fun LayerChip(
+    label: String,
+    active: Boolean,
+    accent: Color,
+    compact: Boolean = false,
+    onClick: () -> Unit,
+) {
     Box(
         modifier = Modifier
-            .height(44.dp)
+            .height(if (compact) MapCompactButtonHeight else 44.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(if (active) accent.copy(alpha = 0.14f) else BgSurface2)
             .border(
@@ -810,7 +856,7 @@ private fun LayerChip(label: String, active: Boolean, accent: Color, onClick: ()
                 RoundedCornerShape(12.dp),
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = if (compact) 10.dp else 14.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(

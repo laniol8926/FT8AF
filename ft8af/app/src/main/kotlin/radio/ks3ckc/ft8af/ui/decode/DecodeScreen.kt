@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
@@ -70,6 +71,8 @@ fun DecodeScreen(
     landscapeActions: (@Composable () -> Unit)? = null,
     // Landscape only: the slot timer bar, shown between the title row and the filter chips.
     landscapeSlotBar: (@Composable () -> Unit)? = null,
+    // Landscape split view: the map or waterfall, shown in a panel to the right of the list.
+    landscapeSidePanel: (@Composable () -> Unit)? = null,
 ) {
     // Observe LiveData
     val messageList by mainViewModel.mutableFt8MessageList.observeAsState(arrayListOf())
@@ -382,6 +385,18 @@ fun DecodeScreen(
                 modifier = Modifier.padding(bottom = 8.dp),
             )
 
+            // Landscape split view: the list on the left at the width its compact rows need,
+            // the map or waterfall panel filling the rest. Otherwise the list fills the width.
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+            Column(
+                modifier = (
+                    if (landscapeSidePanel != null) Modifier.width(DecodeListPanelWidth) else Modifier.weight(1f)
+                    ).fillMaxHeight(),
+            ) {
             // Message list or empty state
             if (collapsedMessages.isEmpty()) {
                 EmptyState(
@@ -456,6 +471,18 @@ fun DecodeScreen(
                     }
                 }
             }
+            }
+            if (landscapeSidePanel != null) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clipToBounds(),
+                ) {
+                    landscapeSidePanel()
+                }
+            }
+            }
         }
 
         // QSO bottom sheet (overlays on top). Slide-down minimizes when a
@@ -476,6 +503,13 @@ fun DecodeScreen(
         )
     }
 }
+
+/**
+ * Width of the decode list in the landscape split view: a compact row's 30-character message
+ * slot plus its SNR / Hz / DT columns and status badge, with the row's own padding. The map or
+ * waterfall panel takes the rest of the screen.
+ */
+internal val DecodeListPanelWidth = 480.dp
 
 /**
  * [utcMillis] as Zulu time, "HH:MM:SSZ" (e.g. "04:02:39Z"), for the landscape title row where
