@@ -91,4 +91,44 @@ class BandModeSheetLogicTest {
         assertThat(rows).hasSize(1)
         assertThat(rows[0].freqHz).isEqualTo(14_071_000)
     }
+
+    /** A cut-down FT8 band plan in bands.txt order, every curated band present. */
+    private fun ft8Plan(): List<OperationBand.Band> {
+        val ft8 = ModeProfile.FT8.id
+        return listOf(
+            band(1_840_000, "160m", ft8, marked = true),
+            band(3_573_000, "80m", ft8, marked = true),
+            band(5_357_000, "60m", ft8, marked = false),
+            band(7_074_000, "40m", ft8, marked = true),
+            band(10_136_000, "30m", ft8, marked = true),
+            band(14_074_000, "20m", ft8, marked = true),
+            band(18_100_000, "17m", ft8, marked = true),
+            band(21_074_000, "15m", ft8, marked = true),
+            band(28_074_000, "10m", ft8, marked = true),
+            band(50_313_000, "6m", ft8, marked = true),
+        )
+    }
+
+    @Test
+    fun `mostUsedBands with nothing hidden is the curated list in curated order`() {
+        val rows = mostUsedBands(ft8Plan(), ModeProfile.FT8.id) { false }
+        assertThat(rows.map { it.waveLength }).containsExactly("20m", "40m", "17m", "15m", "10m").inOrder()
+    }
+
+    @Test
+    fun `mostUsedBands fills hidden curated bands from the operator's enabled bands`() {
+        // An 80/60/40/30/20m rig: everything else hidden (the real-device setting).
+        val enabled = setOf("80m", "60m", "40m", "30m", "20m")
+        val rows = mostUsedBands(ft8Plan(), ModeProfile.FT8.id) { it !in enabled }
+        assertThat(rows.map { it.waveLength }).containsExactly("80m", "60m", "40m", "30m", "20m").inOrder()
+        // Unmarked-only band (60m) still gets its first dial.
+        assertThat(rows.first { it.waveLength == "60m" }.freqHz).isEqualTo(5_357_000)
+    }
+
+    @Test
+    fun `mostUsedBands never shows a hidden band, even when there is nothing to fill with`() {
+        val enabled = setOf("20m")
+        val rows = mostUsedBands(ft8Plan(), ModeProfile.FT8.id) { it !in enabled }
+        assertThat(rows.map { it.waveLength }).containsExactly("20m")
+    }
 }

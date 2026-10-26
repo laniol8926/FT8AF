@@ -91,12 +91,21 @@ internal val MOST_USED_BANDS = listOf("20m", "40m", "17m", "15m", "10m")
 /**
  * Build the sheet's band rows for [modeId] from [bands] (normally [OperationBand.bandList]):
  * for each name in [MOST_USED_BANDS], pick that band's dial for the mode — preferring the
- * marked (*) entry, else the first match — and skip names with no entry in that mode. Pure so
- * it can be unit-tested with hand-built [OperationBand.Band] lists.
+ * marked (*) entry, else the first match — and skip names with no entry in that mode or that
+ * the operator has hidden ([isExcluded]).
+ *
+ * When hiding bands removed some of [MOST_USED_BANDS], the list is filled back up to that many
+ * rows from the operator's other enabled bands (band-plan order) and then shown in frequency
+ * order — so a rig limited to e.g. 80/60/40/30/20m gets those five instead of just 20m and
+ * 40m. With nothing hidden the list is exactly as before. Pure so it can be unit-tested with
+ * hand-built [OperationBand.Band] lists.
  */
-internal fun mostUsedBands(bands: List<OperationBand.Band>, modeId: Int): List<BandRow> {
-    val out = ArrayList<BandRow>()
-    for (wave in MOST_USED_BANDS) {
+internal fun mostUsedBands(
+    bands: List<OperationBand.Band>,
+    modeId: Int,
+    isExcluded: (String) -> Boolean = { false },
+): List<BandRow> {
+    fun dialFor(wave: String): BandRow? {
         var chosenIdx = -1
         var chosenFreq = 0L
         for (i in bands.indices) {
@@ -112,11 +121,27 @@ internal fun mostUsedBands(bands: List<OperationBand.Band>, modeId: Int): List<B
                 chosenFreq = b.band
             }
         }
-        if (chosenIdx != -1) {
-            out.add(BandRow(wave, chosenFreq, chosenIdx))
-        }
+        return if (chosenIdx != -1) BandRow(wave, chosenFreq, chosenIdx) else null
     }
-    return out
+
+    val out = ArrayList<BandRow>()
+    var anyHidden = false
+    for (wave in MOST_USED_BANDS) {
+        val row = dialFor(wave) ?: continue
+        if (isExcluded(wave)) anyHidden = true else out.add(row)
+    }
+    if (!anyHidden) return out
+
+    val others = bands.asSequence()
+        .filter { it.mode == modeId }
+        .map { it.waveLength }
+        .distinct()
+        .filter { it !in MOST_USED_BANDS && !isExcluded(it) }
+    for (wave in others) {
+        if (out.size >= MOST_USED_BANDS.size) break
+        dialFor(wave)?.let { out.add(it) }
+    }
+    return out.sortedBy { it.freqHz }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +223,7 @@ fun BandModeSheet(
 
             // ---- Band list for the selected mode ----
             val bands = remember(selectedModeId, GeneralVariables.excludedBands.toSet()) {
-                mostUsedBands(OperationBand.bandList, selectedModeId)
-                    .filterNot { GeneralVariables.isBandExcluded(it.waveLength) }
+                mostUsedBands(OperationBand.bandList, selectedModeId) { GeneralVariables.isBandExcluded(it) }
             }
             // Compare the exact band index, not just the wavelength: one band can have
             // several dial entries (bands.txt lists 14.074 and 14.090 for 20m), so matching
