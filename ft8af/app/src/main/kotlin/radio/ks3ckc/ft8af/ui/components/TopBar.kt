@@ -98,7 +98,7 @@ fun ClickableTopBarTitle(
     // row made tapping the clock open the Band & Mode sheet, and made
     // TalkBack read the clock text as part of the button's own label. Null
     // (the default) renders exactly as before.
-    trailing: @Composable (() -> Unit)? = null,
+    trailing: @Composable (RowScope.() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier,

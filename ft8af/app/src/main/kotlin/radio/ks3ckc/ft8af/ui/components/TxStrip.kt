@@ -133,7 +133,7 @@ internal fun CompactTuneButton(
  * title row: pulse dot + "Transmitting", or "Listening" over "Next TX in 30s". Longer text
  * ellipsizes rather than widening it.
  */
-internal val InlineStatusWidth = 116.dp
+internal val InlineStatusWidth = 84.dp
 
 /** The other TX slot: 0 (1st / even) <-> 1 (2nd / odd). */
 internal fun otherTxSlot(txSlot: Int): Int = if (txSlot == 0) 1 else 0
@@ -206,12 +206,15 @@ internal fun cqStripSubtitle(
 internal data class TxStatusVisuals(
     val labelRes: Int,
     val listening: Boolean,
+    /** The abbreviated label for the landscape Decode title row: "RX" / "TX" / "TUNE". */
+    val shortLabelRes: Int,
 )
 
 internal fun txStatusVisuals(isTransmitting: Boolean, isTuning: Boolean): TxStatusVisuals = when {
-    isTuning -> TxStatusVisuals(R.string.tx_status_tuning, listening = false)
-    isTransmitting -> TxStatusVisuals(R.string.tx_status_transmitting, listening = false)
-    else -> TxStatusVisuals(R.string.tx_status_listening, listening = true)
+    isTuning -> TxStatusVisuals(R.string.tx_status_tuning, listening = false, R.string.tx_status_tuning_short)
+    isTransmitting ->
+        TxStatusVisuals(R.string.tx_status_transmitting, listening = false, R.string.tx_status_transmitting_short)
+    else -> TxStatusVisuals(R.string.tx_status_listening, listening = true, R.string.tx_status_listening_short)
 }
 
 /**
@@ -364,15 +367,22 @@ internal fun OperateStatusRow(
             // its widest state, so the CAT chip and the TUNE / Even-Odd buttons after it don't
             // shift under the operator's finger when "Listening" becomes "Tuning" or
             // "Transmitting". Real-device testing showed a tap landing on the wrong spot after
-            // such a shift.
-            modifier = if (fillWidth) Modifier.weight(1f, fill = false) else Modifier.width(InlineStatusWidth),
+            // such a shift. It is still the part that gives way (weighted, so measured after
+            // the CAT chip) when the row is short, never the chip.
+            modifier = if (fillWidth) {
+                Modifier.weight(1f, fill = false)
+            } else {
+                Modifier.weight(1f, fill = false).width(InlineStatusWidth)
+            },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             PulseDot(color = if (status.listening) Signal else Accent)
             Column {
                 Text(
-                    text = stringResource(status.labelRes),
+                    // Inline (the landscape Decode title row) the state is abbreviated to
+                    // "RX" / "TX" / "TUNE" (with "TX in 9s" under RX) so it stays narrow.
+                    text = stringResource(if (fillWidth) status.labelRes else status.shortLabelRes),
                     color = TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,

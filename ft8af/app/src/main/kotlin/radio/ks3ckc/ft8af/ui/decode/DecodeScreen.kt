@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -68,7 +69,7 @@ fun DecodeScreen(
     // Landscape only: the compact Call CQ and Hunt buttons shown after the UTC time on the title
     // row. In landscape they move here from the controls drawer, which took too much of the short
     // screen (see CompactCallCqButton). Null in portrait.
-    landscapeActions: (@Composable () -> Unit)? = null,
+    landscapeActions: (@Composable RowScope.() -> Unit)? = null,
     // Landscape only: the slot timer bar, shown between the title row and the filter chips.
     landscapeSlotBar: (@Composable () -> Unit)? = null,
     // Landscape split view: the map or waterfall, shown in a panel to the right of the list.
@@ -262,12 +263,11 @@ fun DecodeScreen(
     // GeneralVariables.clearDecodesEveryCycle / DB key "clearDecodesEveryCycle".
     var clearEachCycle by rememberSaveable { mutableStateOf(GeneralVariables.clearDecodesEveryCycle) }
 
-    // Format UTC time for the subtitle. The landscape title row is tight, so there it uses the
-    // shorter Zulu form ("04:02:39Z") instead of "UTC : 04:02:39".
-    val utcString = when {
-        isLandscape -> zuluTimeStr(utcTime)
-        utcTime > 0L -> UtcTimer.getTimeStr(utcTime)
-        else -> stringResource(R.string.decode_utc_placeholder)
+    // Format UTC time for the subtitle
+    val utcString = if (utcTime > 0L) {
+        UtcTimer.getTimeStr(utcTime)
+    } else {
+        stringResource(R.string.decode_utc_placeholder)
     }
     // The "N decoded" count sits here UNLESS sortMode is LAST_HEARD, where every
     // time-group divider shows its own slot's count instead (countRowsPerSlot)
@@ -294,10 +294,15 @@ fun DecodeScreen(
                         onClick = onOpenBandMode,
                         trailing = if (isLandscape) {
                             {
-                                TopBarSubtitle(text = subtitleText, modifier = Modifier.padding(start = 8.dp))
+                                // With the landscape controls on this row there is no room for the
+                                // clock (the slot bar and the waterfall's strip still show time);
+                                // on a narrow phone with the radio linked it squeezed the RX /
+                                // "TX in Xs" status off the row.
                                 if (landscapeActions != null) {
                                     Spacer(modifier = Modifier.width(12.dp))
                                     landscapeActions()
+                                } else {
+                                    TopBarSubtitle(text = subtitleText, modifier = Modifier.padding(start = 8.dp))
                                 }
                             }
                         } else {
@@ -510,19 +515,6 @@ fun DecodeScreen(
  * waterfall panel takes the rest of the screen.
  */
 internal val DecodeListPanelWidth = 480.dp
-
-/**
- * [utcMillis] as Zulu time, "HH:MM:SSZ" (e.g. "04:02:39Z"), for the landscape title row where
- * "UTC : 04:02:39" ([UtcTimer.getTimeStr]) is too wide. "--:--:--Z" before the clock is known.
- */
-internal fun zuluTimeStr(utcMillis: Long): String {
-    if (utcMillis <= 0L) return "--:--:--Z"
-    val totalSec = utcMillis / 1000
-    return String.format(
-        java.util.Locale.US, "%02d:%02d:%02dZ",
-        (totalSec / 3600) % 24, (totalSec % 3600) / 60, totalSec % 60,
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Time Group Divider

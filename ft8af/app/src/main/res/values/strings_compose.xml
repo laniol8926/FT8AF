@@ -124,9 +124,13 @@
     <string name="tx_status_listening">Listening</string>
     <string name="tx_status_transmitting">Transmitting</string>
     <string name="tx_status_tuning">Tuning</string>
+    <!-- Abbreviated states for the landscape Decode title row. -->
+    <string name="tx_status_listening_short">RX</string>
+    <string name="tx_status_transmitting_short">TX</string>
+    <string name="tx_status_tuning_short">TUNE</string>
     <string name="tx_next_window">Next transmit window in</string>
     <!-- Short form for the landscape Decode title row, where the full sentence does not fit. -->
-    <string name="tx_next_window_short">Next TX in</string>
+    <string name="tx_next_window_short">TX in</string>
     <string name="tx_call_cq_subtitle">Start calling for contacts</string>
     <string name="tx_more">MORE</string>
     <string name="tx_band_mode_label">BAND &amp; MODE</string>

@@ -616,6 +616,12 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                     catState = catState,
                                     onReconnectCat = onReconnectCatAction,
                                     fillWidth = false,
+                                    // The only flexible item on the row: weighted, so it is
+                                    // measured after the fixed-width buttons and gives way when
+                                    // the row is short (e.g. the clock gains "• 23 decoded" in the
+                                    // CALL / SNR / DX sort modes). Call CQ, Hunt, TUNE and
+                                    // Even/Odd keep their full width.
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 CompactTuneButton(

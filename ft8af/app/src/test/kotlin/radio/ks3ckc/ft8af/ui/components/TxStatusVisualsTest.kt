@@ -37,4 +37,14 @@ class TxStatusVisualsTest {
         val v = txStatusVisuals(isTransmitting = true, isTuning = true)
         assertThat(v.labelRes).isEqualTo(R.string.tx_status_tuning)
     }
+
+    @Test
+    fun `each state has the matching short label for the landscape title row`() {
+        assertThat(txStatusVisuals(isTransmitting = false, isTuning = false).shortLabelRes)
+            .isEqualTo(R.string.tx_status_listening_short)
+        assertThat(txStatusVisuals(isTransmitting = true, isTuning = false).shortLabelRes)
+            .isEqualTo(R.string.tx_status_transmitting_short)
+        assertThat(txStatusVisuals(isTransmitting = true, isTuning = true).shortLabelRes)
+            .isEqualTo(R.string.tx_status_tuning_short)
+    }
 }

@@ -25,7 +25,7 @@ so are the other tabs except where noted.
 
 | Area | Portrait | Landscape (Decode tab) |
 |---|---|---|
-| Title row | band/mode label, "UTC : 04:02:39" on a second line, action icons | band/mode label, Zulu clock "04:02:39Z", **compact Call CQ**, **compact Hunt**, **status line + stacked CAT chip**, **TUNE**, **Even/Odd**, action icons, all on one line with tighter padding |
+| Title row | band/mode label, "UTC : 04:02:39" (and "• N decoded" outside TIME sort) on a second line, action icons | band/mode label, **compact Call CQ**, **compact Hunt**, **RX / "TX in 9s" + stacked CAT chip**, **TUNE**, **Even/Odd**, action icons, all on one line with tighter padding; no clock or decoded count (the slot bar and the waterfall strip show time) |
 | Under the title row | filter chips | **slot timer bar** (DT / GPS pill, progress, seconds), then the filter chips |
 | Decode list | saved compact/expanded choice | **always opens compact**, 30-character message column, in the left panel of a **split view** with the map or waterfall on the right |
 | Above the tab bar | slot bar, status line, drawer peek | nothing; the list runs down to the tab bar |
@@ -104,18 +104,26 @@ A plain on/off button labelled "Hunt": no icon, no option chip.
 
 ### Status line on the title row
 
-`OperateStatusRow(fillWidth = false)` renders the same pulse dot, state
-("Listening", "Transmitting", "Tuning") and CAT chip ("Radio linked", or the
-tap-to-reconnect chip when the link drops) inline. The countdown uses the
-short form **"Next TX in Xs"** (`tx_next_window_short`); the full "Next
-transmit window in Xs" is kept everywhere else.
+`OperateStatusRow(fillWidth = false)` renders the same pulse dot and CAT chip
+("Radio linked", or the tap-to-reconnect chip when the link drops) inline,
+with the state abbreviated (`TxStatusVisuals.shortLabelRes`): **RX** while
+listening, **TX** while transmitting, **TUNE** while tuning. Under RX the
+countdown reads **"TX in Xs"** (`tx_next_window_short`). Portrait and the
+drawer keep "Listening / Next transmit window in Xs".
 
 Inline, the status part (dot + state + countdown) has a fixed width,
-`InlineStatusWidth` (116 dp), sized for its widest state. Without it, the
-chip and buttons after it shifted when "Listening / Next TX in…" became the
-shorter "Tuning" or the longer "Transmitting", and on a real device a tap
-landed on the wrong spot after such a shift. "Transmitting" may ellipsize on
-a narrow phone; the other states fit.
+`InlineStatusWidth` (84 dp), so the chip and buttons after it don't shift
+when the state changes (on a real device a tap once landed on the wrong spot
+after such a shift). It is also the row's **only flexible item**: it is
+weighted, so the fixed-width Call CQ, Hunt, CAT chip, TUNE and Even/Odd are
+measured first and keep their full width, and if the row is short the status
+is what gives way.
+
+The landscape title row carries no clock and no "• N decoded" count. The
+count (shown outside the TIME sort) and the clock squeezed the status off the
+row on a narrower phone with the radio linked; the slot bar and the
+waterfall's strip still show the time. With the drawer setting off there are
+no controls on the row, and the clock and count show as before.
 
 The CAT chip is stacked on two lines there (`CatStatusChip(stacked = true)`:
 "Radio" / "linked", or "Radio not" / "linked", split by `twoLineLabel`) with
@@ -199,20 +207,18 @@ buttons.
 ## Known limits
 
 - The title row is tight on narrower landscape screens (e.g. a Galaxy A32,
-  ~853 dp wide). The clock there uses the Zulu form "04:02:39Z"
-  (`zuluTimeStr`) instead of "UTC : 04:02:39", which frees ~60 dp. The
-  band/mode label is protected, so if the row still runs short the status
-  line shrinks first and the countdown's seconds can be clipped.
-- `tx_next_window_short` is English-only, like `tx_next_window` (neither has
-  translations yet).
+  ~853 dp wide). With the radio linked everything fits there; if a row ever
+  runs short, the status (RX / "TX in Xs") is what shrinks, never the
+  buttons or the band/mode label.
+- `tx_next_window_short` and the RX / TX / TUNE short states are
+  English-only, like `tx_next_window` (none have translations yet).
 - With the "controls drawer" setting turned off, landscape still uses the
   original always-open strip; this layout only applies with the drawer on.
 
 ## Testing
 
 - `TwoLineLabelTest` covers the label split (last space, no space, padding).
-- `ZuluTimeStrTest` covers the "HH:MM:SSZ" clock (padding, midnight wrap,
-  unknown-clock placeholder).
+- `TxStatusVisualsTest` covers each state's short label (RX / TX / TUNE).
 - `TuneChipLabelTest.tuneButtonEnabled_onlyWhenIdleOrAlreadyTuning` covers the
   shared TUNE enable rule; `OtherTxSlotTest` covers the Even/Odd toggle.
 - `tx_period_even_short` / `tx_period_odd_short` are English-only for now,
