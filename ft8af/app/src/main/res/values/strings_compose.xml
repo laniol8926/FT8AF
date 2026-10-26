@@ -551,6 +551,7 @@
     <string name="waterfall_title">Waterfall</string>
     <string name="waterfall_toggle_nr">NR</string>
     <string name="waterfall_toggle_msg">MSG</string>
+    <string name="waterfall_width">Width</string>
     <string name="waterfall_status_live">LIVE</string>
 
     <!-- ===== Settings: format helpers ===== -->

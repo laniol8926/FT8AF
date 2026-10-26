@@ -39,7 +39,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import com.k1af.ft8af.timer.UtcTimer
+import radio.ks3ckc.ft8af.ui.settings.NumberInputDialog
 import com.k1af.ft8af.ui.ColumnarView
 import com.k1af.ft8af.ui.SpectrumFragment
 import com.k1af.ft8af.ui.WaterfallView
@@ -102,6 +102,7 @@ fun WaterfallScreen(
     val spectrumWidth by GeneralVariables.mutableSpectrumWidth.observeAsState(GeneralVariables.getSpectrumWidth())
     var deNoise by remember { mutableStateOf(mainViewModel.deNoise) }
     var showMessages by remember { mutableStateOf(mainViewModel.markMessage) }
+    var showWidthDialog by remember { mutableStateOf(false) }
 
     // Plain volatile refs — no Compose snapshot overhead
     val viewHolder = remember { ViewHolder() }
@@ -267,11 +268,13 @@ fun WaterfallScreen(
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = UtcTimer.getTimeStr(UtcTimer.getSystemTime()),
-                color = TextMuted,
-                fontFamily = GeistMonoFamily,
-                fontSize = 10.5.sp,
+            // Opens the same Spectrum Width setting as Settings → Radio & Audio, so the
+            // waterfall's displayed audio width can be changed right here. (This slot held the
+            // UTC clock, which the slot bar already shows.)
+            ToggleChip(
+                label = stringResource(R.string.waterfall_width),
+                active = showWidthDialog,
+                onClick = { showWidthDialog = true },
             )
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -321,6 +324,24 @@ fun WaterfallScreen(
                 letterSpacing = 0.08.sp,
             )
         }
+    }
+
+    // The Width chip's dialog: the same editor and save as Settings → Radio & Audio →
+    // Spectrum Width, so the two always agree. The waterfall follows mutableSpectrumWidth.
+    if (showWidthDialog) {
+        NumberInputDialog(
+            title = stringResource(R.string.settings_spectrum_width),
+            suffix = "Hz",
+            initialValue = spectrumWidth,
+            min = 2500,
+            max = 5000,
+            onDismiss = { showWidthDialog = false },
+            onSave = { value ->
+                showWidthDialog = false
+                GeneralVariables.setSpectrumWidth(value)
+                mainViewModel.databaseOpr.writeConfig("spectrumWidth", value.toString(), null)
+            },
+        )
     }
 }
 
