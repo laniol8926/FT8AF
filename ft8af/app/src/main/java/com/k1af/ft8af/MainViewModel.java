@@ -1182,6 +1182,14 @@ public class MainViewModel extends ViewModel {
                 broadcastWsjtxQso(qslRecord);
 
 
+                // The contacted US state now counts as worked on this band and mode, so it stops
+                // showing NEW STATE right away rather than after the next restart.
+                String loggedState = GeneralVariables.stateForGrid(qslRecord.getToMaidenGrid());
+                if (loggedState != null) {
+                    GeneralVariables.addState(loggedState);
+                    GeneralVariables.addStateWorked(qslRecord.getBandLength(), qslRecord.getMode(), loggedState);
+                }
+
                 if (qslRecord.getToCallsign() != null) {//add successfully contacted zone to zone list
                     GeneralVariables.callsignDatabase.getCallsignInformation(qslRecord.getToCallsign()
                             , new OnAfterQueryCallsignLocation() {

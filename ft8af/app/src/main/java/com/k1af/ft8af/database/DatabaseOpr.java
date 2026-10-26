@@ -1388,6 +1388,33 @@ public class DatabaseOpr extends SQLiteOpenHelper {
             public void run() {
                 Log.d(TAG, "run: starting zone import...");
 
+                // Worked US states, per band and mode: derive each logged QSO's state from its
+                // grid square, using the same grid->state table the decode/display paths use.
+                // Done first and on its own: it needs only the logbook, not the callsign
+                // database, so "new state" is right within seconds instead of after the slow
+                // callsign pass below (~2 minutes on a 54k-QSO log).
+                Cursor gridCursor = db.rawQuery(
+                        "SELECT DISTINCT band, mode, substr(gridsquare, 1, 4) AS grid4 FROM QSLTable "
+                                + "WHERE gridsquare IS NOT NULL AND length(gridsquare) >= 4",
+                        null);
+                int stateCount = 0;
+                while (gridCursor.moveToNext()) {
+                    String state = GeneralVariables.stateForGrid(
+                            gridCursor.getString(gridCursor.getColumnIndex("grid4")));
+                    if (state == null) continue;
+                    GeneralVariables.addState(state);
+                    GeneralVariables.addStateWorked(
+                            gridCursor.getString(gridCursor.getColumnIndex("band")),
+                            gridCursor.getString(gridCursor.getColumnIndex("mode")),
+                            state);
+                    stateCount++;
+                }
+                gridCursor.close();
+                GeneralVariables.stateMapReady = true;
+                Log.d(TAG, "run: state import complete, " + stateCount + " band/mode/grid rows -> "
+                        + GeneralVariables.workedStates.size() + " worked states, "
+                        + GeneralVariables.workedStateBandModes.size() + " state/band/mode entries");
+
                 CallsignDatabase callsignDatabase = GeneralVariables.callsignDatabase;
                 if (callsignDatabase == null) {
                     Log.w(TAG, "run: callsign database not ready, skipping zone import");
@@ -1424,27 +1451,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 }
                 cursor.close();
 
-                // Worked US states: derive each logged QSO's state from its grid square,
-                // using the same grid->state table the decode/display paths use. Keeps the
-                // "new state" alert consistent with what the UI shows on each row.
-                Cursor gridCursor = db.rawQuery(
-                        "SELECT DISTINCT gridsquare FROM QSLTable "
-                                + "WHERE gridsquare IS NOT NULL AND gridsquare <> ''",
-                        null);
-                int stateCount = 0;
-                while (gridCursor.moveToNext()) {
-                    String grid = gridCursor.getString(gridCursor.getColumnIndex("gridsquare"));
-                    String state = GeneralVariables.stateForGrid(grid);
-                    if (state != null) {
-                        GeneralVariables.addState(state);
-                        stateCount++;
-                    }
-                }
-                gridCursor.close();
-
-                Log.d(TAG, "run: zone import complete, resolved " + count + " logged callsigns, "
-                        + stateCount + " gridded QSOs -> " + GeneralVariables.workedStates.size()
-                        + " worked states");
+                Log.d(TAG, "run: zone import complete, resolved " + count + " logged callsigns");
                 GeneralVariables.zoneMapReady = true;
             }
         }).start();

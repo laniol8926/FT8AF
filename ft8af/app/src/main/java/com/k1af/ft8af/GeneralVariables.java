@@ -248,6 +248,14 @@ public class GeneralVariables {
     // logbook by DatabaseOpr.getQslDxccToMap(), deriving each QSO's state from its grid.
     public static final java.util.Set<String> workedStates =
             java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
+    // Worked US states per band and mode ("40M|FT8|MO", see stateBandModeKey), which is what
+    // "NEW STATE" checks. Loaded from the logbook first thing at startup (it needs only the
+    // grid squares, not the callsign database) and added to as QSOs are logged.
+    public static final java.util.Set<String> workedStateBandModes =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
+    // True once workedStateBandModes is loaded. Until then no decode is marked NEW STATE;
+    // otherwise every US station showed NEW STATE for the ~2 minutes the zone import took.
+    public static volatile boolean stateMapReady = false;
 
     // 4-char Maidenhead field -> US state code, lazily loaded from the bundled
     // assets/us_grid_states.json (the same map the Compose UI reads via UsStateLookup).
@@ -1433,6 +1441,44 @@ public class GeneralVariables {
      */
     public static boolean getStateWorked(String state) {
         return state != null && workedStates.contains(state.toUpperCase());
+    }
+
+    /**
+     * Key for a US state worked on a band in a mode, e.g. "40M|FT8|MO" (case-insensitive inputs,
+     * trimmed). Null when any part is missing, so incomplete log rows never count as worked.
+     */
+    public static String stateBandModeKey(String band, String mode, String state) {
+        if (band == null || mode == null || state == null) return null;
+        String b = band.trim().toUpperCase();
+        String m = mode.trim().toUpperCase();
+        String s = state.trim().toUpperCase();
+        if (b.isEmpty() || m.isEmpty() || s.isEmpty()) return null;
+        return b + "|" + m + "|" + s;
+    }
+
+    /** Record a US state as worked on [band] in [mode] (see {@link #stateBandModeKey}). */
+    public static void addStateWorked(String band, String mode, String state) {
+        String key = stateBandModeKey(band, mode, state);
+        if (key != null) workedStateBandModes.add(key);
+    }
+
+    /**
+     * Whether [state] has been worked on [band] in [mode]. "NEW STATE" is per band and per mode
+     * (WAS is earned per band/mode), so a state worked on 40m FT8 is still new on 40m FT4.
+     */
+    public static boolean isStateWorkedOn(String band, String mode, String state) {
+        String key = stateBandModeKey(band, mode, state);
+        return key != null && workedStateBandModes.contains(key);
+    }
+
+    /** The band the rig is on, as a log band name ("40m"). */
+    public static String currentBandName() {
+        return BaseRigOperation.getMeterFromFreq(band);
+    }
+
+    /** The operating mode as a log mode name ("FT8" / "FT4" / "FT2"). */
+    public static String currentModeName() {
+        return ModeProfile.fromId(operatingMode).displayName;
     }
 
     /**

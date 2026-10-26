@@ -151,10 +151,14 @@ public class CallsignDatabase extends SQLiteOpenHelper {
             }
 
             // US state from the sender's grid (US-only table → null for non-US grids).
-            // fromNewState mirrors fromDxcc: true when the state is not yet worked.
+            // fromNewState: the state isn't worked yet on the current band in the current
+            // mode (WAS is per band/mode). Held off until the worked list has loaded, like the
+            // DXCC flags above, or every US station looks new right after startup.
             msg.fromState = GeneralVariables.stateForGrid(msg.maidenGrid);
-            msg.fromNewState = msg.fromState != null
-                    && !GeneralVariables.getStateWorked(msg.fromState);
+            msg.fromNewState = GeneralVariables.stateMapReady
+                    && msg.fromState != null
+                    && !GeneralVariables.isStateWorkedOn(GeneralVariables.currentBandName(),
+                            GeneralVariables.currentModeName(), msg.fromState);
 
             // Resolve the operator's own continent + DXCC once (continent for the DX
             // decode filter, DXCC for the directional-CQ matcher).
