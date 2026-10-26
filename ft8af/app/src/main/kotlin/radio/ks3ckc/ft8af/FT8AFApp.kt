@@ -285,6 +285,8 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             // chip reflects the correct state even when arming is skipped
             // (e.g. callsign not yet configured).
             huntEnabled = GeneralVariables.autoFollowCQ
+            // The landscape split view's panel (map or waterfall) as last picked.
+            sidePanelTab = if (GeneralVariables.landscapeSidePanel == 1) FT8AFTab.MAP else FT8AFTab.WATERFALL
             // Hunt options load with the rest of the config, after first composition.
             huntPriority = huntPriorityFromConfig(GeneralVariables.huntPriority)
             huntAvoidPileups = GeneralVariables.huntAvoidPileups
@@ -505,8 +507,18 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     // Decode title row there; other tabs have no such row, so they stay in the drawer.
     val actionsOnDecodeTitle = controlsDrawerEnabled && isLandscape &&
         (activeTab == FT8AFTab.DECODE || activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL)
-    LaunchedEffect(activeTab) {
-        if (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) sidePanelTab = activeTab
+    LaunchedEffect(activeTab, actionsOnDecodeTitle) {
+        // Picking Map or Waterfall in the split view sets the panel, and it's saved so the panel
+        // comes back the same after a restart (DB key "landscapePanel"). In portrait those tabs
+        // are full screen, so they don't change the landscape choice.
+        if (actionsOnDecodeTitle && (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) &&
+            activeTab != sidePanelTab
+        ) {
+            sidePanelTab = activeTab
+            val value = if (activeTab == FT8AFTab.MAP) 1 else 0
+            GeneralVariables.landscapeSidePanel = value
+            mainViewModel.databaseOpr.writeConfig("landscapePanel", value.toString(), null)
+        }
     }
     val panelTab = if (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) activeTab else sidePanelTab
     // The screen actually shown in the content area: the Decode screen for the whole split view.

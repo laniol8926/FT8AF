@@ -2839,12 +2839,20 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     GeneralVariables.decodeSortMode = parseConfigInt(result, 0);
                 }
 
+                if (name.equalsIgnoreCase("landscapePanel")) {//Landscape split view: 0=waterfall, 1=map
+                    GeneralVariables.landscapeSidePanel = parseConfigInt(result, 0);
+                }
+
                 if (name.equalsIgnoreCase("clearOnBandModeChange")) {
                     GeneralVariables.clearOnBandModeChange = result.equals("1");
                 }
 
                 if (name.equalsIgnoreCase("ctrMode")) {
                     GeneralVariables.controlMode = parseConfigInt(result, ControlMode.VOX);
+                    // Tell observers too: the CAT status chip reads the mode from this LiveData,
+                    // and without the post it kept the pre-load default (VOX) after a restart,
+                    // hiding "Radio not linked" whenever the rig wasn't connected.
+                    GeneralVariables.mutableControlMode.postValue(GeneralVariables.controlMode);
                 }
                 if (name.equalsIgnoreCase("connectMode")) {
                     GeneralVariables.connectMode = parseConfigInt(result, ConnectMode.USB_CABLE);

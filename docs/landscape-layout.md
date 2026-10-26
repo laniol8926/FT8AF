@@ -44,9 +44,12 @@ screen**, split below the filter chips (`DecodeScreen(landscapeSidePanel = …)`
   compact row's 30-character message plus its columns and badge.
 - **Right:** the rest of the width. The **Map** tab shows the map there, the
   **Waterfall** tab the waterfall, and the **Decode** tab whichever of the two
-  was picked last (`sidePanelTab` in `FT8AFApp`; it starts on Waterfall and is
-  not remembered across an app restart). The tab bar highlights the tab that
-  was tapped.
+  was picked last (`sidePanelTab` in `FT8AFApp`). The pick is saved
+  (`GeneralVariables.landscapeSidePanel`, DB key `landscapePanel`: 0 =
+  waterfall, the default, 1 = map) and restored once the config has loaded,
+  so the panel survives an app restart. Only picks made in the split view are
+  saved; in portrait Map and Waterfall are full screen and don't change it.
+  The tab bar highlights the tab that was tapped.
 
 All three tabs land on the same `DecodeScreen` branch in `FT8AFApp`
 (`screenTab`), so the decode list keeps its rows and scroll position while

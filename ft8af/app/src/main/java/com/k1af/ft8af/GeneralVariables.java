@@ -504,6 +504,8 @@ public class GeneralVariables {
 
     public static int decodeSortMode = 0;//Collapsed decode list sort: 0=last heard,1=callsign,2=SNR (DecodeSortMode.configValue)
 
+    public static int landscapeSidePanel = 0;//Landscape Decode split view right panel: 0=waterfall, 1=map (DB key "landscapePanel")
+
     public static boolean clearOnBandModeChange = true;//Clear the decode list + reset TX target to CQ when the band or mode changes (default on)
 
     public static boolean swr_switch_on = true;//SWR alarm switch
