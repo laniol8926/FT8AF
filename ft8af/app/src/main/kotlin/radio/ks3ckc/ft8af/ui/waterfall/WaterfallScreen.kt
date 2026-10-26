@@ -45,7 +45,6 @@ import com.k1af.ft8af.ui.SpectrumFragment
 import com.k1af.ft8af.ui.WaterfallView
 import radio.ks3ckc.ft8af.theme.*
 import radio.ks3ckc.ft8af.ui.components.InputLevelIndicator
-import radio.ks3ckc.ft8af.ui.components.TopBar
 
 /**
  * Height of the columnar spectrum strip above the waterfall canvas. Taller than
@@ -187,19 +186,13 @@ fun WaterfallScreen(
             .fillMaxSize()
             .background(BgApp),
     ) {
-        TopBar(title = stringResource(R.string.waterfall_title)) {
-            val freqText = if (touchedFreqHz > 0) {
-                "$touchedFreqHz Hz"
-            } else {
-                GeneralVariables.getBaseFrequencyStr() + " Hz"
-            }
-            Text(
-                text = freqText,
-                color = Signal,
-                fontFamily = GeistMonoFamily,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-            )
+        // The TX offset frequency used to fill a top bar of its own; it now sits in the bottom
+        // strip beside LIVE, so the waterfall gets that height. Follows the finger while the
+        // waterfall is being touched, else the committed base frequency.
+        val freqText = if (touchedFreqHz > 0) {
+            "$touchedFreqHz Hz"
+        } else {
+            GeneralVariables.getBaseFrequencyStr() + " Hz"
         }
 
         // While the user is touching the spectrum, drive the TX bandwidth
@@ -306,6 +299,17 @@ fun WaterfallScreen(
             InputLevelIndicator(levels = inputLevels)
 
             Spacer(modifier = Modifier.weight(1f))
+
+            Text(
+                text = freqText,
+                color = Signal,
+                fontFamily = GeistMonoFamily,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+            )
+
+            Spacer(modifier = Modifier.width(10.dp))
 
             Text(
                 text = "$updateCount",
