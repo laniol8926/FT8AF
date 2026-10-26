@@ -259,11 +259,12 @@ fun DecodeScreen(
     // GeneralVariables.clearDecodesEveryCycle / DB key "clearDecodesEveryCycle".
     var clearEachCycle by rememberSaveable { mutableStateOf(GeneralVariables.clearDecodesEveryCycle) }
 
-    // Format UTC time for the subtitle
-    val utcString = if (utcTime > 0L) {
-        UtcTimer.getTimeStr(utcTime)
-    } else {
-        stringResource(R.string.decode_utc_placeholder)
+    // Format UTC time for the subtitle. The landscape title row is tight, so there it uses the
+    // shorter Zulu form ("04:02:39Z") instead of "UTC : 04:02:39".
+    val utcString = when {
+        isLandscape -> zuluTimeStr(utcTime)
+        utcTime > 0L -> UtcTimer.getTimeStr(utcTime)
+        else -> stringResource(R.string.decode_utc_placeholder)
     }
     // The "N decoded" count sits here UNLESS sortMode is LAST_HEARD, where every
     // time-group divider shows its own slot's count instead (countRowsPerSlot)
@@ -474,6 +475,19 @@ fun DecodeScreen(
             },
         )
     }
+}
+
+/**
+ * [utcMillis] as Zulu time, "HH:MM:SSZ" (e.g. "04:02:39Z"), for the landscape title row where
+ * "UTC : 04:02:39" ([UtcTimer.getTimeStr]) is too wide. "--:--:--Z" before the clock is known.
+ */
+internal fun zuluTimeStr(utcMillis: Long): String {
+    if (utcMillis <= 0L) return "--:--:--Z"
+    val totalSec = utcMillis / 1000
+    return String.format(
+        java.util.Locale.US, "%02d:%02d:%02dZ",
+        (totalSec / 3600) % 24, (totalSec % 3600) / 60, totalSec % 60,
+    )
 }
 
 // ---------------------------------------------------------------------------

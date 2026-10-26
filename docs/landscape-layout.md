@@ -25,7 +25,7 @@ so are the other tabs except where noted.
 
 | Area | Portrait | Landscape (Decode tab) |
 |---|---|---|
-| Title row | band/mode label, UTC on a second line, action icons | band/mode label, UTC, **compact Call CQ**, **compact Hunt**, **status line + CAT chip**, action icons, all on one line with tighter padding |
+| Title row | band/mode label, "UTC : 04:02:39" on a second line, action icons | band/mode label, Zulu clock "04:02:39Z", **compact Call CQ**, **compact Hunt**, **status line + CAT chip**, action icons, all on one line with tighter padding |
 | Under the title row | filter chips | **slot timer bar** (DT / GPS pill, progress, seconds), then the filter chips |
 | Decode list | saved compact/expanded choice | **always opens compact** |
 | Above the tab bar | slot bar, status line, drawer peek | nothing; the list runs down to the tab bar |
@@ -128,9 +128,10 @@ buttons.
 ## Known limits
 
 - The title row is tight on narrower landscape screens (e.g. a Galaxy A32,
-  ~853 dp wide). The band/mode label is protected, so the status line shrinks
-  first and the countdown's seconds can be clipped. Dropping the "UTC :"
-  prefix in landscape would free ~50 dp if that turns out to matter.
+  ~853 dp wide). The clock there uses the Zulu form "04:02:39Z"
+  (`zuluTimeStr`) instead of "UTC : 04:02:39", which frees ~60 dp. The
+  band/mode label is protected, so if the row still runs short the status
+  line shrinks first and the countdown's seconds can be clipped.
 - `tx_next_window_short` is English-only, like `tx_next_window` (neither has
   translations yet).
 - With the "controls drawer" setting turned off, landscape still uses the
@@ -139,6 +140,8 @@ buttons.
 ## Testing
 
 - `TwoLineLabelTest` covers the label split (last space, no space, padding).
+- `ZuluTimeStrTest` covers the "HH:MM:SSZ" clock (padding, midnight wrap,
+  unknown-clock placeholder).
 - Existing `TxStripActionStateTest` covers the CQ/Hunt lock rules the compact
   buttons reuse.
 - Layout verified on device in landscape and portrait: Galaxy A32 (Android
