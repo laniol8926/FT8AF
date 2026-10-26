@@ -191,6 +191,25 @@ object FT8AFIcons {
         }
     }
 
+    /** Three slider tracks with knobs: the operate controls (landscape tab-bar entry). */
+    @Composable
+    fun Sliders(
+        modifier: Modifier = Modifier,
+        color: Color = Color.Unspecified,
+        size: Dp = 22.dp,
+        strokeWidth: Float = 1.6f,
+    ) {
+        val tint = if (color == Color.Unspecified) androidx.compose.material3.MaterialTheme.colorScheme.onSurface else color
+        Canvas(modifier = modifier.then(Modifier.sizeOf(size))) {
+            val s = this.size.width / 24f
+            val stroke = strokeStyle(strokeWidth * s)
+            for ((y, knobX) in listOf(6f to 9f, 12f to 15f, 18f to 7f)) {
+                drawLine(tint, Offset(3.5f * s, y * s), Offset(20.5f * s, y * s), stroke.width, StrokeCap.Round)
+                drawCircle(tint, 2.2f * s, Offset(knobX * s, y * s))
+            }
+        }
+    }
+
     @Composable
     fun Chevron(
         modifier: Modifier = Modifier,

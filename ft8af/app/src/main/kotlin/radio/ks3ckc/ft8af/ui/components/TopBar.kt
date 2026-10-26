@@ -25,6 +25,10 @@ fun TopBar(
     modifier: Modifier = Modifier,
     subtitle: @Composable (() -> Unit)? = null,
     actions: @Composable (RowScope.() -> Unit)? = null,
+    // A single-line bar with something directly below it (the landscape Decode title row, with
+    // the slot timer bar under it): less vertical padding, and the title centred on the action
+    // icons instead of top-aligned, so no blank band opens up underneath.
+    tight: Boolean = false,
     // Overrides the default Text(title) rendering below, for a screen whose
     // title is itself an interactive control (e.g. Decode's tappable
     // band/mode label) rather than plain static text. [title] itself goes
@@ -35,9 +39,9 @@ fun TopBar(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 12.dp),
+            .padding(horizontal = 18.dp, vertical = if (tight) 2.dp else 12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top,
+        verticalAlignment = if (tight) Alignment.CenterVertically else Alignment.Top,
     ) {
         // weight(1f), not an unconstrained Column: a wide titleContent (e.g.
         // ClickableTopBarTitle's band/mode label, which can run to "14.074 MHz
@@ -102,8 +106,10 @@ fun ClickableTopBarTitle(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Row(
-            modifier = Modifier
-                .weight(1f, fill = false)
+            // With trailing content the label keeps its full width and the trailing content is
+            // what gives way (the landscape Decode title row carries the clock, Call CQ, Hunt and
+            // the status line; the band/mode label was being squeezed to "40…").
+            modifier = (if (trailing == null) Modifier.weight(1f, fill = false) else Modifier)
                 .clickable(onClick = onClick, role = Role.Button),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -127,7 +133,12 @@ fun ClickableTopBarTitle(
             FT8AFIcons.ChevronDown(size = 16.dp, color = TextMuted, strokeWidth = 2f)
         }
         if (trailing != null) {
-            trailing()
+            Row(
+                modifier = Modifier.weight(1f, fill = false),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                trailing()
+            }
         }
     }
 }

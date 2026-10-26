@@ -34,6 +34,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -262,12 +264,15 @@ internal fun OperateStatusRow(
     catState: CatConnectionState,
     onReconnectCat: () -> Unit,
     modifier: Modifier = Modifier,
+    // False when the line sits inline in another row (the Decode title row in landscape): it then
+    // takes only the width it needs, with a fixed gap before the CAT chip.
+    fillWidth: Boolean = true,
 ) {
     val status = txStatusVisuals(isTransmitting, isTuning)
     Row(
-        modifier = modifier.fillMaxWidth(),
+        modifier = if (fillWidth) modifier.fillMaxWidth() else modifier,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = if (fillWidth) Arrangement.SpaceBetween else Arrangement.spacedBy(12.dp),
     ) {
         Row(
             modifier = Modifier.weight(1f, fill = false),
@@ -286,7 +291,7 @@ internal fun OperateStatusRow(
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (status.listening) {
-                    NextTxWindowLabel(slotMillis = slotMillis, txSlot = txSlot)
+                    NextTxWindowLabel(slotMillis = slotMillis, txSlot = txSlot, short = !fillWidth)
                 }
             }
         }
@@ -618,6 +623,151 @@ internal fun CallCqButton(
     }
 }
 
+/** Height of [CompactCallCqButton]: fits the Decode screen's top row next to the UTC time. */
+internal val CompactCallCqHeight = 36.dp
+
+/**
+ * A button-sized Call CQ for the Decode screen's top row in landscape, where the full
+ * [CallCqButton] in the controls drawer took too much of the short screen. Same logic as
+ * [CallCqButton]: tap calls CQ (or stops once a CQ/QSO is running), it is dimmed and locked
+ * while Hunt is armed, and the attached MORE segment (or a long-press) opens the CQ options.
+ * The queued CQ variant (FREE, FD, POTA, ...) shows after the label instead of as a subtitle.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun CompactCallCqButton(
+    actions: TxStripActionState,
+    cqModifier: String,
+    isFreeTextMode: Boolean,
+    fieldDayEnabled: Boolean,
+    onCallCQ: () -> Unit,
+    onStop: () -> Unit,
+    onOpenCqOptions: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val cqIsStop = actions.cqIsStop
+    val cqDisabled = actions.cqDisabled
+    val variant = cqStripSubtitle(cqIsStop, isFreeTextMode, fieldDayEnabled, cqModifier)
+    val background = when {
+        cqIsStop -> StatusBad
+        cqDisabled -> Accent.copy(alpha = 0.35f)
+        else -> Accent
+    }
+    val contentColor = if (cqIsStop) Color.White else BgApp
+    val optionsContentDescription = stringResource(R.string.tx_cq_options)
+
+    Row(
+        modifier = modifier
+            .height(CompactCallCqHeight)
+            .clip(RoundedCornerShape(10.dp))
+            .background(background)
+            .combinedClickable(
+                enabled = !cqDisabled,
+                onClick = { if (cqIsStop) onStop() else onCallCQ() },
+                onLongClick = if (!cqIsStop) onOpenCqOptions else null,
+            )
+            .padding(start = if (cqIsStop) 10.dp else 8.dp, end = if (cqIsStop) 10.dp else 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (cqIsStop) {
+            FT8AFIcons.Close(size = 14.dp, color = contentColor, strokeWidth = 2f)
+            Text(
+                text = stringResource(R.string.tx_stop),
+                color = contentColor,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = InterFamily,
+                maxLines = 1,
+                softWrap = false,
+            )
+        } else {
+            // Stacked on two lines ("Call" over "CQ", the queued variant after "CQ") so the
+            // button stays narrow on the crowded title row.
+            val (firstLine, secondLine) = twoLineLabel(stringResource(R.string.tx_call_cq))
+            Column {
+                Text(
+                    text = firstLine,
+                    color = contentColor,
+                    fontSize = 12.sp,
+                    lineHeight = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = InterFamily,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+                if (secondLine != null || variant != null) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.Bottom,
+                    ) {
+                        if (secondLine != null) {
+                            Text(
+                                text = secondLine,
+                                color = contentColor,
+                                fontSize = 12.sp,
+                                lineHeight = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = InterFamily,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                        if (variant != null) {
+                            Text(
+                                text = variant,
+                                color = contentColor.copy(alpha = 0.65f),
+                                fontSize = 10.sp,
+                                lineHeight = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                fontFamily = InterFamily,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        }
+                    }
+                }
+            }
+            // The MORE split segment, separately tappable like the full button's: "MORE" over
+            // the chevron, stacked for the same reason as the label.
+            Column(
+                modifier = Modifier
+                    .height(30.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(contentColor.copy(alpha = 0.16f))
+                    .clickable(enabled = !cqDisabled, onClick = onOpenCqOptions)
+                    .semantics { role = Role.Button; contentDescription = optionsContentDescription }
+                    .padding(horizontal = 5.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Text(
+                    text = stringResource(R.string.tx_more),
+                    color = contentColor.copy(alpha = 0.75f),
+                    fontSize = 8.sp,
+                    lineHeight = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = InterFamily,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+                FT8AFIcons.ChevronDown(size = 12.dp, color = contentColor, strokeWidth = 2.2f)
+            }
+        }
+    }
+}
+
+/**
+ * Split a button label onto two lines at its last space ("Call CQ" -> "Call" / "CQ"), for
+ * [CompactCallCqButton]. The label is translated, so it splits wherever that language's last
+ * word starts; a label with no space stays on one line (second part null).
+ */
+internal fun twoLineLabel(label: String): Pair<String, String?> {
+    val trimmed = label.trim()
+    val split = trimmed.lastIndexOf(' ')
+    return if (split <= 0) trimmed to null else trimmed.substring(0, split) to trimmed.substring(split + 1)
+}
+
 /**
  * The Hunt tile (72dp): tapping the tile toggles Hunt; the amber chip shows the active hunt
  * option and, when tapped, opens the hunt-options picker. Dimmed and locked while a CQ/QSO is
@@ -666,6 +816,59 @@ internal fun HuntTile(
             enabled = !huntDisabled,
             onClick = onOpenOptions,
             contentDescription = optionsContentDescription,
+        )
+    }
+}
+
+/**
+ * A button-sized Hunt for the Decode screen's top row in landscape, beside
+ * [CompactCallCqButton]: a plain on/off toggle labelled "Hunt". Tapping turns Hunt on (the
+ * button goes green) and tapping again turns it off (back to the normal surface). Same rules as
+ * [HuntTile]: dimmed and locked while a CQ/QSO is running. It has no option chip, to stay
+ * small; a long-press opens the hunt-options picker instead, since in landscape Hunt is no
+ * longer in the controls drawer.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun CompactHuntButton(
+    actions: TxStripActionState,
+    onToggle: () -> Unit,
+    onOpenOptions: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val huntOn = actions.huntActive
+    val huntDisabled = actions.huntDisabled
+    val contentAlpha = if (huntDisabled) 0.4f else 1f
+    val background = when {
+        huntOn -> StatusConfirmed
+        huntDisabled -> BgSurface3.copy(alpha = 0.4f)
+        else -> BgSurface3
+    }
+    Box(
+        modifier = modifier
+            .height(CompactCallCqHeight)
+            .clip(RoundedCornerShape(10.dp))
+            .background(background)
+            .then(if (huntOn) Modifier else Modifier.border(1.dp, Border, RoundedCornerShape(10.dp)))
+            .combinedClickable(
+                enabled = !huntDisabled,
+                onClick = onToggle,
+                onLongClick = onOpenOptions,
+                onLongClickLabel = stringResource(R.string.tx_hunt_options),
+            )
+            .semantics { toggleableState = ToggleableState(huntOn) }
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = stringResource(R.string.tx_hunt),
+            // Dark text on the green "on" fill, the normal text colour on the surface when off.
+            color = if (huntOn) BgApp else TextPrimary.copy(alpha = contentAlpha),
+            fontSize = 13.sp,
+            fontWeight = if (huntOn) FontWeight.Bold else FontWeight.SemiBold,
+            fontFamily = InterFamily,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }

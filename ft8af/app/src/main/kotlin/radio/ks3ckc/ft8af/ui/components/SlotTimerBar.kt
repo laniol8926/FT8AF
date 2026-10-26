@@ -158,6 +158,8 @@ fun NextTxWindowLabel(
     slotMillis: Long,
     txSlot: Int,
     modifier: Modifier = Modifier,
+    // "Next TX in Xs" instead of the full sentence, for the crowded landscape Decode title row.
+    short: Boolean = false,
 ) {
     var nowMs by remember { mutableLongStateOf(UtcTimer.getSystemTime()) }
 
@@ -169,7 +171,7 @@ fun NextTxWindowLabel(
     }
 
     val seconds = nextTxWindowSeconds(nowMs, slotMillis, txSlot)
-    val prefix = stringResource(R.string.tx_next_window)
+    val prefix = stringResource(if (short) R.string.tx_next_window_short else R.string.tx_next_window)
     val text = buildAnnotatedString {
         withStyle(SpanStyle(fontFamily = InterFamily, color = TextMuted, fontWeight = FontWeight.Normal)) {
             append(prefix)

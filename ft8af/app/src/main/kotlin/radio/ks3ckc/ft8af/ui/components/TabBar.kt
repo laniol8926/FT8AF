@@ -54,7 +54,16 @@ fun TabBar(
     activeTab: FT8AFTab,
     onTabSelected: (FT8AFTab) -> Unit,
     modifier: Modifier = Modifier,
+    // Landscape: an extra "More controls" entry after the tabs that opens/closes the operate
+    // controls drawer, replacing the drawer's own handle strip there. Null hides it.
+    onToggleMoreControls: (() -> Unit)? = null,
+    moreControlsOpen: Boolean = false,
+    // Landscape: icon beside its label instead of above it, and much less padding (the 30dp
+    // under the labels is spare room for the hidden navigation bar's swipe area), so the bar
+    // takes roughly half its portrait height on the short screen.
+    compact: Boolean = false,
 ) {
+    val itemPadding = if (compact) 4.dp else 8.dp
     val haptics = rememberHaptics()
     val tabBounds = remember { mutableStateMapOf<FT8AFTab, Pair<Float, Float>>() } // center x, width (px)
 
@@ -88,20 +97,21 @@ fun TabBar(
                 )
             )
             .padding(horizontal = 12.dp)
-            .padding(top = 8.dp, bottom = 30.dp)
+            .padding(top = if (compact) 4.dp else 8.dp, bottom = if (compact) 8.dp else 30.dp)
             // drawBehind sits AFTER both padding modifiers so its draw scope matches the inner
             // content area — the same coordinate space the tab Columns report from
             // [LayoutCoordinates.positionInParent]. This keeps the pill horizontally aligned
             // with the active tab's icon regardless of padding values.
             .drawBehind {
                 if (animatedWidth <= 0f) return@drawBehind
-                val pillWidthPx = animatedWidth * 0.56f
+                // Compact items put the label beside the icon, so the pill is wider to cover both.
+                val pillWidthPx = animatedWidth * if (compact) 0.8f else 0.56f
                 // The Row's inner content height = icon (~24dp) + 4dp gap + label, but for the
                 // pill we want a halo around the icon only. The icon is at the top of each
                 // Column with vertical padding 8dp, so center the pill on roughly the icon's
-                // vertical center.
+                // vertical center. (Compact: the icon is centred in a single-line item.)
                 val pillHeightPx = 28.dp.toPx()
-                val iconCenterY = 8.dp.toPx() + 12.dp.toPx() // top padding + half of a 24dp icon
+                val iconCenterY = itemPadding.toPx() + 12.dp.toPx() // item padding + half of a 24dp icon
                 val pillTop = iconCenterY - pillHeightPx / 2f
                 val cx = animatedCenter
                 val left = cx - pillWidthPx / 2f
@@ -142,7 +152,8 @@ fun TabBar(
                 }
             }
 
-            Column(
+            TabItem(
+                compact = compact,
                 modifier = Modifier
                     .weight(1f)
                     .onGloballyPositioned { coords ->
@@ -153,9 +164,7 @@ fun TabBar(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
                     ) { onTabSelected(tab) }
-                    .padding(vertical = 8.dp, horizontal = 4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                    .padding(vertical = itemPadding, horizontal = 4.dp),
             ) {
                 Box(
                     modifier = Modifier.graphicsLayer {
@@ -178,8 +187,60 @@ fun TabBar(
                     fontSize = 10.5.sp,
                     fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
                     letterSpacing = 0.02.sp,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
         }
+
+        if (onToggleMoreControls != null) {
+            // Not a tab (it opens the drawer over the current screen rather than switching
+            // screens), so it gets no selection pill; it turns amber while the drawer is open.
+            val color = if (moreControlsOpen) Accent else TextFaint
+            TabItem(
+                compact = compact,
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onToggleMoreControls,
+                    )
+                    .padding(vertical = itemPadding, horizontal = 4.dp),
+            ) {
+                FT8AFIcons.Sliders(color = color, strokeWidth = if (moreControlsOpen) 1.8f else 1.5f)
+                Text(
+                    text = stringResource(R.string.controls_drawer_more),
+                    color = color,
+                    fontSize = 10.5.sp,
+                    fontWeight = if (moreControlsOpen) FontWeight.SemiBold else FontWeight.Medium,
+                    letterSpacing = 0.02.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+        }
+    }
+}
+
+/** One tab-bar entry: icon above label, or ([compact]) icon beside label on one line. */
+@Composable
+private fun TabItem(
+    compact: Boolean,
+    modifier: Modifier,
+    content: @Composable () -> Unit,
+) {
+    if (compact) {
+        Row(
+            modifier = modifier,
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) { content() }
+    } else {
+        Column(
+            modifier = modifier,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) { content() }
     }
 }

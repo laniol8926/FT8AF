@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,6 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -62,6 +64,12 @@ fun DecodeScreen(
     bandModeLabel: String,
     onOpenBandMode: () -> Unit,
     modifier: Modifier = Modifier,
+    // Landscape only: the compact Call CQ and Hunt buttons shown after the UTC time on the title
+    // row. In landscape they move here from the controls drawer, which took too much of the short
+    // screen (see CompactCallCqButton). Null in portrait.
+    landscapeActions: (@Composable () -> Unit)? = null,
+    // Landscape only: the slot timer bar, shown between the title row and the filter chips.
+    landscapeSlotBar: (@Composable () -> Unit)? = null,
 ) {
     // Observe LiveData
     val messageList by mainViewModel.mutableFt8MessageList.observeAsState(arrayListOf())
@@ -233,8 +241,18 @@ fun DecodeScreen(
         mainViewModel.mutablePreselectCallsign.postValue(null)   // consume (allow re-trigger)
     }
 
-    // Compact mode — persisted via GeneralVariables.simpleCallItemMode / DB key "msgMode"
-    var compactMode by rememberSaveable { mutableStateOf(GeneralVariables.simpleCallItemMode) }
+    // Landscape has more width to spare and less height: the subtitle moves
+    // onto the title's own row (next to the band/mode label) instead of
+    // sitting on a second line below it.
+    val isLandscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
+
+    // Compact mode. Portrait uses the saved choice (GeneralVariables.simpleCallItemMode / DB key
+    // "msgMode"). Landscape always opens in compact, since its list is short; the toggle still
+    // switches it there for the moment, without touching the saved portrait choice.
+    var portraitCompact by rememberSaveable { mutableStateOf(GeneralVariables.simpleCallItemMode) }
+    var landscapeCompact by rememberSaveable { mutableStateOf(true) }
+    val compactMode = if (isLandscape) landscapeCompact else portraitCompact
 
     // Clear-every-cycle mode — when on, the decode list is wiped at the start of
     // each cycle so it only shows the current slot. Persisted via
@@ -255,11 +273,6 @@ fun DecodeScreen(
     } else {
         utcString
     }
-    // Landscape has more width to spare and less height: the subtitle moves
-    // onto the title's own row (next to the band/mode label) instead of
-    // sitting on a second line below it.
-    val isLandscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
-        android.content.res.Configuration.ORIENTATION_LANDSCAPE
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(
@@ -270,12 +283,19 @@ fun DecodeScreen(
             // Top bar
             TopBar(
                 title = stringResource(R.string.decode_title),
+                tight = landscapeSlotBar != null,
                 titleContent = {
                     ClickableTopBarTitle(
                         text = bandModeLabel,
                         onClick = onOpenBandMode,
                         trailing = if (isLandscape) {
-                            { TopBarSubtitle(text = subtitleText, modifier = Modifier.padding(start = 8.dp)) }
+                            {
+                                TopBarSubtitle(text = subtitleText, modifier = Modifier.padding(start = 8.dp))
+                                if (landscapeActions != null) {
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    landscapeActions()
+                                }
+                            }
                         } else {
                             null
                         },
@@ -313,9 +333,15 @@ fun DecodeScreen(
                     }
                     IconButton(
                         onClick = {
-                            compactMode = !compactMode
-                            GeneralVariables.simpleCallItemMode = compactMode
-                            mainViewModel.databaseOpr.writeConfig("msgMode", if (compactMode) "1" else "0", null)
+                            if (isLandscape) {
+                                landscapeCompact = !landscapeCompact
+                            } else {
+                                portraitCompact = !portraitCompact
+                                GeneralVariables.simpleCallItemMode = portraitCompact
+                                mainViewModel.databaseOpr.writeConfig(
+                                    "msgMode", if (portraitCompact) "1" else "0", null,
+                                )
+                            }
                         },
                     ) {
                         if (compactMode) {
@@ -337,6 +363,10 @@ fun DecodeScreen(
                 },
             )
 
+            // Landscape: the slot timer bar (DT / GPS / progress) sits in the gap between the
+            // title row and the filter chips instead of above the tab bar.
+            landscapeSlotBar?.invoke()
+
             // Filter chips. FilterChips renders each option string AND passes it
             // back through onSelected, so we feed it localized labels for display
             // but translate the tapped label back to its stable English key before
@@ -357,7 +387,11 @@ fun DecodeScreen(
                     selectedFilter = selectedFilter,
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        // When the list area is short (landscape, especially with the QSO
+                        // panel open) the waves graphic overflowed upward and drew over the
+                        // top bar, hiding the landscape Call CQ / Hunt buttons.
+                        .clipToBounds(),
                 )
             } else {
                 LazyColumn(

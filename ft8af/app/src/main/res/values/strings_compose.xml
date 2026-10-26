@@ -125,6 +125,8 @@
     <string name="tx_status_transmitting">Transmitting</string>
     <string name="tx_status_tuning">Tuning</string>
     <string name="tx_next_window">Next transmit window in</string>
+    <!-- Short form for the landscape Decode title row, where the full sentence does not fit. -->
+    <string name="tx_next_window_short">Next TX in</string>
     <string name="tx_call_cq_subtitle">Start calling for contacts</string>
     <string name="tx_more">MORE</string>
     <string name="tx_band_mode_label">BAND &amp; MODE</string>

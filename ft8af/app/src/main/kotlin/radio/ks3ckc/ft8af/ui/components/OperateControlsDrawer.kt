@@ -16,13 +16,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -41,6 +43,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -71,6 +74,9 @@ internal val DrawerDragThreshold = 48.dp
 
 /** Height of the grab handle strip (grabber bar + the collapsed "More controls" hint). */
 internal val DrawerHandleHeight = 36.dp
+
+/** Space kept clear above the fully expanded sheet, so its handle never reaches the screen edge. */
+internal val DrawerTopMargin = 8.dp
 
 /** Gap between the handle strip and the first control row. */
 internal val DrawerContentTopGap = 10.dp
@@ -142,22 +148,41 @@ fun OperateControlsDrawer(
     onOpenCqOptions: () -> Unit,
     onVolumeChange: (Int) -> Unit,
     onVolumeChangeFinished: () -> Unit,
+    // Collapsed height. Landscape passes DrawerHandleHeight so only the handle shows (the full
+    // peek, with the status line and tab bar, took the whole short screen); the reserved slot
+    // in the main column must use the same value.
+    peekHeight: Dp = OperateDrawerPeekHeight,
+    // False while Call CQ and Hunt are on the Decode screen's top row in landscape
+    // (CompactCallCqButton / CompactHuntButton): the drawer then leaves out that row.
+    showPrimaryActions: Boolean = true,
 ) {
     // Not laid out yet — the reserved peek slot hasn't reported its position. Skip a frame.
     if (anchorBottomPx <= 0f) return
 
     val density = LocalDensity.current
-    val peekPx = with(density) { OperateDrawerPeekHeight.toPx() }
+    val peekPx = with(density) { peekHeight.toPx() }
+    val handlePx = with(density) { DrawerHandleHeight.toPx() }
     val thresholdPx = with(density) { DrawerDragThreshold.toPx() }
     val scope = rememberCoroutineScope()
 
-    // Full natural height of the content, measured independently of the (clipped) sheet height.
-    var fullContentPx by remember { mutableFloatStateOf(peekPx) }
-    val rangePx = (fullContentPx - peekPx).coerceAtLeast(1f)
+    // The rows under the handle scroll, so a sheet capped at the screen height (landscape, or a
+    // large font) still reaches every control. The content's natural height is the rows'
+    // viewport plus whatever scrolls beyond it -- a sum that stays the same whatever height the
+    // sheet is currently clipped to. Null until the rows have been measured.
+    val rowsScroll = rememberScrollState()
+    var rowsViewportPx by remember { mutableStateOf<Float?>(null) }
+    val fullContentPx = rowsViewportPx?.let { handlePx + it + rowsScroll.maxValue } ?: peekPx
+    // Never taller than the space above the anchor: expanding used to push the sheet's own
+    // handle off the top of a landscape screen, leaving nothing on screen to collapse it with.
+    val maxSheetPx = anchorBottomPx - with(density) { DrawerTopMargin.toPx() }
+    val rangePx = (minOf(fullContentPx, maxSheetPx) - peekPx).coerceAtLeast(1f)
 
     // fraction 0 = collapsed peek, 1 = fully expanded. Animated on tap; follows the finger on drag.
     val fraction = remember { Animatable(if (expanded) 1f else 0f) }
-    LaunchedEffect(expanded) { fraction.animateTo(if (expanded) 1f else 0f, tween(220)) }
+    LaunchedEffect(expanded) {
+        if (!expanded) rowsScroll.animateScrollTo(0)
+        fraction.animateTo(if (expanded) 1f else 0f, tween(220))
+    }
 
     val sheetHeightPx = peekPx + rangePx * fraction.value
     val scrimAlpha = 0.55f * fraction.value
@@ -196,14 +221,7 @@ fun OperateControlsDrawer(
                 .background(BgSurface3)
                 .clipToBounds(),
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    // Measure the natural (unbounded) content height so the expanded target is
-                    // exact; the parent Box clips it to the animated height.
-                    .wrapContentHeight(align = Alignment.Top, unbounded = true)
-                    .onSizeChanged { fullContentPx = it.height.toFloat() },
-            ) {
+            Column(modifier = Modifier.fillMaxSize()) {
                 DrawerHandle(
                     expanded = expanded,
                     onToggle = { onExpandedChange(!expanded) },
@@ -221,6 +239,10 @@ fun OperateControlsDrawer(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .weight(1f)
+                        .onSizeChanged { rowsViewportPx = it.height.toFloat() }
+                        // Scrollable only when open: the collapsed peek must stay on its first row.
+                        .verticalScroll(rowsScroll, enabled = expanded)
                         .padding(
                             start = 16.dp,
                             end = 16.dp,
@@ -230,18 +252,20 @@ fun OperateControlsDrawer(
                     verticalArrangement = Arrangement.spacedBy(DrawerRowSpacing),
                 ) {
                     // ---- Primary row (visible in the peek): Call CQ / Stop + Hunt ----
-                    CqHuntRow(
-                        actions = actions,
-                        huntOptionLabel = huntOptionLabel,
-                        cqModifier = cqModifier,
-                        isFreeTextMode = isFreeTextMode,
-                        fieldDayEnabled = fieldDayEnabled,
-                        onCallCQ = onCallCQ,
-                        onStop = onStop,
-                        onOpenCqOptions = onOpenCqOptions,
-                        onToggleHunt = onToggleHunt,
-                        onOpenHuntOptions = onOpenHuntOptions,
-                    )
+                    if (showPrimaryActions) {
+                        CqHuntRow(
+                            actions = actions,
+                            huntOptionLabel = huntOptionLabel,
+                            cqModifier = cqModifier,
+                            isFreeTextMode = isFreeTextMode,
+                            fieldDayEnabled = fieldDayEnabled,
+                            onCallCQ = onCallCQ,
+                            onStop = onStop,
+                            onOpenCqOptions = onOpenCqOptions,
+                            onToggleHunt = onToggleHunt,
+                            onOpenHuntOptions = onOpenHuntOptions,
+                        )
+                    }
 
                     // ---- Secondary controls, revealed as the sheet grows (design 3b) ----
                     BandModeRow(bandModeLabel = bandModeLabel, onOpenBandMode = onOpenBandMode)

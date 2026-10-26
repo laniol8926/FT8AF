@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -70,6 +71,9 @@ import radio.ks3ckc.ft8af.ui.components.TxStrip
 import radio.ks3ckc.ft8af.ui.components.OperateControlsDrawer
 import radio.ks3ckc.ft8af.ui.components.OperateStatusRow
 import radio.ks3ckc.ft8af.ui.components.OperateDrawerPeekHeight
+import radio.ks3ckc.ft8af.ui.components.CompactCallCqButton
+import radio.ks3ckc.ft8af.ui.components.CompactHuntButton
+import radio.ks3ckc.ft8af.ui.components.txStripActionState
 import radio.ks3ckc.ft8af.ui.components.VoiceCommandButton
 import radio.ks3ckc.ft8af.ui.components.selectBandIndex
 import radio.ks3ckc.ft8af.ui.decode.DecodeScreen
@@ -153,6 +157,13 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
         controlsDrawerEnabled = controlsDrawerLive ?: GeneralVariables.controlsDrawerEnabled
     }
     var controlsExpanded by rememberSaveable { mutableStateOf(false) }
+    // Landscape is too short for the drawer's peek (Call CQ + Hunt) plus the status line and tab
+    // bar: the decode list got no rows. There the drawer collapses out of sight and opens from a
+    // "More controls" entry in the tab bar, and on the Decode tab Call CQ and Hunt move to
+    // compact buttons on the title row, next to the UTC time.
+    val isLandscape =
+        LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val drawerPeekHeight = if (isLandscape) 0.dp else OperateDrawerPeekHeight
     // Window-space Y of the reserved peek slot's bottom (== tab bar top). The drawer overlay
     // anchors its bottom edge here so the collapsed sheet lines up exactly with the reserved
     // inline space and grows upward from there.
@@ -483,6 +494,9 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     val onOpenHuntOptionsAction: () -> Unit = { showHuntOptions = true }
     val onReconnectCatAction: () -> Unit = { mainViewModel.reconnectRig() }
     val onOpenBandModeAction: () -> Unit = { showBandModeSheet = true }
+    // Call CQ and Hunt move out of the drawer onto the Decode title row only in landscape on the
+    // Decode tab; other tabs have no such row, so there they stay in the drawer.
+    val actionsOnDecodeTitle = controlsDrawerEnabled && isLandscape && activeTab == FT8AFTab.DECODE
 
     Box(modifier = Modifier.fillMaxSize().background(BgApp)) {
         // Keep the content clear of the display cutout (and the status bar, should it
@@ -546,6 +560,51 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                         mainViewModel,
                         bandModeLabel = decodeTitleLabel,
                         onOpenBandMode = onOpenBandModeAction,
+                        landscapeActions = if (actionsOnDecodeTitle) {
+                            {
+                                val actions = txStripActionState(isActivated, huntEnabled)
+                                CompactCallCqButton(
+                                    actions = actions,
+                                    cqModifier = cqModifier,
+                                    isFreeTextMode = isFreeTextMode,
+                                    fieldDayEnabled = fieldDayEnabled,
+                                    onCallCQ = onCallCQAction,
+                                    onStop = onStopAction,
+                                    onOpenCqOptions = onOpenCqOptionsAction,
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                CompactHuntButton(
+                                    actions = actions,
+                                    onToggle = onToggleHuntAction,
+                                    onOpenOptions = onOpenHuntOptionsAction,
+                                )
+                                // The status line ("Listening / Next transmit window") and the
+                                // CAT chip move up here too, freeing their docked row below.
+                                Spacer(modifier = Modifier.width(16.dp))
+                                OperateStatusRow(
+                                    isTransmitting = isTransmitting,
+                                    isTuning = isTuning,
+                                    slotMillis = slotMillis,
+                                    txSlot = txSlot,
+                                    showCatChip = showCatChip,
+                                    catState = catState,
+                                    onReconnectCat = onReconnectCatAction,
+                                    fillWidth = false,
+                                )
+                            }
+                        } else {
+                            null
+                        },
+                        landscapeSlotBar = if (actionsOnDecodeTitle) {
+                            {
+                                SlotTimerBar(
+                                    slotMillis = ModeProfile.fromId(operatingMode).slotMillis.toLong(),
+                                    offsetSec = avgDtSec,
+                                )
+                            }
+                        } else {
+                            null
+                        },
                     )
                     FT8AFTab.MAP -> MapScreen(mainViewModel)
                     FT8AFTab.WATERFALL -> WaterfallScreen(mainViewModel)
@@ -593,10 +652,13 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             // Slot timer bar — fills 0→100% across each slot (15s FT8 / 7.5s FT4).
             // The mean decode DT rides on the bar as a live clock-sync pill so the
             // operator can spot a drifting clock without opening Settings → Time Sync.
-            SlotTimerBar(
-                slotMillis = ModeProfile.fromId(operatingMode).slotMillis.toLong(),
-                offsetSec = avgDtSec,
-            )
+            // In landscape on the Decode tab it sits under the title row instead.
+            if (!actionsOnDecodeTitle) {
+                SlotTimerBar(
+                    slotMillis = ModeProfile.fromId(operatingMode).slotMillis.toLong(),
+                    offsetSec = avgDtSec,
+                )
+            }
 
             // TX operating controls above the tab bar. When the drawer setting is on (default)
             // they collapse into a bottom-sheet drawer (design 3a/3b): the peek shows status +
@@ -607,7 +669,8 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 // Docked status line (design 3a), then a reserved slot the drawer sheet sits in
                 // when collapsed. The actual sheet is the OperateControlsDrawer overlay in the
                 // outer Box; it anchors its bottom to this slot and grows upward on expand.
-                OperateStatusRow(
+                // In landscape on the Decode tab the status line is on the title row instead.
+                if (!actionsOnDecodeTitle) OperateStatusRow(
                     isTransmitting = isTransmitting,
                     isTuning = isTuning,
                     slotMillis = slotMillis,
@@ -627,7 +690,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 Spacer(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(OperateDrawerPeekHeight)
+                        .height(drawerPeekHeight)
                         .onGloballyPositioned { coords ->
                             drawerAnchorBottomPx = coords.positionInWindow().y + coords.size.height
                         },
@@ -670,6 +733,13 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             TabBar(
                 activeTab = activeTab,
                 onTabSelected = { activeTab = it },
+                onToggleMoreControls = if (controlsDrawerEnabled && isLandscape) {
+                    { controlsExpanded = !controlsExpanded }
+                } else {
+                    null
+                },
+                moreControlsOpen = controlsExpanded,
+                compact = isLandscape,
             )
         }
 
@@ -715,6 +785,8 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 onOpenCqOptions = onOpenCqOptionsAction,
                 onVolumeChange = onVolumeChangeAction,
                 onVolumeChangeFinished = onVolumeChangeFinishedAction,
+                peekHeight = drawerPeekHeight,
+                showPrimaryActions = !actionsOnDecodeTitle,
             )
         }
 
