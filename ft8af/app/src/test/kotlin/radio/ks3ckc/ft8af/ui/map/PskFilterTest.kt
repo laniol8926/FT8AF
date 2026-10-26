@@ -52,6 +52,19 @@ class PskFilterTest {
     }
 
     @Test
+    fun initialPskFilter_startsOnTheDialsBand() {
+        assertThat(initialPskFilter(14_074_000).band).isEqualTo(Band.M20)
+        assertThat(initialPskFilter(3_573_000).band).isEqualTo(Band.M80)
+        // Everything else keeps the usual defaults.
+        assertThat(initialPskFilter(7_074_000)).isEqualTo(PskFilter(band = Band.M40))
+    }
+
+    @Test
+    fun initialPskFilter_outOfBandDialShowsAllBands() {
+        assertThat(initialPskFilter(9_000_000).band).isNull()
+    }
+
+    @Test
     fun pskTimeLabel_mapsPresets() {
         assertThat(pskTimeLabel(900)).isEqualTo("15m")
         assertThat(pskTimeLabel(3600)).isEqualTo("1h")

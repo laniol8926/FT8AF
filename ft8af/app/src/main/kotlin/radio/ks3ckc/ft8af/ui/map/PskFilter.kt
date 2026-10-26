@@ -55,6 +55,12 @@ internal data class PskFilter(
     val direction: PskDirection = PskDirection.WHO_HEARD_ME,
 )
 
+/**
+ * The filter the map opens with: the band the rig is on ([dialHz]), so PSK spots start on the
+ * band being worked rather than all bands. A dial outside every listed band falls back to all.
+ */
+internal fun initialPskFilter(dialHz: Long): PskFilter = PskFilter(band = freqHzToBand(dialHz))
+
 /** Anything carrying an absolute frequency the band filter can read. */
 internal interface HasFrequencyHz {
     val frequencyHz: Long

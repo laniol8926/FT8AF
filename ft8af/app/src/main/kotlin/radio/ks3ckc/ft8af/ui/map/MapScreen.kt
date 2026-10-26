@@ -248,7 +248,11 @@ fun MapScreen(
     var pskError by remember { mutableStateOf<String?>(null) }
     // PSK overlay filters (band / mode / time window / direction); survives config
     // changes via PskFilterSaver. Changing it re-runs the fetch (force-once below).
-    var pskFilter by rememberSaveable(stateSaver = PskFilterSaver) { mutableStateOf(PskFilter()) }
+    // Opens on the band the rig is on (initialPskFilter); the operator can still pick All or
+    // another band, which holds until the map is closed.
+    var pskFilter by rememberSaveable(stateSaver = PskFilterSaver) {
+        mutableStateOf(initialPskFilter(GeneralVariables.band))
+    }
     var filterSheetOpen by rememberSaveable { mutableStateOf(false) }
 
     // Layer chips (concept 4c): Decodes and Worked partition the station markers;
