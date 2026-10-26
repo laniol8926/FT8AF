@@ -534,7 +534,9 @@ internal fun FrequencyRuler(spectrumWidth: Int, modifier: Modifier = Modifier) {
             }
             Text(
                 text = tick.hz.toString(),
-                color = TextDim,
+                // Full-strength text color (white on the dark theme): the dim gray was hard
+                // to read against the waterfall.
+                color = TextPrimary,
                 fontFamily = GeistMonoFamily,
                 fontSize = 8.sp,
                 letterSpacing = 0.02.sp,
