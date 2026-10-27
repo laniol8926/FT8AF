@@ -2171,6 +2171,7 @@ public class MainViewModel extends ViewModel {
                 // retuning. If a brown-out killed the port mid-transmission the
                 // rig is still keyed, and sending frequency/mode to a keyed rig
                 // is exactly what makes it click and mis-set.
+                unkeyStrandedQmx();
                 retryPendingUnkey();
                 setOperationBand();//set carrier frequency
             }
@@ -2839,10 +2840,42 @@ public class MainViewModel extends ViewModel {
      *
      * @return true if an unkey was owed and has now been sent successfully
      */
+    /**
+     * QMX only: send {@code TA0;}, which drops a CAT-tone carrier (see
+     * QmxCatTones). Harmless when no tone is up: any TA under 10 Hz is a key-up.
+     */
+    private void sendQmxToneKeyUp() {
+        BaseRig rig = baseRig;
+        if (!isQmxRig(rig)) return;
+        BaseRigConnector connector = rig.getConnector();
+        if (connector == null) return;
+        connector.sendData(com.k1af.ft8af.ft8transmit.QmxCatTones.KEY_UP
+                .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+    }
+
+    /**
+     * QMX only, on every (re)connect: if this app isn't transmitting or tuning,
+     * any carrier the radio holds is stranded (typically RF knocked the QMX off
+     * USB mid-over, so the TA0;/RX; never arrived). Drop it unconditionally. The
+     * PTT latch can't be relied on here: Hamlib writes PTT on its own worker, so
+     * a lost unkey isn't seen as undelivered.
+     */
+    void unkeyStrandedQmx() {
+        if (!isQmxRig(baseRig)) return;
+        if (ft8TransmitSignal != null
+                && (ft8TransmitSignal.isTransmitting() || ft8TransmitSignal.isTuning())) {
+            return;
+        }
+        fileLog("PTT: QMX connected while idle — sending TA0; and PTT-off");
+        sendQmxToneKeyUp();
+        baseRig.setPTT(false);
+    }
+
     public boolean retryPendingUnkey() {
         if (!pttSafetyLatch.needsUnkey()) return false;
         if (baseRig == null || !baseRig.isConnected()) return false;
         fileLog("PTT: unkey still owed after link loss — re-sending PTT-off");
+        sendQmxToneKeyUp();
         baseRig.setPTT(false);
         boolean ok = lastPttWriteReachedRig();
         pttSafetyLatch.onUnkeyAttempted(ok);
