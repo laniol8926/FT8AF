@@ -179,6 +179,97 @@ internal fun CompactTxPeriodButton(
     }
 }
 
+/** How an SWR reading is coloured: good up to 2.0:1, caution to 3.0:1, bad above. */
+internal enum class SwrBand { GOOD, CAUTION, BAD }
+
+internal fun swrBand(ratio: Float): SwrBand = when {
+    ratio <= 2.0f -> SwrBand.GOOD
+    ratio <= 3.0f -> SwrBand.CAUTION
+    else -> SwrBand.BAD
+}
+
+/**
+ * Last SWR reading for the landscape title row, after the Even/Odd button: "SWR" over the
+ * ratio, coloured by [swrBand]. [ratioText] is the controller's "1.3" string; the chip is
+ * only placed once a rig has reported one (the QMX's SW; meter while keyed).
+ */
+@Composable
+internal fun CompactSwrChip(
+    ratioText: String,
+    modifier: Modifier = Modifier,
+) {
+    val ratio = ratioText.removeSuffix("+").toFloatOrNull() ?: 0f
+    CompactMeterChip(
+        label = stringResource(R.string.swr_chip_label),
+        value = ratioText,
+        valueColor = when (swrBand(ratio)) {
+            SwrBand.GOOD -> StatusConfirmed
+            SwrBand.CAUTION -> StatusWarn
+            SwrBand.BAD -> StatusBad
+        },
+        description = stringResource(R.string.swr_chip_description, ratioText),
+        modifier = modifier,
+    )
+}
+
+/**
+ * Last measured output power, beside [CompactSwrChip]: "PWR" over e.g. "4.5W" (the QMX's
+ * PC; meter while keyed). Placed once a rig has reported a reading.
+ */
+@Composable
+internal fun CompactPowerChip(
+    powerText: String,
+    modifier: Modifier = Modifier,
+) {
+    CompactMeterChip(
+        label = stringResource(R.string.power_chip_label),
+        value = powerText,
+        valueColor = TextPrimary,
+        description = stringResource(R.string.power_chip_description, powerText),
+        modifier = modifier,
+    )
+}
+
+/** A small two-line meter readout at the title row's button height: label over value. */
+@Composable
+private fun CompactMeterChip(
+    label: String,
+    value: String,
+    valueColor: Color,
+    description: String,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .height(CompactCallCqHeight)
+            .width(44.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(BgSurface3)
+            .border(1.dp, Border, RoundedCornerShape(12.dp))
+            .semantics { contentDescription = description },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = label,
+            color = TextMuted,
+            fontSize = 9.sp,
+            fontFamily = InterFamily,
+            maxLines = 1,
+            softWrap = false,
+        )
+        Text(
+            text = value,
+            color = valueColor,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = InterFamily,
+            maxLines = 1,
+            softWrap = false,
+        )
+    }
+}
+
 /**
  * The small subtitle shown under "Call CQ" that reflects which CQ variant is queued.
  * Precedence: free-text > Field Day > custom modifier > none. Null while the button is

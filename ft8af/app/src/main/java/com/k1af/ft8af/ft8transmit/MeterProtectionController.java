@@ -46,6 +46,25 @@ public class MeterProtectionController {
     public final MutableLiveData<Integer> lastSwr = new MutableLiveData<>(0);
     // Holds the SWR ratio string (e.g. "3.2:1") that triggered lockout, for the banner.
     public final MutableLiveData<String> lockoutSwrRatio = new MutableLiveData<>("");
+    // Last exact SWR ratio from a rig that reports one (QMX), e.g. "1.3"; empty until the
+    // first reading. Held after TX ends so the operator still sees it.
+    public final MutableLiveData<String> lastSwrRatio = new MutableLiveData<>("");
+
+    /** An exact SWR ratio from the rig (see BaseRig.OnMeterData#onSwrRatio). */
+    public void onSwrRatio(float ratio) {
+        lastSwrRatio.postValue(formatSwrRatio(ratio));
+    }
+
+    /** "4.5W", "12.4W", "5W": not rounded (see GeneralVariables.formatWatts). Pure for tests. */
+    public static String formatPowerWatts(float watts) {
+        return GeneralVariables.formatWatts(watts) + "W";
+    }
+
+    /** "1.3" style, one decimal; "9.9+" above that. Pure for tests. */
+    public static String formatSwrRatio(float ratio) {
+        if (ratio >= 9.95f) return "9.9+";
+        return String.format(java.util.Locale.ROOT, "%.1f", ratio);
+    }
 
     // Throttle for the per-reading SWR diagnostic log line (meter polls ~every 2s).
     private static final long SWR_LOG_THROTTLE_MS = 1500;

@@ -140,6 +140,11 @@
     <!-- Short forms for the landscape Decode title row's single TX-period button. -->
     <string name="tx_period_even_short">Even</string>
     <string name="tx_period_odd_short">Odd</string>
+    <string name="swr_chip_label">SWR</string>
+    <string name="swr_chip_description">SWR %1$s to 1</string>
+    <string name="qsopanel_swr">SWR %1$s</string>
+    <string name="power_chip_label">PWR</string>
+    <string name="power_chip_description">Output power %1$s</string>
     <string name="tx_dx">DX</string>
     <string name="tx_hunt_off">Off</string>
 

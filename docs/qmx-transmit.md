@@ -100,7 +100,7 @@ commands**, with **0.3 ms worst-case** symbol lateness. The radio shows
 
 ## Direct-USB fixes found along the way
 
-These are in the same commit (`ac1a4949`) and stand on their own:
+These came with the CAT-tone commit and stand on their own:
 
 - **RX capture now pauses for USB-direct TX too.**
   `MainViewModel.shouldPauseRxCaptureForTx` used to exclude USB-direct
@@ -110,6 +110,86 @@ These are in the same commit (`ac1a4949`) and stand on their own:
   libusb context so STOP can wake its event loop. Three early-exit paths freed
   the context without unpublishing it, so the next cancel crashed in
   `libusb_interrupt_event_handler`. Every exit now unpublishes first.
+
+## Unkeying a radio that dropped off USB
+
+At full power, RF can knock the QMX off USB a few milliseconds after it keys
+(seen on 2026-10-27 with a loose antenna connection: fine into a dummy load,
+fine again after re-seating the antenna). The stop then never reaches the
+radio ("serial.send: port not open!"), and the QMX keeps transmitting the last
+`TA` tone until it is power-cycled.
+
+- When a QMX connects (or reconnects) and FT8AF is not transmitting or
+  tuning, `MainViewModel.unkeyStrandedQmx` sends `TA0;` and PTT-off before
+  anything else. The owed-unkey retry (`retryPendingUnkey`) also sends
+  `TA0;`. The PTT safety latch alone can't catch this, because Hamlib writes
+  PTT on its own worker thread, so a lost unkey isn't seen as undelivered.
+- TUNE with CAT tones waits the configured PTT Delay before its first `TA`,
+  the same settle time an over gets.
+- Each key-down logs whether RX capture was paused.
+
+If the QMX drops off USB the moment it keys, try a dummy load first: if it
+then works, the cause is RF in the station, not the app.
+
+## SWR and power from the QMX
+
+While a QMX is keyed, `HamlibRig` asks for both meters every 0.7 s with
+`SW;PC;` (QMX CAT, firmware 1.04):
+
+- **`SW`** returns SWR × 100 (`SW120;` = 1.20:1, confirmed on the radio).
+- **`PC`** returns output power in tenths of a watt (`PC47;` = 4.7 W).
+
+Hamlib owns the serial link, and its JNI bridge has no meter read, so FT8AF
+sends the queries itself. `QmxMeterReplies.split` takes the `SW…;` and
+`PC…;` replies out of the incoming bytes before they reach Hamlib, and passes
+everything else through unchanged (including fragments split across reads).
+
+Where the readings go:
+
+- **SWR** feeds the existing meter path (`notifyMeterData`), so the
+  SWR-protection halt works for the QMX too (still suppressed during TUNE).
+  The exact ratio (`notifySwrRatio`) drives the displays.
+- **Power** updates the **operator identity power** (Settings > Operator
+  Identity). A 0 W reading is ignored. The value is kept to 0.1 W, not
+  rounded, and saved once when the radio unkeys, not on every poll.
+
+On screen:
+
+- The landscape title row shows an **SWR** chip and a **PWR** chip after the
+  Even/Odd button (`CompactSwrChip`, `CompactPowerChip`). SWR is green up to
+  2.0, amber up to 3.0, and red above.
+- The QSO panel header shows **"SWR 1.2"** and **"4.7W"** after the SNR.
+- Both keep the last reading after TX ends.
+
+### Operator power is the one power used everywhere
+
+`GeneralVariables.myPowerWatts` (a decimal, observed through
+`mutableMyPowerWatts`) feeds:
+
+- the Settings panel
+- the PWR chip
+- the QSO panel
+- the logbook
+
+Radios whose power meter FT8AF reads (today only the QMX, whose `PC` is
+measured output) keep it current. Every other radio never asks, so the power
+the operator typed in Settings is shown and logged. On Kenwood-style radios
+`PC;` is the power *setting*, not a measurement, so it isn't used.
+
+### TX power in the log
+
+Every QSO logged in FT8AF records the operator power as ADIF `TX_PWR`
+(`QSLRecord.txPwr`, new `QSLTable.tx_pwr` column, schema v23). It goes
+everywhere a QSO goes:
+
+- **ADIF:** the ADIF log file, the app and web exports (`AdifRecord`), and
+  the UDP "Logged ADIF" message.
+- **Uploads:** QRZ, Cloudlog and Wavelog (`ThirdPartyService`).
+- **UDP "QSO logged" message:** its Tx power field, which CQRLOG reads.
+- **Imports:** ADIF import reads `TX_PWR`, and a re-import fills it on older
+  rows.
+
+With no power set, the QSO is logged without `TX_PWR` rather than with 0.
 
 ## Known limits
 

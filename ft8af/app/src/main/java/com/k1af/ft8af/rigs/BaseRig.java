@@ -203,11 +203,21 @@ public abstract class BaseRig {
     // Meter data callback for MeterProtectionController (ALC auto-volume, SWR halt)
     public interface OnMeterData {
         void onMeterUpdate(int normalizedAlc, int normalizedSwr);
+        // The exact SWR ratio, from rigs that report one (the QMX's SW; meter).
+        default void onSwrRatio(float ratio) {}
+        // Measured output power in watts, from rigs that report it (the QMX's PC; meter).
+        default void onPowerWatts(float watts) {}
     }
     private OnMeterData onMeterData;
     public void setOnMeterData(OnMeterData listener) { this.onMeterData = listener; }
     protected void notifyMeterData(int alc, int swr) {
         if (onMeterData != null) onMeterData.onMeterUpdate(alc, swr);
+    }
+    protected void notifySwrRatio(float ratio) {
+        if (onMeterData != null) onMeterData.onSwrRatio(ratio);
+    }
+    protected void notifyPowerWatts(float watts) {
+        if (onMeterData != null) onMeterData.onPowerWatts(watts);
     }
 
 }

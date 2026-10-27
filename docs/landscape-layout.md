@@ -150,6 +150,19 @@ reconnects.
 
 Both remain in the More controls drawer as well.
 
+After Even/Odd come two readouts at the same height (`CompactSwrChip`,
+`CompactPowerChip`, 44 dp each). Each shows a small label over its value:
+
+- **SWR**, colored green up to 2.0, amber up to 3.0 and red above. It appears
+  once a radio has reported SWR (the QMX's `SW;` meter while keyed) and keeps
+  the last reading.
+- **PWR**, the operator identity power ("4.7W"). It's kept current by the
+  QMX's `PC;` meter, otherwise it's what was set in Settings. It's hidden
+  when no power is set.
+
+The QSO panel header shows the same two values ("SWR 1.2  4.7W"). See
+[qmx-transmit.md](qmx-transmit.md).
+
 `ClickableTopBarTitle` keeps the band/mode label at full width whenever it
 has trailing content, so the trailing group (clock, buttons, status) is what
 gives way on a narrow screen, not the label (which was being squeezed to

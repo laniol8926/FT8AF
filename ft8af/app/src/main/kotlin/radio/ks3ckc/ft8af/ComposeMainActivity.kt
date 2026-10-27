@@ -414,6 +414,11 @@ class ComposeMainActivity : AppCompatActivity() {
                     "audioOutputDeviceId=${GeneralVariables.audioOutputDeviceId}, " +
                     "usbAudioInputVidPid=${GeneralVariables.usbAudioInputVendorId}:" +
                     "${GeneralVariables.usbAudioInputProductId}")
+                // The WSJT-X UDP service first bound when the view model was created, before
+                // the config was read, so it always saw udp_enabled=false and stayed off after
+                // every restart until the operator touched the Settings toggle. Rebind now that
+                // the persisted udp_enabled/host/port are in.
+                radio.ks3ckc.ft8af.wsjtx.WsjtxUdpService.reload()
                 if (GeneralVariables.autoUpdateGridFromGPS) {
                     val grid = MaidenheadGrid.getMyMaidenheadGrid(applicationContext)
                     if (grid.isNotEmpty()) {

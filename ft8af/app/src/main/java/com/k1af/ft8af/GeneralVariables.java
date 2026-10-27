@@ -499,7 +499,24 @@ public class GeneralVariables {
     public static String myCallsign = "";//My callsign
     public static String myAntenna = "";
     public static String myRigName = "";  // Set by MainViewModel.connectRig(); used in PSKReporter software string
-    public static int myPowerWatts = 0;    // 0 = not set, displays as "--"
+    // Operator identity's power in watts, to 0.1 W; 0 = not set, "--". The one power the
+    // app shows and logs: typed in Settings, or kept current by a radio whose power meter
+    // FT8AF reads (the QMX's PC; while keyed). Write it through setMyPowerWatts so the
+    // displays follow.
+    public static float myPowerWatts = 0f;
+    public static final MutableLiveData<Float> mutableMyPowerWatts = new MutableLiveData<>(0f);
+
+    public static void setMyPowerWatts(float watts) {
+        myPowerWatts = watts;
+        mutableMyPowerWatts.postValue(watts);
+    }
+
+    /** Watts without rounding: "4.5", "12.4", and whole values without ".0" ("100"). */
+    public static String formatWatts(float watts) {
+        float tenths = Math.round(watts * 10f) / 10f; // float noise only; readings are in tenths
+        if (tenths == (long) tenths) return Long.toString((long) tenths);
+        return String.format(java.util.Locale.ROOT, "%.1f", tenths);
+    }
     public static String toModifier = "";//Call modifier
     public static String cqFreeText = "";//Persisted custom/directed CQ free text
 

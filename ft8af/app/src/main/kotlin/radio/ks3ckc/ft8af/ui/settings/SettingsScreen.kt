@@ -30,7 +30,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -173,7 +172,7 @@ private fun SettingsLanding(
 
     var callsignState by remember { mutableStateOf(GeneralVariables.myCallsign.orEmpty()) }
     var antennaState by remember { mutableStateOf(GeneralVariables.myAntenna.orEmpty()) }
-    var powerWattsState by remember { mutableIntStateOf(GeneralVariables.myPowerWatts) }
+    val powerWattsState by GeneralVariables.mutableMyPowerWatts.observeAsState(GeneralVariables.myPowerWatts)
     var autoUpdateGridFromGPS by remember { mutableStateOf(GeneralVariables.autoUpdateGridFromGPS) }
     var showEditOperator by remember { mutableStateOf(false) }
 
@@ -189,7 +188,7 @@ private fun SettingsLanding(
         notConnectedLabel = stringResource(R.string.common_not_connected),
     )
     val antennaDisplay = antennaState.ifEmpty { "--" }
-    val powerDisplay = if (powerWattsState > 0) "${powerWattsState}W" else "--"
+    val powerDisplay = if (powerWattsState > 0f) "${GeneralVariables.formatWatts(powerWattsState)}W" else "--"
 
     // -- Edit Operator Dialog --
     if (showEditOperator) {
@@ -223,9 +222,12 @@ private fun SettingsLanding(
                 GeneralVariables.myAntenna = trimmedAntenna
                 mainViewModel.databaseOpr.writeConfig("antenna", trimmedAntenna, null)
 
-                powerWattsState = newPowerWatts
-                GeneralVariables.myPowerWatts = newPowerWatts
-                mainViewModel.databaseOpr.writeConfig("powerWatts", newPowerWatts.toString(), null)
+                GeneralVariables.setMyPowerWatts(newPowerWatts)
+                mainViewModel.databaseOpr.writeConfig(
+                    "powerWatts",
+                    if (newPowerWatts > 0f) GeneralVariables.formatWatts(newPowerWatts) else "0",
+                    null,
+                )
 
                 showEditOperator = false
             },
@@ -368,15 +370,17 @@ private fun EditOperatorDialog(
     initialCallsign: String,
     initialGrid: String,
     initialAntenna: String = "",
-    initialPowerWatts: Int = 0,
+    initialPowerWatts: Float = 0f,
     onDismiss: () -> Unit,
-    onSave: (callsign: String, grid: String, antenna: String, powerWatts: Int) -> Unit,
+    onSave: (callsign: String, grid: String, antenna: String, powerWatts: Float) -> Unit,
 ) {
     var callsignInput by remember { mutableStateOf(TextFieldValue(initialCallsign)) }
     var gridInput by remember { mutableStateOf(TextFieldValue(initialGrid)) }
     var antennaInput by remember { mutableStateOf(TextFieldValue(initialAntenna)) }
     var powerInput by remember {
-        mutableStateOf(TextFieldValue(if (initialPowerWatts > 0) initialPowerWatts.toString() else ""))
+        mutableStateOf(
+            TextFieldValue(if (initialPowerWatts > 0f) GeneralVariables.formatWatts(initialPowerWatts) else ""),
+        )
     }
 
     val fieldColors = OutlinedTextFieldDefaults.colors(
@@ -448,12 +452,15 @@ private fun EditOperatorDialog(
             OutlinedTextField(
                 value = powerInput,
                 onValueChange = { new ->
-                    if (new.text.all { it.isDigit() }) powerInput = new
+                    // Digits with at most one decimal point ("4.5").
+                    if (new.text.all { it.isDigit() || it == '.' } && new.text.count { it == '.' } <= 1) {
+                        powerInput = new
+                    }
                 },
                 label = { Text("Power (watts)") },
                 placeholder = { Text("e.g. 100", color = TextFaint) },
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 colors = fieldColors,
                 textStyle = TextStyle(fontSize = 14.sp),
                 modifier = Modifier.fillMaxWidth(),
@@ -469,7 +476,7 @@ private fun EditOperatorDialog(
                 }
                 TextButton(
                     onClick = {
-                        val watts = powerInput.text.toIntOrNull() ?: 0
+                        val watts = powerInput.text.toFloatOrNull()?.takeIf { it > 0f } ?: 0f
                         onSave(callsignInput.text, gridInput.text, antennaInput.text, watts)
                     },
                 ) {

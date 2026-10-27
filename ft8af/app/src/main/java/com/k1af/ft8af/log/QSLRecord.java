@@ -51,6 +51,9 @@ public class QSLRecord {
     // The worked station's ADIF STATE (US state / other countries' subdivision), as logged.
     // Null when the log row has none; QSOs made in-app have none (FT8 only carries a grid).
     private String state;
+    // ADIF TX_PWR in watts, e.g. "4.5". In-app QSOs take the operator identity's power
+    // (which follows the QMX's measured output); imports keep the logged value. Null if none.
+    private String txPwr;
     public boolean isQSL = false;//Manual confirmation
     public boolean isLotW_import = false;//Whether imported from external data; requires database comparison to determine
     public boolean isLotW_QSL = false;//Whether confirmed via LoTW
@@ -111,6 +114,8 @@ public class QSLRecord {
         this.bandLength = BaseRigOperation.getMeterFromFreq(bandFreq);//Get wavelength
         this.bandFreq = bandFreq;
         this.wavFrequency = wavFrequency;
+        this.txPwr = GeneralVariables.myPowerWatts > 0f
+                ? GeneralVariables.formatWatts(GeneralVariables.myPowerWatts) : null;
         String distance = "";
         if (!myMaidenGrid.equals("") && !toMaidenGrid.equals("")) {
             distance = MaidenheadGrid.getDistStrEN(myMaidenGrid, toMaidenGrid);
@@ -261,6 +266,10 @@ public class QSLRecord {
         if (map.containsKey("STATE")) {//Worked station's state/subdivision (LoTW, QRZ, most loggers)
             String s = map.get("STATE");
             state = s == null || s.trim().isEmpty() ? null : s.trim().toUpperCase();
+        }
+        if (map.containsKey("TX_PWR")) {//Transmit power in watts, as logged
+            String p = map.get("TX_PWR");
+            txPwr = p == null || p.trim().isEmpty() ? null : p.trim();
         }
     }
 
@@ -450,6 +459,15 @@ public class QSLRecord {
     /** The worked station's ADIF STATE as logged (upper-cased), or null. */
     public String getState() {
         return state;
+    }
+
+    /** ADIF TX_PWR in watts as text (e.g. "4.5"), or null. */
+    public String getTxPwr() {
+        return txPwr;
+    }
+
+    public void setTxPwr(String txPwr) {
+        this.txPwr = txPwr;
     }
 
     public void setSigInfo(String sigInfo) {

@@ -80,8 +80,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * logged QSO for anyone upgrading rather than installing clean.
      * v21 adds {@code QSLTable.synced_wrl} (World Radio League upload state, issue #800).
      * v22 adds {@code QSLTable.state} (the worked station's ADIF STATE, from imports).
+     * v23 adds {@code QSLTable.tx_pwr} (ADIF TX_PWR in watts).
      */
-    static final int SCHEMA_VERSION = 22;
+    static final int SCHEMA_VERSION = 23;
 
     public static synchronized DatabaseOpr getInstance(@Nullable Context context, @Nullable String databaseName) {
         if (instance == null) {
@@ -300,6 +301,10 @@ public class DatabaseOpr extends SQLiteOpenHelper {
             // preference to the grid-derived state; empty for in-app QSOs.
             alterTable(sqLiteDatabase, "QSLTable", "state"
                     , "state TEXT");
+            // Transmit power in watts (ADIF TX_PWR): the operator's power for in-app QSOs,
+            // the logged value for imports.
+            alterTable(sqLiteDatabase, "QSLTable", "tx_pwr"
+                    , "tx_pwr TEXT");
 
         } else {
             sqLiteDatabase.execSQL("CREATE TABLE QSLTable (\n" +
@@ -330,7 +335,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     "my_sig_info TEXT,\n" +//POTA: activator's park ref
                     "sig TEXT,\n" +//POTA: worked station's program
                     "sig_info TEXT,\n" +//POTA: worked station's park ref
-                    "state TEXT)");//Worked station's ADIF STATE (imports)
+                    "state TEXT,\n" +//Worked station's ADIF STATE (imports)
+                    "tx_pwr TEXT)");//ADIF TX_PWR, watts
         }
 
 
@@ -1356,6 +1362,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 .mySigInfo(colStr(cursor, "my_sig_info"))
                 .sig(colStr(cursor, "sig"))
                 .sigInfo(colStr(cursor, "sig_info"))
+                .txPwr(colStr(cursor, "tx_pwr"))
                 .comment(colStr(cursor, "comment"));
     }
 
@@ -1603,8 +1610,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         if (!checkIsQSL(record)) {//If log data doesn't exist, add it
             querySQL = "INSERT INTO QSLTable(call, isQSL,isLotW_import,isLotW_QSL,gridsquare, mode, rst_sent, rst_rcvd, qso_date, " +
                     "time_on, qso_date_off, time_off, band, freq, station_callsign, my_gridsquare," +
-                    "comment,my_sig,my_sig_info,sig,sig_info,state)" +
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                    "comment,my_sig,my_sig_info,sig,sig_info,state,tx_pwr)" +
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
             db.execSQL(querySQL, new String[]{record.getToCallsign()
                     , String.valueOf(record.isQSL ? 1 : 0)
@@ -1628,7 +1635,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     , record.getMySigInfo()
                     , record.getSig()
                     , record.getSigInfo()
-                    , record.getState()});
+                    , record.getState()
+                    , record.getTxPwr()});
             // If this QSO was logged during an active POTA activation, refresh its
             // qso_count. This is a dupe-aware recount, not a blind increment: POTA
             // doesn't credit a repeat contact with the same station on the same band.
@@ -1687,6 +1695,16 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                                 " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)" +
                                 " and (state IS NULL OR state='')"
                         , new Object[]{record.getState(), record.getToCallsign()
+                                , record.getQso_date()
+                                , record.getTime_on()
+                                , record.getMode()});
+            }
+            // Same for the logged TX_PWR on rows saved before the tx_pwr column existed.
+            if (record.getTxPwr() != null) {
+                db.execSQL("UPDATE  QSLTable  SET tx_pwr=? " +
+                                " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)" +
+                                " and (tx_pwr IS NULL OR tx_pwr='')"
+                        , new Object[]{record.getTxPwr(), record.getToCallsign()
                                 , record.getQso_date()
                                 , record.getTime_on()
                                 , record.getMode()});
@@ -2771,9 +2789,11 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 }
                 if (name.equalsIgnoreCase("powerWatts")) {
                     try {
-                        GeneralVariables.myPowerWatts = result.isEmpty() ? 0 : Integer.parseInt(result);
+                        // Older builds saved whole watts ("5"); a decimal ("4.5") reads too.
+                        GeneralVariables.setMyPowerWatts(
+                                result.isEmpty() ? 0f : Float.parseFloat(result.trim()));
                     } catch (NumberFormatException e) {
-                        GeneralVariables.myPowerWatts = 0;
+                        GeneralVariables.setMyPowerWatts(0f);
                     }
                 }
                 if (name.equalsIgnoreCase("freq")) {

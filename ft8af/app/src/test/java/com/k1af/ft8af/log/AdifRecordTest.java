@@ -50,6 +50,12 @@ public class AdifRecordTest {
     }
 
     @Test
+    public void txPwr_isWrittenWhenSetAndOmittedWhenNot() {
+        assertThat(new AdifRecord().call("W1AW").txPwr("4.5").build()).contains("<TX_PWR:3>4.5 ");
+        assertThat(new AdifRecord().call("W1AW").build()).doesNotContain("TX_PWR");
+    }
+
+    @Test
     public void manualQsl_usesAppPrefixNotTheBareNonStandardName() {
         // ADIF has no QSL_MANUAL field. Emitting the bare name makes a strict importer
         // reject or warn on every record; APP_<PROGRAMID>_<FIELD> is the spec's mechanism

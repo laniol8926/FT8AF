@@ -265,6 +265,9 @@ fun ActiveQsoPanel(
     val messageList by mainViewModel.mutableFt8MessageList.observeAsState(arrayListOf())
     val transmittingMessage by mainViewModel.ft8TransmitSignal.mutableTransmittingMessage.observeAsState("")
     val callerQueue by mainViewModel.ft8TransmitSignal.mutableCallerQueue.observeAsState(arrayListOf())
+    val lastSwrRatio by mainViewModel.meterProtectionController.lastSwrRatio.observeAsState("")
+    // Operator identity's power: typed in Settings or kept current by the QMX's meter.
+    val operatorPowerWatts by GeneralVariables.mutableMyPowerWatts.observeAsState(GeneralVariables.myPowerWatts)
 
     val liveCallsign = toCallsign?.callsign ?: "CQ"
 
@@ -431,6 +434,9 @@ fun ActiveQsoPanel(
                     else -> stringResource(R.string.qsopanel_waiting_for, displayCallsign)
                 },
                 snr = if (displayCallsign != null) bannerSnr else null,
+                swrRatio = lastSwrRatio.takeIf { it.isNotEmpty() },
+                powerText = (operatorPowerWatts ?: 0f).takeIf { it > 0f }
+                    ?.let { com.k1af.ft8af.ft8transmit.MeterProtectionController.formatPowerWatts(it) },
                 onClick = if (displayCallsign != null) onReopenSheet else null,
                 onLog = if (displayCallsign != null) {
                     {
@@ -486,6 +492,8 @@ fun ActiveQsoPanel(
 private fun StationHeader(
     targetCallsign: String,
     snr: QsoBannerSnr?,
+    swrRatio: String? = null,
+    powerText: String? = null,
     onClick: (() -> Unit)? = null,
     onLog: (() -> Unit)? = null,
     onClear: (() -> Unit)? = null,
@@ -530,6 +538,29 @@ private fun StationHeader(
                 Text(
                     text = stringResource(R.string.qsopanel_sent_report, bannerSnrLabel(sent)),
                     color = TextFaint,
+                    fontSize = 11.sp,
+                    fontFamily = GeistMonoFamily,
+                )
+            }
+            // Last SWR reading (QMX SW; meter), coloured like the landscape title-row chip.
+            swrRatio?.let { ratioText ->
+                val ratio = ratioText.removeSuffix("+").toFloatOrNull() ?: 0f
+                Text(
+                    text = stringResource(R.string.qsopanel_swr, ratioText),
+                    color = when (swrBand(ratio)) {
+                        SwrBand.GOOD -> StatusConfirmed
+                        SwrBand.CAUTION -> StatusWarn
+                        SwrBand.BAD -> StatusBad
+                    },
+                    fontSize = 11.sp,
+                    fontFamily = GeistMonoFamily,
+                )
+            }
+            // Last measured output power (QMX PC; meter), beside the SWR.
+            powerText?.let {
+                Text(
+                    text = it,
+                    color = TextPrimary,
                     fontSize = 11.sp,
                     fontFamily = GeistMonoFamily,
                 )

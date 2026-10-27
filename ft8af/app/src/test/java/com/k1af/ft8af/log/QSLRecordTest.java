@@ -42,6 +42,32 @@ public class QSLRecordTest {
         assertThat(new QSLRecord(map).getState()).isNull();
     }
 
+    @Test
+    public void adifImport_readsTxPower() {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("CALL", "W5ORC");
+        map.put("COMMENT", "imported");
+        map.put("MODE", "FT8");
+        map.put("TX_PWR", " 4.5 ");
+        assertThat(new QSLRecord(map).getTxPwr()).isEqualTo("4.5");
+    }
+
+    @Test
+    public void inAppQso_takesTheOperatorPower_andNoneWhenUnset() {
+        float saved = com.k1af.ft8af.GeneralVariables.myPowerWatts;
+        try {
+            com.k1af.ft8af.GeneralVariables.myPowerWatts = 4.5f;
+            assertThat(new QSLRecord(EPOCH, PLUS_15S, "K1ABC", "", "W1AW", "",
+                    -10, -12, "FT8", 14_074_000L, 1500).getTxPwr()).isEqualTo("4.5");
+            // Not set (e.g. a radio with no power meter and nothing typed in): no TX_PWR, not 0.
+            com.k1af.ft8af.GeneralVariables.myPowerWatts = 0f;
+            assertThat(new QSLRecord(EPOCH, PLUS_15S, "K1ABC", "", "W1AW", "",
+                    -10, -12, "FT8", 14_074_000L, 1500).getTxPwr()).isNull();
+        } finally {
+            com.k1af.ft8af.GeneralVariables.myPowerWatts = saved;
+        }
+    }
+
     private static final long EPOCH = 0L;            // 1970-01-01 00:00:00 UTC
     private static final long PLUS_15S = 15_000L;    // +15 s
 

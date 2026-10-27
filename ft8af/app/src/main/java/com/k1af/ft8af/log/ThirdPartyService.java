@@ -303,6 +303,12 @@ public class ThirdPartyService {
                     , qslRecord.getMyMaidenGrid()));
         }
 
+        if (qslRecord.getTxPwr() != null && !qslRecord.getTxPwr().isEmpty()) {
+            logStr.append(String.format("<tx_pwr:%d>%s "
+                    , AdifFormat.utf8Length(qslRecord.getTxPwr())
+                    , qslRecord.getTxPwr()));
+        }
+
         String comment = qslRecord.getComment();
         if (comment == null) comment = "";
 
@@ -779,6 +785,7 @@ public class ThirdPartyService {
 
         appendAdif(s, "station_callsign", colStr(c, "station_callsign"));
         appendAdif(s, "my_gridsquare", colStr(c, "my_gridsquare"));
+        appendAdif(s, "tx_pwr", colStr(c, "tx_pwr"));
 
         String comment = colStr(c, "comment");
         if (comment == null) comment = "";

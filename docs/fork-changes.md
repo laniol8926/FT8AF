@@ -1,7 +1,7 @@
 # Changes on the laniol8926/FT8AF fork (`dev`)
 
 This is what the fork's `dev` branch adds on top of `patrickrb/FT8AF` `dev`,
-as of 2026-10-26. These changes enhance the app; they don't replace upstream
+as of 2026-10-27. These changes enhance the app; they don't replace upstream
 behaviour. Where a control moved, the original is still in place.
 
 Pull requests already sent upstream are noted. Everything else is on the fork
@@ -13,10 +13,13 @@ only.
 |---|---|---|
 | QMX through the Hamlib backend: model id kept separately from the CI-V address, Digi mode (`MD6;`), I/Q mode off on connect (`Q90;`), open-retry backoff | `HamlibRig`, `MainViewModel.connectRig` | PR #925 (open) |
 | RX capture fixes for MediaTek USB HALs: PCM16 capture converted in software, MicRecorder reopens when the input device changes, recovery after a transient AudioRecord failure, USB device matched by name when its id goes stale | `MicRecorder`, `HamRecorder` | PR #949 (open) |
-| TX audio attributes and session/low-latency cleanup | `FT8TransmitSignal` | PR #952 (open; superseded by CAT tones for the QMX) |
+| TX audio attributes and session/low-latency cleanup | `FT8TransmitSignal` | PR #952 (merged) |
 | Default the TX audio channel to Left on first QMX connect | `MainViewModel` | fork |
 | Pause RX capture while transmitting on the same USB rig | `MainViewModel.shouldPauseRxCaptureForTx`, `HamRecorder.pauseForTx` | fork |
-| **Transmit by CAT tone commands (`TA`)**, plus direct-USB TX fixes | see [qmx-transmit.md](qmx-transmit.md) | fork |
+| **Transmit by CAT tone commands (`TA`)**, plus direct-USB TX fixes | see [qmx-transmit.md](qmx-transmit.md) | PR #968 (open, stacked on #925) |
+| Drop a stranded carrier (`TA0;` + PTT-off) whenever the QMX reconnects while idle | `MainViewModel.unkeyStrandedQmx` | PR #968 |
+| TUNE with CAT tones honours the PTT Delay; key-down logs the RX pause | `FT8TransmitSignal.runQmxCatTune` | fork |
+| **SWR and power meters** (`SW;`/`PC;` while keyed): SWR and PWR chips on the landscape title row and in the QSO panel; power keeps the operator identity power current | `HamlibRig`, `QmxMeterReplies`; see [qmx-transmit.md](qmx-transmit.md) | fork |
 
 ## Decode screen
 
@@ -64,11 +67,23 @@ only.
   such as Delaware and Rhode Island.
   (`GeneralVariables.workedStateFor`, `QSLRecord`, `DatabaseOpr`)
 - Not done yet: ADIF export doesn't write `STATE`.
+- **TX power in the log.** In-app QSOs record the operator identity power as
+  ADIF `TX_PWR` (new `tx_pwr` column, schema v23). It's written to the ADIF
+  log file and exports, the QRZ, Cloudlog and Wavelog uploads, and both UDP
+  messages (CQRLOG reads the "QSO logged" Tx power). Import reads `TX_PWR`. A
+  QSO is logged without `TX_PWR` when no power is set, never with 0.
+- **Operator power is a decimal** ("4.7W", not rounded), editable as one in
+  Settings. Older whole-watt values still load.
 
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now
   posted on config load).
+- **WSJT-X UDP survives a restart.** The UDP service first started before the
+  saved config was read, so it always saw "disabled" and stayed off until the
+  toggle was touched again. It now restarts once the config loads, with the
+  saved `udp_enabled`, host and port. (`ComposeMainActivity`, config-loaded
+  callback)
 - The landscape map/waterfall panel choice is remembered (config key
   `landscapePanel`).
 - Band names no longer break on Windows-built APKs (`.gitattributes` forces

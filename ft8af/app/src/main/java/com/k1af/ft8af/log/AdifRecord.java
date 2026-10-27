@@ -66,6 +66,7 @@ public final class AdifRecord {
     private String mySigInfo;
     private String sig;
     private String sigInfo;
+    private String txPwr;
     private String comment;
 
     public AdifRecord call(String v) { this.call = v; return this; }
@@ -110,6 +111,7 @@ public final class AdifRecord {
     public AdifRecord sig(String v) { this.sig = v; return this; }
 
     public AdifRecord sigInfo(String v) { this.sigInfo = v; return this; }
+    public AdifRecord txPwr(String v) { this.txPwr = v; return this; }
 
     public AdifRecord comment(String v) { this.comment = v; return this; }
 
@@ -162,6 +164,7 @@ public final class AdifRecord {
         appendIfNotEmpty(sb, "MY_SIG_INFO", mySigInfo);
         appendIfNotEmpty(sb, "SIG", sig);
         appendIfNotEmpty(sb, "SIG_INFO", sigInfo);
+        appendIfNotEmpty(sb, "TX_PWR", txPwr);
         appendIfNotEmpty(sb, "comment", comment);
         sb.append("<eor>\n");
         return sb.toString();

@@ -75,6 +75,8 @@ import radio.ks3ckc.ft8af.ui.components.CompactCallCqButton
 import radio.ks3ckc.ft8af.ui.components.CompactHuntButton
 import radio.ks3ckc.ft8af.ui.components.CompactTuneButton
 import radio.ks3ckc.ft8af.ui.components.CompactTxPeriodButton
+import radio.ks3ckc.ft8af.ui.components.CompactSwrChip
+import radio.ks3ckc.ft8af.ui.components.CompactPowerChip
 import radio.ks3ckc.ft8af.ui.components.txStripActionState
 import radio.ks3ckc.ft8af.ui.components.VoiceCommandButton
 import radio.ks3ckc.ft8af.ui.components.selectBandIndex
@@ -345,6 +347,9 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     // Observe SWR lockout state
     val swrLocked by mainViewModel.meterProtectionController.swrLockout.observeAsState(false)
     val lockoutSwrRatio by mainViewModel.meterProtectionController.lockoutSwrRatio.observeAsState("")
+    val lastSwrRatio by mainViewModel.meterProtectionController.lastSwrRatio.observeAsState("")
+    // Operator identity's power: typed in Settings or kept current by the QMX's meter.
+    val operatorPowerWatts by GeneralVariables.mutableMyPowerWatts.observeAsState(GeneralVariables.myPowerWatts)
 
     // Reopen the full QSO sheet from the panel header: jump to the Decode tab,
     // bind the current TX target, and clear the minimized flag.
@@ -648,6 +653,17 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                     txSlot = txSlot,
                                     onSelectTxPeriod = onSelectTxPeriodAction,
                                 )
+                                if (lastSwrRatio.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    CompactSwrChip(ratioText = lastSwrRatio)
+                                }
+                                if ((operatorPowerWatts ?: 0f) > 0f) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    CompactPowerChip(
+                                        powerText = com.k1af.ft8af.ft8transmit.MeterProtectionController
+                                            .formatPowerWatts(operatorPowerWatts ?: 0f),
+                                    )
+                                }
                             }
                         } else {
                             null

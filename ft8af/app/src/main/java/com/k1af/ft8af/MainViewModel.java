@@ -1057,6 +1057,7 @@ public class MainViewModel extends ViewModel {
                         // so keep the debt and let retryPendingUnkey() settle it when
                         // the link is back.
                         pttSafetyLatch.onUnkeyAttempted(lastPttWriteReachedRig());
+                        persistOperatorPowerIfChanged();
                         //if (GeneralVariables.connectMode != ConnectMode.NETWORK) startSco();
                         if (needControlSco()) startSco();
                     }
@@ -1728,7 +1729,7 @@ public class MainViewModel extends ViewModel {
                 r.getMode() == null ? "FT8" : r.getMode(),
                 AdifFormat.formatReport(r.getMode(), r.getSendReport()),
                 AdifFormat.formatReport(r.getMode(), r.getReceivedReport()),
-                "",                            // tx power
+                nz(r.getTxPwr()),              // tx power, watts
                 nz(r.getComment()),
                 "",                            // name
                 WsjtxCodec.DateTime.fromAdif(r.getQso_date(), r.getTime_on()),
@@ -2623,6 +2624,16 @@ public class MainViewModel extends ViewModel {
                 public void onMeterUpdate(int normalizedAlc, int normalizedSwr) {
                     meterProtectionController.onMeterUpdate(normalizedAlc, normalizedSwr);
                 }
+
+                @Override
+                public void onSwrRatio(float ratio) {
+                    meterProtectionController.onSwrRatio(ratio);
+                }
+
+                @Override
+                public void onPowerWatts(float watts) {
+                    updateOperatorPowerFromRig(watts);
+                }
             });
         }
 
@@ -2789,19 +2800,31 @@ public class MainViewModel extends ViewModel {
     }
 
     /**
-     * Send PTT-off if we still owe the rig one, and clear the debt when it lands.
-     *
-     * <p>Called wherever a CAT link may have just come back: after a cable
-     * reconnect, and at every slot boundary as a backstop. Safe to call at any
-     * time — it is a no-op unless an unkey is actually outstanding, and CAT
-     * PTT-off is idempotent on a rig that is already receiving.
-     *
-     * <p>This is the recovery for the field failure where a USB brown-out killed
-     * the port mid-transmission and the rig stayed keyed for 97 seconds while the
-     * port itself was back within two.
-     *
-     * @return true if an unkey was owed and has now been sent successfully
+     * Operator identity's power follows the rig's measured output, for radios whose
+     * power meter FT8AF reads (the QMX's PC; while keyed), kept to the meter's 0.1 W.
+     * Every other radio never calls this, so the power typed in Settings stands; a
+     * zero reading is dropped before it gets here. Updated in memory on every
+     * reading; {@link #persistOperatorPowerIfChanged()} saves it once the rig
+     * unkeys, so a reading wobbling between 4.5 and 4.6 doesn't rewrite the config
+     * every poll.
      */
+    void updateOperatorPowerFromRig(float watts) {
+        if (watts <= 0f) return;
+        if (watts != GeneralVariables.myPowerWatts) GeneralVariables.setMyPowerWatts(watts);
+    }
+
+    // The powerWatts config text last written, so an unchanged value isn't rewritten.
+    private String savedOperatorPowerText = null;
+
+    /** Save the operator power if a rig reading changed it since the last save. */
+    void persistOperatorPowerIfChanged() {
+        if (GeneralVariables.myPowerWatts <= 0f) return;
+        String text = GeneralVariables.formatWatts(GeneralVariables.myPowerWatts);
+        if (text.equals(savedOperatorPowerText)) return;
+        savedOperatorPowerText = text;
+        databaseOpr.writeConfig("powerWatts", text, null);
+    }
+
     /**
      * QMX only: send {@code TA0;}, which drops a CAT-tone carrier (see
      * QmxCatTones). Harmless when no tone is up: any TA under 10 Hz is a key-up.
@@ -2833,6 +2856,20 @@ public class MainViewModel extends ViewModel {
         baseRig.setPTT(false);
     }
 
+    /**
+     * Send PTT-off if we still owe the rig one, and clear the debt when it lands.
+     *
+     * <p>Called wherever a CAT link may have just come back: after a cable
+     * reconnect, and at every slot boundary as a backstop. Safe to call at any
+     * time — it is a no-op unless an unkey is actually outstanding, and CAT
+     * PTT-off is idempotent on a rig that is already receiving.
+     *
+     * <p>This is the recovery for the field failure where a USB brown-out killed
+     * the port mid-transmission and the rig stayed keyed for 97 seconds while the
+     * port itself was back within two.
+     *
+     * @return true if an unkey was owed and has now been sent successfully
+     */
     public boolean retryPendingUnkey() {
         if (!pttSafetyLatch.needsUnkey()) return false;
         if (baseRig == null || !baseRig.isConnected()) return false;

@@ -3,9 +3,15 @@ package com.k1af.ft8af.rigs;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.k1af.ft8af.GeneralVariables;
 import com.k1af.ft8af.connector.BaseRigConnector;
 import com.k1af.ft8af.database.RigNameList;
+import com.k1af.ft8af.ft8transmit.MeterProtectionController;
 import com.k1af.ft8af.wave.HamlibNative;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Timer;
+import java.util.TimerTask;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -332,6 +338,17 @@ public class HamlibRig extends BaseRig {
 
     @Override
     public void onReceiveData(byte[] data) {
+        // QMX SWR replies to our own SW; poll are taken out here; Hamlib never
+        // sees them (see QmxMeterReplies).
+        if (isQmx()) {
+            synchronized (qmxMeterPending) {
+                if (SystemClock.elapsedRealtime() < swrAwaitUntilMs
+                        || qmxMeterPending.length() > 0) {
+                    data = QmxMeterReplies.split(qmxMeterPending, data, this::onQmxMeterReply);
+                    if (data.length == 0) return;
+                }
+            }
+        }
         // Called on the serial read thread — a quick, non-blocking socket write.
         // Read-locked against releaseHandle()'s write lock: without this, a feed
         // here could run concurrently with the native free, using a handle whose
@@ -423,6 +440,64 @@ public class HamlibRig extends BaseRig {
             int rc = nativeApi.nativeSetPtt(handle, on);
             if (rc != 0) Log.w(TAG, "set_ptt(" + on + ") rc=" + rc);
         });
+        if (isQmx()) {
+            if (on) startQmxSwrPoll(); else stopQmxSwrPoll();
+        }
+    }
+
+    // --- QMX SWR meter: poll SW; while keyed (Hamlib's bridge has no level read) ---
+
+    private static final long QMX_SWR_POLL_FIRST_MS = 400;
+    private static final long QMX_SWR_POLL_PERIOD_MS = 700;
+    private static final long QMX_SWR_REPLY_WINDOW_MS = 400;
+    private final StringBuilder qmxMeterPending = new StringBuilder();
+    private volatile long swrAwaitUntilMs = 0;
+    private Timer qmxSwrTimer;
+    // Own lock, not `this`: ensureOpen() holds the rig's monitor through a whole (slow)
+    // rig_open, so a synchronized stop here deadlocked onDisconnecting() mid-open
+    // (HamlibRigTest.onDisconnecting_duringInFlightOpen_*).
+    private final Object qmxSwrTimerLock = new Object();
+
+    private void startQmxSwrPoll() {
+        synchronized (qmxSwrTimerLock) {
+            cancelQmxSwrTimerLocked();
+            qmxSwrTimer = new Timer("QmxSwrPoll", true);
+            qmxSwrTimer.schedule(new TimerTask() {
+                @Override
+                public void run() {
+                    BaseRigConnector c = getConnector();
+                    if (closed || !isPttOn() || c == null) return;
+                    swrAwaitUntilMs = SystemClock.elapsedRealtime() + QMX_SWR_REPLY_WINDOW_MS;
+                    c.sendData((QmxMeterReplies.SWR_QUERY + QmxMeterReplies.POWER_QUERY)
+                            .getBytes(StandardCharsets.US_ASCII));
+                }
+            }, QMX_SWR_POLL_FIRST_MS, QMX_SWR_POLL_PERIOD_MS);
+        }
+    }
+
+    private void stopQmxSwrPoll() {
+        synchronized (qmxSwrTimerLock) {
+            cancelQmxSwrTimerLocked();
+        }
+    }
+
+    private void cancelQmxSwrTimerLocked() {
+        if (qmxSwrTimer != null) {
+            qmxSwrTimer.cancel();
+            qmxSwrTimer = null;
+        }
+    }
+
+    private void onQmxMeterReply(String reply) {
+        if (reply.startsWith("PC")) {
+            float watts = QmxMeterReplies.parsePowerWatts(reply);
+            if (!Float.isNaN(watts) && watts > 0f) notifyPowerWatts(watts);
+            return;
+        }
+        float ratio = QmxMeterReplies.parseSwr(reply);
+        if (Float.isNaN(ratio) || ratio < 1f) return;
+        notifyMeterData(-1, MeterProtectionController.swrRatioToNormalized(ratio));
+        notifySwrRatio(ratio);
     }
 
     /** True for the QRP Labs QMX, which can transmit from CAT tone commands. */
@@ -444,6 +519,7 @@ public class HamlibRig extends BaseRig {
         // shutdown — would throw RejectedExecutionException and crash the app.
         if (closed) return;
         closed = true;
+        stopQmxSwrPoll();
         try {
             // Read/clear/close handle via releaseHandle() on the SAME worker
             // thread ensureOpen() runs on, queued behind it rather than racing
