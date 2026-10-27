@@ -143,6 +143,10 @@ public class GeneralVariables {
     // AudioChannelSelect.TX_CONFIG_KEY; read on the TX path, hence volatile.
     public static volatile int txAudioChannel = com.k1af.ft8af.wave.AudioChannelSelect.BOTH;
 
+    // QMX only: send each TX tone as a CAT TA command instead of audio — see
+    // QmxCatTones. Off by default. Persisted under QmxCatTones.CONFIG_KEY.
+    public static volatile boolean qmxCatTones = false;
+
     // Full duplex (satellite operating): show decodes of our OWN transmission
     // instead of discarding them as loopback echoes. On a linear-transponder
     // satellite the operator hears their own downlink while transmitting, and

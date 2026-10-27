@@ -27,7 +27,6 @@ public class MainViewModelRxTxUsbConflictTest {
     public void micSourceSharingTheUsbDevice_pauses() {
         assertThat(MainViewModel.shouldPauseRxCaptureForTx(
                 /* rxIsMicSource= */ true, /* rxIsUsbDirect= */ false,
-                /* txIsUsbDirectOutput= */ false,
                 VID_A, PID_A, VID_A, PID_A)).isTrue();
     }
 
@@ -38,7 +37,6 @@ public class MainViewModelRxTxUsbConflictTest {
         // spuriously drop their audio too, not just this HAL's.
         assertThat(MainViewModel.shouldPauseRxCaptureForTx(
                 /* rxIsMicSource= */ false, /* rxIsUsbDirect= */ false,
-                /* txIsUsbDirectOutput= */ false,
                 VID_A, PID_A, VID_A, PID_A)).isFalse();
     }
 
@@ -49,18 +47,18 @@ public class MainViewModelRxTxUsbConflictTest {
         // conflated with this fix.
         assertThat(MainViewModel.shouldPauseRxCaptureForTx(
                 /* rxIsMicSource= */ true, /* rxIsUsbDirect= */ true,
-                /* txIsUsbDirectOutput= */ false,
                 VID_A, PID_A, VID_A, PID_A)).isFalse();
     }
 
     @Test
-    public void txUsbDirectOutput_neverPaused() {
-        // USB-Direct TX output is a separate, already-broken path
-        // (LIBUSB_ERROR_IO) -- don't conflate the two bugs.
+    public void txUsbDirectOutputOnTheSameDevice_pauses() {
+        // USB-direct TX output takes the rig's streaming interface from the
+        // kernel driver; with the HAL's capture still open every iso submit
+        // failed with LIBUSB_ERROR_IO. Same VID:PID either way, so the
+        // decision is the same as the AudioTrack case.
         assertThat(MainViewModel.shouldPauseRxCaptureForTx(
                 /* rxIsMicSource= */ true, /* rxIsUsbDirect= */ false,
-                /* txIsUsbDirectOutput= */ true,
-                VID_A, PID_A, VID_A, PID_A)).isFalse();
+                VID_A, PID_A, VID_A, PID_A)).isTrue();
     }
 
     @Test
@@ -69,7 +67,6 @@ public class MainViewModelRxTxUsbConflictTest {
         // output) have no reason to share one ALSA card.
         assertThat(MainViewModel.shouldPauseRxCaptureForTx(
                 /* rxIsMicSource= */ true, /* rxIsUsbDirect= */ false,
-                /* txIsUsbDirectOutput= */ false,
                 VID_A, PID_A, VID_B, PID_B)).isFalse();
     }
 
@@ -79,7 +76,6 @@ public class MainViewModelRxTxUsbConflictTest {
         // both sides) -- matching on 0:0 would be a false positive.
         assertThat(MainViewModel.shouldPauseRxCaptureForTx(
                 /* rxIsMicSource= */ true, /* rxIsUsbDirect= */ false,
-                /* txIsUsbDirectOutput= */ false,
                 0, 0, 0, 0)).isFalse();
     }
 
@@ -87,7 +83,6 @@ public class MainViewModelRxTxUsbConflictTest {
     public void sameVendorDifferentProduct_neverPaused() {
         assertThat(MainViewModel.shouldPauseRxCaptureForTx(
                 /* rxIsMicSource= */ true, /* rxIsUsbDirect= */ false,
-                /* txIsUsbDirectOutput= */ false,
                 VID_A, PID_A, VID_A, PID_B)).isFalse();
     }
 }

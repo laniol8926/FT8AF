@@ -1041,6 +1041,8 @@
     <string name="settings_tx_channel">Transmit Audio Channel</string>
     <string name="settings_tx_channel_desc">Which side of a stereo output carries the transmitted audio. Use Left or Right to drive one radio on a splitter cable.</string>
     <string name="settings_tx_channel_both">Both</string>
+    <string name="settings_qmx_cat_tones">QMX: Send Tones over CAT</string>
+    <string name="settings_qmx_cat_tones_desc">QRP Labs QMX only. Transmit by sending each tone as a CAT command, so the radio makes the signal itself and no audio is needed. Use this when the radio\'s audio input level stays too low to transmit.</string>
     <string name="settings_channel_left">Left</string>
     <string name="settings_channel_right">Right</string>
     <string name="settings_channel_mono_device">This device has only one audio channel, so there is no side to choose.</string>

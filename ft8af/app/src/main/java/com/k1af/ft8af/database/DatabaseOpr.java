@@ -3025,6 +3025,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     //defensive parse as the RX key; anything else falls back to both.
                     GeneralVariables.txAudioChannel = AudioChannelSelect.parse(result);
                 }
+                if (name.equalsIgnoreCase(com.k1af.ft8af.ft8transmit.QmxCatTones.CONFIG_KEY)) {//QMX CAT tones
+                    GeneralVariables.qmxCatTones = result.equals("1");
+                }
                 if (name.equalsIgnoreCase(FullDuplexMonitor.CONFIG_KEY)) {//Full duplex (satellite) monitoring
                     //Off unless explicitly "1": show our own transmission's decodes
                     //rather than filtering them out as loopback echoes.

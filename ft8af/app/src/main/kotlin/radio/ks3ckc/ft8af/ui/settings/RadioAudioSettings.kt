@@ -51,6 +51,7 @@ import com.k1af.ft8af.rigs.InstructionSet
 import com.k1af.ft8af.ui.AudioDeviceSpinnerAdapter
 import com.k1af.ft8af.wave.AudioChannelCapability
 import com.k1af.ft8af.wave.AudioChannelSelect
+import com.k1af.ft8af.ft8transmit.QmxCatTones
 import com.k1af.ft8af.wave.UsbAudioDevice
 import radio.ks3ckc.ft8af.PER_BAND_OUTPUT_LEVEL_KEY
 import radio.ks3ckc.ft8af.outputLevelFromVolumePercent
@@ -824,6 +825,24 @@ fun RadioAudioSettings(
                                 // Nothing to reopen here, unlike RX: both TX paths
                                 // read the selection when the next transmission
                                 // builds its output, so the change lands next over.
+                            },
+                        )
+                    }
+                    SectionDivider()
+                    run {
+                        var qmxCatTones by remember {
+                            mutableStateOf(GeneralVariables.qmxCatTones)
+                        }
+                        SettingsRow(
+                            label = stringResource(R.string.settings_qmx_cat_tones),
+                            description = stringResource(R.string.settings_qmx_cat_tones_desc),
+                            toggle = qmxCatTones,
+                            onToggleChange = { enabled ->
+                                qmxCatTones = enabled
+                                GeneralVariables.qmxCatTones = enabled
+                                mainViewModel.databaseOpr.writeConfig(
+                                    QmxCatTones.CONFIG_KEY, if (enabled) "1" else "0", null,
+                                )
                             },
                         )
                     }

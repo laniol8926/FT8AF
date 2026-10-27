@@ -425,6 +425,11 @@ public class HamlibRig extends BaseRig {
         });
     }
 
+    /** True for the QRP Labs QMX, which can transmit from CAT tone commands. */
+    public boolean isQmx() {
+        return modelId == QRPLABS_QMX_MODEL_ID;
+    }
+
     @Override
     public String getName() {
         return "Hamlib";

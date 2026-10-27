@@ -387,4 +387,26 @@ either, which is separately broken for unrelated reasons). Don't assume this
 generalizes to every USB audio chipset — it may be specific to this HAL —
 but the guard is cheap and a no-op whenever TX/RX aren't sharing one USB
 device, so there's little reason to narrow it further without a
-contradicting report.
+contradicting report. (Since extended to USB-direct TX output too: with the
+HAL's capture still open on the same rig, every libusb iso submit failed
+with `LIBUSB_ERROR_IO`.)
+
+**6. Some phones can't drive the QMX hard enough over audio at all; use CAT
+tones.** On a motorola edge 2022 the QMX's input meter read 1–2 bars (it
+needs 3 to transmit) with FT8AF's waveform at full scale. `dumpsys
+media.audio_flinger` showed why: the TX track at -6 dB with an OEM Dolby
+"Music Listener" effect on its session, at media volume 15/15, neither
+user-switchable (the Dolby settings app was disabled on that phone). A
+LoudnessEnhancer boost and even disabling the Dolby effect on our own
+session (it can be done via AudioEffect's hidden constructor) did not reach
+3 bars. What works is the QMX's own `TA` CAT command (firmware 1.04 CAT
+manual): in Digi mode `TAnnnn.nn;` transmits a carrier at dial + that audio
+frequency, the first TA after `TX;` keys down with a shaped envelope, and
+`TA0;` keys up. Sending one TA per symbol on the symbol clock gives exact
+FSK with no audio path. That is how another Android FT8 app drives the same
+radio at full power (its logcat: "QMX CAT TA in DIGI ... (no audio to the
+radio)"). FT8AF does this when Settings > Radio & Audio > "QMX: Send Tones
+over CAT" is on (`QmxCatTones`, `FT8TransmitSignal.playViaQmxCatTones`).
+Symbol timing measured 0.3 ms worst-case on that phone. USB-direct TX output
+is no substitute: it detaches the kernel audio driver, so Android's RX
+capture is gone until a replug.

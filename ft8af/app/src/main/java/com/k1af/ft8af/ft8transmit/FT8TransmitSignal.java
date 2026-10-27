@@ -1003,6 +1003,15 @@ public class FT8TransmitSignal {
         }
 
 
+        // QMX CAT tones: the radio makes the FSK itself from TA commands, no audio.
+        if (onDoTransmitted != null && onDoTransmitted.supportQmxCatTones()) {
+            // Fresh cancel state for this cycle, as the sound-card path below does;
+            // a stale flag from the previous over would skip every symbol.
+            txAudioCancelled = false;
+            runPlaybackWithTeardown(() -> playViaQmxCatTones(msg), this::afterPlayAudio);
+            return;
+        }
+
         // enter sound card mode
         float[] buffer;
         buffer = GenerateFT8.generateFt8(msg, GeneralVariables.getBaseFrequency()
@@ -1229,6 +1238,75 @@ public class FT8TransmitSignal {
      * {@link Log} call below — which is a no-op stub under the module's
      * {@code unitTests.returnDefaultValues} setting.
      */
+    /**
+     * Send this over as QMX TA commands, one per symbol on the symbol clock,
+     * then key up with {@code TA0;}. PTT ({@code TX;}/{@code RX;}) stays with
+     * the normal keying path. Must run under {@link #runPlaybackWithTeardown}.
+     */
+    private void playViaQmxCatTones(Ft8Message msg) {
+        ModeProfile mode = GeneralVariables.currentMode();
+        byte[] a91 = GenerateFT8.generateA91(msg, true);
+        if (a91 == null) return;
+        byte[] tones = new byte[mode.numTones];
+        mode.encode(a91, tones);
+        double baseHz = GeneralVariables.getBaseFrequency();
+        int skip = QmxCatTones.symbolsToSkip(lateStartSkipMs, mode.symbolPeriod, tones.length);
+        long periodNs = (long) (mode.symbolPeriod * 1e9);
+        GeneralVariables.fileLog(String.format(java.util.Locale.ROOT,
+                "playFT8Signal: QMX CAT tones, %d symbols from %d, base %.1f Hz",
+                tones.length, skip, baseHz));
+
+        long startNs = SystemClock.elapsedRealtimeNanos();
+        String last = null;
+        int sent = 0;
+        long worstLateUs = 0;
+        boolean stopped = false;
+        try {
+            for (int i = skip; i < tones.length; i++) {
+                if (!isTransmitting || txAudioCancelled) {
+                    stopped = true;
+                    break;
+                }
+                long dueNs = startNs + (i - skip) * periodNs;
+                sleepUntil(dueNs);
+                long lateUs = (SystemClock.elapsedRealtimeNanos() - dueNs) / 1000;
+                if (lateUs > worstLateUs) worstLateUs = lateUs;
+                String cmd = QmxCatTones.taCommand(
+                        QmxCatTones.toneHz(baseHz, tones[i] & 0xFF, mode.symbolPeriod));
+                if (!cmd.equals(last)) {
+                    onDoTransmitted.sendQmxCatCommand(cmd);
+                    last = cmd;
+                    sent++;
+                }
+            }
+            // Hold the last symbol for its full period before keying up.
+            if (!stopped) sleepUntil(startNs + (tones.length - skip) * periodNs);
+        } finally {
+            onDoTransmitted.sendQmxCatCommand(QmxCatTones.KEY_UP);
+            GeneralVariables.fileLog(String.format(java.util.Locale.ROOT,
+                    "playFT8Signal: QMX CAT tones done, %d TA commands, worst symbol lateness %.1f ms%s",
+                    sent, worstLateUs / 1000.0, stopped ? " (stopped)" : ""));
+        }
+    }
+
+    /** Sleep until {@code elapsedRealtimeNanos} reaches {@code dueNs}; spins the last ms. */
+    private static void sleepUntil(long dueNs) {
+        while (true) {
+            long remainingNs = dueNs - SystemClock.elapsedRealtimeNanos();
+            if (remainingNs <= 0) return;
+            if (remainingNs > 2_000_000L) {
+                try {
+                    Thread.sleep((remainingNs - 1_000_000L) / 1_000_000L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            } else {
+                Thread.yield();
+            }
+        }
+    }
+
     static void runPlaybackWithTeardown(Runnable body, Runnable teardown) {
         try {
             body.run();
@@ -3256,6 +3334,35 @@ public class FT8TransmitSignal {
         tuneController.requestStop(TuneController.STOP_USER);
     }
 
+    /**
+     * TUNE on a QMX with CAT tones: one steady TA at the TX offset until the
+     * tune controller says stop, then {@code TA0;}. No audio, so the tune
+     * level setting does not apply.
+     */
+    private void runQmxCatTune(float offsetHz) {
+        GeneralVariables.fileLog(String.format(java.util.Locale.ROOT,
+                "TUNE: QMX CAT tone %.1f Hz", offsetHz));
+        onDoTransmitted.sendQmxCatCommand(QmxCatTones.taCommand(offsetHz));
+        int lastPostedSec = -1;
+        try {
+            while (tuneController.shouldContinue()) {
+                int remainingSec = (int) Math.ceil(tuneController.remainingMs() / 1000.0);
+                if (remainingSec != lastPostedSec) {
+                    lastPostedSec = remainingSec;
+                    mutableTuneRemainingSec.postValue(remainingSec);
+                }
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        } finally {
+            onDoTransmitted.sendQmxCatCommand(QmxCatTones.KEY_UP);
+        }
+    }
+
     /** The tune level (0..100) resolved from settings, as an amplitude 0..1. */
     private static float currentTuneAmplitude() {
         return radio.ks3ckc.ft8af.TuneLevelKt.currentTuneLevel() / 100f;
@@ -3284,6 +3391,11 @@ public class FT8TransmitSignal {
             onDoTransmitted.onTuneKeyDown();
             keyed = true;
             mutableIsTuning.postValue(true);
+
+            if (onDoTransmitted.supportQmxCatTones()) {
+                runQmxCatTune(offsetHz);
+                return; // finally below unkeys
+            }
 
             // Same mixer-sharing exposure as the FT8 AudioTrack branch; keep
             // other apps' audio out of the carrier. Denial is log-only.
