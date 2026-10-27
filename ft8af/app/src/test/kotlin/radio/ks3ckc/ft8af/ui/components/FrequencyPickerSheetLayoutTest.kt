@@ -15,6 +15,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
 import com.k1af.ft8af.R
+import com.k1af.ft8af.database.OperationBand
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -24,8 +25,10 @@ import org.robolectric.annotation.GraphicsMode
 /**
  * Layout tests for the frequency picker's alternates list (#930): on a narrow
  * screen the alternate chips must wrap whole onto another line with every
- * label on one unclipped line, and the picker body must scroll so wrapped rows
- * stay reachable on a short screen.
+ * label on one unclipped line, and wrapped rows must stay reachable by
+ * scrolling on a short screen. The picker is hosted in [FT8AFBottomSheet] as in
+ * the app, because the sheet owns the scroll: a picker that added its own
+ * nested verticalScroll crashed on open (#972) while rendering fine on its own.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -115,7 +118,9 @@ class FrequencyPickerSheetLayoutTest {
         val lastLabel = formatMhz(30_000_000L + 3_000L)
         var picked: Int? = null
         composeRule.setContent {
-            FrequencyPickerContent(groups = groups, currentBandIndex = 0, onSelect = { picked = it })
+            FT8AFBottomSheet(visible = true, onDismiss = {}) {
+                FrequencyPickerContent(groups = groups, currentBandIndex = 0, onSelect = { picked = it })
+            }
         }
 
         composeRule.onNodeWithText(context.getString(R.string.freq_show_alternates))
@@ -125,5 +130,27 @@ class FrequencyPickerSheetLayoutTest {
         composeRule.onNodeWithText(lastLabel).performClick()
 
         assertThat(picked).isEqualTo(lastIndex)
+    }
+
+    @Test
+    @Config(qualifiers = "w360dp-h640dp-xhdpi")
+    fun frequencyPickerSheet_opensWithoutCrashing() {
+        // #972: opening "All bands & custom frequency" crashed because the picker
+        // nested a second verticalScroll inside the sheet's own.
+        val saved = ArrayList(OperationBand.bandList)
+        OperationBand.bandList.clear()
+        OperationBand.bandList.add(OperationBand.Band("*:14074000:20m"))
+        OperationBand.bandList.add(OperationBand.Band(" :14090000:20m"))
+        OperationBand.bandList.add(OperationBand.Band("*:7074000:40m"))
+        try {
+            composeRule.setContent {
+                FrequencyPickerSheet(visible = true, currentBandIndex = 0, onDismiss = {}, onSelect = {})
+            }
+            composeRule.onNodeWithText(context.getString(R.string.freq_select_title)).assertIsDisplayed()
+            composeRule.onNodeWithText("40m").assertIsDisplayed()
+        } finally {
+            OperationBand.bandList.clear()
+            OperationBand.bandList.addAll(saved)
+        }
     }
 }
