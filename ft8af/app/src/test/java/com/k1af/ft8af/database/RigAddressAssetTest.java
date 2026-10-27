@@ -120,6 +120,7 @@ public class RigAddressAssetTest {
         "YAESU FTX-1(USB)",
         "QRP Labs QMX",
         "Qrp Labs QMX (Hamlib)",
+        "XIEGU G106(USB)",
     };
 
     private RigNameList load() {
