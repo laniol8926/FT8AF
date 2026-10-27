@@ -14,8 +14,12 @@ import androidx.compose.ui.unit.Density
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
+import com.k1af.ft8af.FT8Common
+import com.k1af.ft8af.GeneralVariables
 import com.k1af.ft8af.R
 import com.k1af.ft8af.database.OperationBand
+import org.junit.After
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -38,6 +42,34 @@ class FrequencyPickerSheetLayoutTest {
     val composeRule = createComposeRule()
 
     private val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // buildBandGroups() reads three process-wide statics. Robolectric shares them
+    // across every test in the sandbox, so pin all three here and restore them
+    // after, rather than trusting whatever an earlier test left behind.
+    private lateinit var savedBandList: List<OperationBand.Band>
+    private var savedOperatingMode = 0
+    private lateinit var savedExcludedBands: Set<String>
+
+    @Before
+    fun pinBandStatics() {
+        savedBandList = ArrayList(OperationBand.bandList)
+        savedOperatingMode = GeneralVariables.operatingMode
+        savedExcludedBands = HashSet(GeneralVariables.excludedBands)
+        OperationBand.bandList.clear()
+        OperationBand.bandList.add(OperationBand.Band("*:14074000:20m"))
+        OperationBand.bandList.add(OperationBand.Band(" :14090000:20m"))
+        OperationBand.bandList.add(OperationBand.Band("*:7074000:40m"))
+        GeneralVariables.operatingMode = FT8Common.FT8_MODE
+        GeneralVariables.excludedBands = HashSet()
+    }
+
+    @After
+    fun restoreBandStatics() {
+        OperationBand.bandList.clear()
+        OperationBand.bandList.addAll(savedBandList)
+        GeneralVariables.operatingMode = savedOperatingMode
+        GeneralVariables.excludedBands = HashSet(savedExcludedBands)
+    }
 
     private val twentyMetres = BandGroup(
         waveLength = "20m",
@@ -136,21 +168,19 @@ class FrequencyPickerSheetLayoutTest {
     @Config(qualifiers = "w360dp-h640dp-xhdpi")
     fun frequencyPickerSheet_opensWithoutCrashing() {
         // #972: opening "All bands & custom frequency" crashed because the picker
-        // nested a second verticalScroll inside the sheet's own.
-        val saved = ArrayList(OperationBand.bandList)
-        OperationBand.bandList.clear()
-        OperationBand.bandList.add(OperationBand.Band("*:14074000:20m"))
-        OperationBand.bandList.add(OperationBand.Band(" :14090000:20m"))
-        OperationBand.bandList.add(OperationBand.Band("*:7074000:40m"))
-        try {
-            composeRule.setContent {
-                FrequencyPickerSheet(visible = true, currentBandIndex = 0, onDismiss = {}, onSelect = {})
-            }
-            composeRule.onNodeWithText(context.getString(R.string.freq_select_title)).assertIsDisplayed()
-            composeRule.onNodeWithText("40m").assertIsDisplayed()
-        } finally {
-            OperationBand.bandList.clear()
-            OperationBand.bandList.addAll(saved)
+        // nested a second verticalScroll inside the sheet's own. The band list is
+        // the three-entry one pinned in pinBandStatics().
+        composeRule.setContent {
+            FrequencyPickerSheet(visible = true, currentBandIndex = 0, onDismiss = {}, onSelect = {})
         }
+        composeRule.onNodeWithText(context.getString(R.string.freq_select_title)).assertIsDisplayed()
+        composeRule.onNodeWithText("40m").assertIsDisplayed()
+
+        // The sheet owns the scroll now, so expanding the alternates in portrait
+        // must leave the last chip reachable too, not only in the landscape test.
+        composeRule.onNodeWithText(context.getString(R.string.freq_show_alternates))
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText(formatMhz(14_090_000L)).performScrollTo().assertIsDisplayed()
     }
 }
