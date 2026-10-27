@@ -3341,7 +3341,19 @@ public class FT8TransmitSignal {
      */
     private void runQmxCatTune(float offsetHz) {
         GeneralVariables.fileLog(String.format(java.util.Locale.ROOT,
-                "TUNE: QMX CAT tone %.1f Hz", offsetHz));
+                "TUNE: QMX CAT tone %.1f Hz after %d ms PTT delay", offsetHz,
+                GeneralVariables.pttDelay));
+        // Same PTT settle time an over gets before its first tone: TA right on
+        // the heels of TX; (and of RX capture closing) knocked the QMX off USB.
+        // Stopping during the wait needs no TA0; (no tone is up yet); the
+        // caller's finally unkeys.
+        try {
+            Thread.sleep(Math.max(0, GeneralVariables.pttDelay));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+        if (!tuneController.shouldContinue()) return;
         onDoTransmitted.sendQmxCatCommand(QmxCatTones.taCommand(offsetHz));
         int lastPostedSec = -1;
         try {

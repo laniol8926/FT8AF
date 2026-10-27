@@ -1010,6 +1010,7 @@ public class MainViewModel extends ViewModel {
                 if (rxPausedForThisKeying) {
                     hamRecorder.pauseForTx();
                 }
+                fileLog("PTT: keying, RX capture " + (rxPausedForThisKeying ? "paused" : "left running"));
 
                 boolean keysViaControlPath = GeneralVariables.controlMode == ControlMode.CAT
                         || GeneralVariables.controlMode == ControlMode.RTS
