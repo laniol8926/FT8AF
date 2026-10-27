@@ -3574,20 +3574,34 @@ public class FT8TransmitSignal {
      * request fails silently otherwise (no exception, no log visible to the
      * app -- confirmed on real hardware that AudioFlinger can deny the FAST
      * path per-output with zero signal to the caller either way).
+     *
+     * <p>Performance modes only exist from Android 8.0 (API 26); minSdk is 23.
+     * Below 26 the track is built without one: calling
+     * {@code setPerformanceMode}/{@code getPerformanceMode} there throws
+     * {@code NoSuchMethodError}, an Error the TX paths' {@code catch (Exception)}
+     * doesn't catch, so every sound-card over and TUNE crashed the app.
+     *
+     * <p>Package-visible for testing.
      */
-    private static AudioTrack buildTxAudioTrack(AudioAttributes attributes, AudioFormat format,
-                                                int bufBytes, String logTag) {
-        AudioTrack track = new AudioTrack.Builder()
+    static AudioTrack buildTxAudioTrack(AudioAttributes attributes, AudioFormat format,
+                                        int bufBytes, String logTag) {
+        AudioTrack.Builder builder = new AudioTrack.Builder()
                 .setAudioAttributes(attributes)
                 .setAudioFormat(format)
                 .setBufferSizeInBytes(bufBytes)
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setSessionId(AudioManager.AUDIO_SESSION_ID_GENERATE)
-                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                .build();
-        GeneralVariables.fileLog(logTag + ": AudioTrack performanceMode="
-                + performanceModeName(track.getPerformanceMode()));
-        return track;
+                .setSessionId(AudioManager.AUDIO_SESSION_ID_GENERATE);
+        // The SDK_INT check is inline on purpose so Android lint (NewApi) sees it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY);
+            AudioTrack track = builder.build();
+            GeneralVariables.fileLog(logTag + ": AudioTrack performanceMode="
+                    + performanceModeName(track.getPerformanceMode()));
+            return track;
+        }
+        GeneralVariables.fileLog(logTag + ": AudioTrack performanceMode=n/a (API "
+                + Build.VERSION.SDK_INT + ", needs 26)");
+        return builder.build();
     }
 
     /**
