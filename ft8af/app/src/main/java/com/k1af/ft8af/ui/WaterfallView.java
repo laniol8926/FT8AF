@@ -152,6 +152,7 @@ public class WaterfallView extends View {
         Paint blackPaint = new Paint();
         blackPaint.setColor(0xFF000000);
         _canvas.drawRect(0, 0, w, h, blackPaint);//Paint background black first to prevent text overlap
+        restoreHandedOver(w, h);
 
         //linePaint = new Paint();
         linePaint.setColor(0xff990000);
@@ -465,6 +466,39 @@ public class WaterfallView extends View {
 
     public int getFreq_hz() {
         return freq_hz;
+    }
+
+    // Waterfall history handed from a view that is going away to the one replacing it
+    // (fork). Rotating rebuilds the layout and so the view, which used to start the
+    // new one black: the operator lost the band picture every rotation. The width maps
+    // to the same frequency span in both, so a scaled copy stays frequency-aligned.
+    private static Bitmap handedOver = null;
+    private static long handedOverAt = 0;
+    private static final long HANDOVER_MAX_AGE_MS = 60_000;
+
+    @Override
+    protected void onDetachedFromWindow() {
+        if (lastBitMap != null && !lastBitMap.isRecycled()) {
+            synchronized (WaterfallView.class) {
+                handedOver = lastBitMap;
+                handedOverAt = System.currentTimeMillis();
+            }
+        }
+        super.onDetachedFromWindow();
+    }
+
+    /** Paint a recent handed-over history into the fresh bitmap, scaled to fit. */
+    private void restoreHandedOver(int w, int h) {
+        Bitmap prev;
+        synchronized (WaterfallView.class) {
+            prev = handedOver;
+            if (prev == null || prev == lastBitMap
+                    || System.currentTimeMillis() - handedOverAt > HANDOVER_MAX_AGE_MS) {
+                return;
+            }
+        }
+        if (prev.isRecycled()) return;
+        _canvas.drawBitmap(prev, null, new android.graphics.Rect(0, 0, w, h), null);
     }
 
     /** Frequency (Hz) of the station we are in QSO with, or -1 for none. */
