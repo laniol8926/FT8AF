@@ -259,6 +259,7 @@ fun ActiveQsoPanel(
 ) {
     val toCallsign by mainViewModel.ft8TransmitSignal.mutableToCallsign.observeAsState()
     val isActivated by mainViewModel.ft8TransmitSignal.mutableIsActivated.observeAsState(false)
+    val pauseArmed by mainViewModel.ft8TransmitSignal.mutablePauseArmed.observeAsState(false)
     val isTransmitting by mainViewModel.ft8TransmitSignal.mutableIsTransmitting.observeAsState(false)
     val functions by mainViewModel.ft8TransmitSignal.mutableFunctions.observeAsState(arrayListOf())
     val functionOrder by mainViewModel.ft8TransmitSignal.mutableFunctionOrder.observeAsState(6)
@@ -452,6 +453,10 @@ fun ActiveQsoPanel(
                         mainViewModel.qsoSheetMinimized.postValue(false)
                     }
                 } else null,
+                onPause = if (isActivated) {
+                    { mainViewModel.ft8TransmitSignal.togglePause() }
+                } else null,
+                pauseArmed = pauseArmed,
             )
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -497,6 +502,8 @@ private fun StationHeader(
     onClick: (() -> Unit)? = null,
     onLog: (() -> Unit)? = null,
     onClear: (() -> Unit)? = null,
+    onPause: (() -> Unit)? = null,
+    pauseArmed: Boolean = false,
 ) {
     Row(
         modifier = Modifier
@@ -578,6 +585,29 @@ private fun StationHeader(
                     fontFamily = GeistMonoFamily,
                     fontWeight = FontWeight.SemiBold,
                 )
+            }
+            if (onPause != null) {
+                // Hold our TX to listen on our own slot (see who is on our TX
+                // frequency); tap again to resume. Highlighted while held.
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (pauseArmed) StatusWarn else SignalSoft)
+                        .clickable(onClick = onPause)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = stringResource(
+                            if (pauseArmed) R.string.qsopanel_paused else R.string.qsopanel_pause_action,
+                        ),
+                        color = if (pauseArmed) TextPrimary else Signal,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = GeistMonoFamily,
+                        letterSpacing = 0.04.sp,
+                    )
+                }
             }
             if (onLog != null) {
                 Box(

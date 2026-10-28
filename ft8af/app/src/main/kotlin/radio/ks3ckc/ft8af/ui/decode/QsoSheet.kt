@@ -126,6 +126,20 @@ private fun QsoSheetContent(
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
+        // -- Waterfall (while TX is on): see who is on our TX frequency -- after a
+        // Pause it shows our own slot -- and tap a clear spot to QSY.
+        if (isActivated) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(QsoSheetWaterfallHeight)
+                    .clip(RoundedCornerShape(8.dp)),
+            ) {
+                radio.ks3ckc.ft8af.ui.waterfall.WaterfallScreen(mainViewModel, showSpectrum = false)
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
         // -- Station header --
         StationHeader(
             callsign = callsign,
@@ -484,6 +498,9 @@ private fun StatCard(
 // ---------------------------------------------------------------------------
 
 private val QsoStepLabels = listOf("call", "report", "roger", "confirm", "73")
+
+// Tall enough for the waterfall plus its frequency ruler and bottom strip.
+private val QsoSheetWaterfallHeight = 170.dp
 
 /**
  * Resolve which step (0..4) the QSO is currently on, or -1 for "not started".

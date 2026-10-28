@@ -70,6 +70,13 @@ public class FT8TransmitSignal {
     public volatile int sequential;// transmit sequence
     public MutableLiveData<Integer> mutableSequential = new MutableLiveData<>();
     private volatile boolean pendingUserCQ = false;
+    // Pause: hold our TX (see togglePause) so the operator can see on the waterfall
+    // whether someone is transmitting over our TX frequency, and QSY by tapping a
+    // clear spot. pausedSlot keeps the partner's next cycle -- he heard nothing
+    // from us -- from counting toward Stop After.
+    private volatile boolean pauseHeld = false;
+    private volatile boolean pausedSlot = false;
+    public MutableLiveData<Boolean> mutablePauseArmed = new MutableLiveData<>(false);
     // True when the active run was started by tapping a single decode (the
     // decode-list row tap / QsoSheet "Call" button) to work one specific
     // station. On QSO completion we stop rather than idling on CQ — unless the
@@ -300,6 +307,10 @@ public class FT8TransmitSignal {
                     // audio slack so the sequencer keys up with the reply it is about to
                     // learn about, rather than answering that caller a cycle late. Bounded
                     // so a held start still clips no leading audio. See FastDecodeGate.
+                    if (pauseHeld) {
+                        pausedSlot = true;
+                        return;
+                    }
                     holdForFastDecode(utc);
                     doTransmit();// transmit action follows precise timing; delay is the audio signal delay
                 }
@@ -2110,6 +2121,11 @@ public class FT8TransmitSignal {
         }
         ArrayList<Ft8Message> messages = new ArrayList<>(msgList);// prevent thread conflicts
 
+        // First partner cycle after a Pause: he heard nothing from us, so a repeat
+        // or silence this cycle is not a failed try.
+        boolean afterPause = !evidenceOnly && pausedSlot;
+        if (afterPause) pausedSlot = false;
+
         if (GeneralVariables.houndMode) {// DXpedition Hound: dedicated QSO handler
             if (evidenceOnly) return;// Hound sequencing stays fast-pass-only
             handleHoundCycle(messages);
@@ -2232,7 +2248,7 @@ public class FT8TransmitSignal {
             // He re-sent what we are answering: count it once (fast pass only, like a
             // no-reply) and give up at the Stop After limit, as WSJT-X operators expect
             // "3" to mean three tries at this message.
-            if (partnerRepeated && !evidenceOnly) {
+            if (partnerRepeated && !evidenceOnly && !afterPause) {
                 GeneralVariables.noReplyCount++;
                 GeneralVariables.fileLog(String.format("QSO: repeat %d (order=%d to=%s re-sent, didn't copy us)",
                         GeneralVariables.noReplyCount, functionOrder,
@@ -2286,7 +2302,7 @@ public class FT8TransmitSignal {
 
 
         // at this point, no reply; increment error count (weak signal detection does not count as no-reply)
-        if (!messages.get(0).isWeakSignal) {
+        if (!messages.get(0).isWeakSignal && !afterPause) {
             GeneralVariables.noReplyCount++;
         }
         GeneralVariables.fileLog(String.format("QSO: no-reply %d (order=%d to=%s)",
@@ -2575,6 +2591,10 @@ public class FT8TransmitSignal {
             // Tune and FT8 TX are mutually exclusive (issue #408): arming the
             // sequencer ends a running tune so the scheduled TX can key cleanly.
             tuneController.requestStop(TuneController.STOP_TX);
+        } else if (pauseHeld) {
+            // A Pause left on at Stop must not hold the next run.
+            pauseHeld = false;
+            mutablePauseArmed.postValue(false);
         }
         this.activated = activated;
         if (!this.activated) {//force stop transmitting
@@ -2708,6 +2728,48 @@ public class FT8TransmitSignal {
             toCallsign.callsign = "CQ";
             mutableToCallsign.postValue(toCallsign);// set the call target
             generateFun();
+        }
+    }
+
+    /**
+     * Pause button: hold our transmissions (TX stays armed, the QSO state is kept)
+     * so the operator can watch our own slot on the waterfall. Tapping again
+     * releases the hold; inside our slot TX starts right away -- late, which still
+     * decodes if not by too much (same late-start tolerance as a decode tap) --
+     * otherwise at our next slot.
+     */
+    public void togglePause() {
+        if (!activated) return;
+        pauseHeld = !pauseHeld;
+        mutablePauseArmed.postValue(pauseHeld);
+        GeneralVariables.resetLaunchSupervision();// operator action
+        GeneralVariables.fileLog("QSO: pause " + (pauseHeld ? "on, holding TX" : "off, resuming TX")
+                + " (order=" + functionOrder + " TX "
+                + Math.round(GeneralVariables.getBaseFrequency()) + " Hz)");
+        if (pauseHeld) {
+            // Pausing mid-over keys up now: while keyed RX capture is paused and
+            // the waterfall is frozen, which is exactly what the operator wants to see.
+            if (isTransmitting) {
+                setTransmitting(false);
+                // The cut-off over never really went out: don't let it use up one of
+                // the Max 73 Sends (it gave up a QSO whose RR73 was never copied).
+                if ((functionOrder == 4 || functionOrder == 5) && finalAckSends > 0) {
+                    finalAckSends--;
+                }
+            }
+            return;
+        }
+        if (isTransmitting || UtcTimer.getNowSequential() != sequential) return;
+        ModeProfile mode = GeneralVariables.currentMode();
+        long msInCycle = UtcTimer.getSystemTime() % mode.slotMillis;
+        ManualTxGate gate = decideManualTx(msInCycle, mode.audioSlackMillis,
+                mode.slotMillis, GeneralVariables.lateStartTolerance);
+        if (gate.transmit) {
+            doTransmit();
+        } else {
+            ToastMessage.show(String.format(
+                    GeneralVariables.getStringFromResource(R.string.late_start_deferred),
+                    gate.clipMs));
         }
     }
 

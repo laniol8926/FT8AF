@@ -226,6 +226,8 @@
     <string name="qsopanel_tx_message">TX: %1$s</string>
     <string name="qsopanel_waiting_messages">Waiting for messages...</string>
     <string name="qsopanel_log_action">LOG</string>
+    <string name="qsopanel_pause_action">PAUSE</string>
+    <string name="qsopanel_paused">PAUSED</string>
     <string name="qsopanel_queue">QUEUE</string>
 
     <!-- ===== Decode screen ===== -->
