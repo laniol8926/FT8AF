@@ -471,7 +471,7 @@ fun ActiveQsoPanel(
                 } else null,
                 onClear = if (displayCallsign != null) {
                     {
-                        mainViewModel.ft8TransmitSignal.userResetToCQ()
+                        mainViewModel.ft8TransmitSignal.userCancelQso()
                         mainViewModel.qsoSheetCallsign.postValue(null)
                         mainViewModel.qsoSheetMinimized.postValue(false)
                     }

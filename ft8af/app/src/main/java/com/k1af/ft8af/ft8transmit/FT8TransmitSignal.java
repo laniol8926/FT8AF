@@ -707,7 +707,7 @@ public class FT8TransmitSignal {
         } else {
             this.toMaidenheadGrid = "";
         }
-        mutableToCallsign.postValue(transmitCallsign);// set the call target (includes report, sequence, frequency, callsign)
+        mutableToCallsign.postValue(transmitCallsign.copy());// set the call target (includes report, sequence, frequency, callsign)
         toCallsign = transmitCallsign;// set the call target
         //mutableToCallsign.postValue(toCallsign);// set the call target
 
@@ -2464,7 +2464,7 @@ public class FT8TransmitSignal {
         }
         generateFun();
         setCurrentFunctionOrder(functionOrder);// set current message
-        mutableToCallsign.postValue(toCallsign);
+        mutableToCallsign.postValue(toCallsign.copy());
         mutableFunctionOrder.postValue(functionOrder);
     }
 
@@ -2866,7 +2866,7 @@ public class FT8TransmitSignal {
         } else {
             functionOrder = 6;
             toCallsign.callsign = "CQ";
-            mutableToCallsign.postValue(toCallsign);// set the call target
+            mutableToCallsign.postValue(toCallsign.copy());// set the call target
             generateFun();
         }
     }
@@ -2910,6 +2910,23 @@ public class FT8TransmitSignal {
             ToastMessage.show(String.format(
                     GeneralVariables.getStringFromResource(R.string.late_start_deferred),
                     gate.clipMs));
+        }
+    }
+
+    /**
+     * QSO panel ✕: abandon the current QSO. Like the end of a logged QSO, the Auto-CQ
+     * setting decides what follows (fork): off (and Hunt off) -> TX off; on -> CQ.
+     * Pressing CQ itself still always calls CQ (userResetToCQ).
+     */
+    public void userCancelQso() {
+        String call = toCallsign != null ? toCallsign.callsign : "?";
+        userResetToCQ();
+        if (shouldStopAfterQso(false, GeneralVariables.autoCQAfterQSO,
+                GeneralVariables.autoFollowCQ)) {
+            GeneralVariables.fileLog("QSO: cancelled with " + call + ", Auto-CQ & Hunt off -> stop TX");
+            setActivated(false);
+        } else {
+            GeneralVariables.fileLog("QSO: cancelled with " + call + " -> CQ");
         }
     }
 

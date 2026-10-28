@@ -493,7 +493,8 @@ fun DecodeScreen(
                         val targetCs = txToCallsign?.callsign?.takeIf {
                             it.isNotEmpty() && !it.equals("CQ", ignoreCase = true)
                         }
-                        val isTarget = targetCs != null &&
+                        // Only while TX is on (fork): after Stop/✕ we are not calling him.
+                        val isTarget = txActivated && targetCs != null &&
                             message.callsignFrom?.equals(targetCs, ignoreCase = true) == true
 
                         DecodeRow(

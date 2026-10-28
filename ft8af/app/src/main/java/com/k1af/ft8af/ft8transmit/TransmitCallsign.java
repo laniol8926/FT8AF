@@ -38,6 +38,20 @@ public class TransmitCallsign {
     }
 
     /**
+     * A detached copy, for publishing to the UI. The sequencer mutates its own
+     * instance in place (e.g. resetToCQ sets callsign = "CQ"); posting that same
+     * instance meant the UI state held an object that changed under it and never
+     * saw a new value, so the panel and decode list kept showing the old target.
+     */
+    public TransmitCallsign copy() {
+        TransmitCallsign c = new TransmitCallsign(i3, n3, callsign, frequency, sequential, snr);
+        c.dxcc = dxcc;
+        c.cqZone = cqZone;
+        c.itu = itu;
+        return c;
+    }
+
+    /**
      * When the target callsign is null or "CQ", there is no target callsign.
      * @return whether there is a target callsign
      */
