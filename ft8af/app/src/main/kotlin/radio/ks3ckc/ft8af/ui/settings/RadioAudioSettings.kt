@@ -226,6 +226,7 @@ fun RadioAudioSettings(
             onSelect = { selectedDisplayIndex ->
                 showRigModelPicker = false
                 val (actualIndex, selectedRig) = rigItems[selectedDisplayIndex]
+                val modelChanged = actualIndex != GeneralVariables.modelNo
                 GeneralVariables.modelNo = actualIndex
                 modelNo = actualIndex
                 GeneralVariables.instructionSet = selectedRig.instructionSet
@@ -251,6 +252,9 @@ fun RadioAudioSettings(
                 )
                 GeneralVariables.civAddressStored = encodedCiv
                 GeneralVariables.civAddressFormatKnown = true
+                // The rig class is picked at connect time; rebuild it now so the
+                // new model works without an app restart.
+                if (modelChanged) mainViewModel.reconnectRigAfterModelChange(context)
             },
         )
     }

@@ -3027,6 +3027,22 @@ public class MainViewModel extends ViewModel {
     }
 
     /**
+     * The rig model was changed in Settings. The rig object (and its CAT
+     * protocol) is chosen once at connect time, so a model change only took
+     * effect after an app restart. On a USB cable, rebuild the rig on the same
+     * port right away. Other links keep the old behaviour (restart/reconnect).
+     */
+    public void reconnectRigAfterModelChange(Context context) {
+        CableSerialPort.SerialPort port = connectedCableSerialPort();
+        if (port == null) {
+            GeneralVariables.fileLog("Rig model changed: not on USB, takes effect on next connect");
+            return;
+        }
+        GeneralVariables.fileLog("Rig model changed: reconnecting on the same USB port");
+        connectCableRig(context, port);
+    }
+
+    /**
      * Whether a CAT reply can be expected on the current link at all. False in the
      * FT-710 cable mode, where the read loop is deliberately never started (see
      * {@link CableSerialPort#isFt710WriteOnlyCatMode}) — so "CAT Response: fail"
