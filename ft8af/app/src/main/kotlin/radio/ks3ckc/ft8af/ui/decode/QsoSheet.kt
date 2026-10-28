@@ -28,8 +28,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -144,30 +142,10 @@ private fun QsoSheetContent(
             Spacer(modifier = Modifier.height(8.dp))
         }
 
-        // Station info (header + picture through the path map) is collapsed while TX
-        // is on, so the waterfall and the QSO itself own the sheet; one tap shows it.
-        // Looking a station up with TX off keeps the full sheet as before.
-        var showStationInfo by androidx.compose.runtime.saveable.rememberSaveable(callsign) {
-            mutableStateOf(!isActivated)
-        }
-        if (isActivated) {
-            Text(
-                text = stringResource(
-                    if (showStationInfo) R.string.qsosheet_hide_station_info
-                    else R.string.qsosheet_show_station_info,
-                    callsign,
-                ),
-                color = Accent,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = GeistMonoFamily,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showStationInfo = !showStationInfo }
-                    .padding(vertical = 8.dp),
-            )
-        }
-        if (showStationInfo) {
+        // Station info (header + picture through the path map) is left out while TX is
+        // on: the QSO panel's header already names the station, and the waterfall and
+        // the QSO own the sheet. Looking a station up with TX off shows it as before.
+        if (!isActivated) {
         // -- Station header --
         StationHeader(
             callsign = callsign,
