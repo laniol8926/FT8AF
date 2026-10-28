@@ -316,16 +316,20 @@ fun WaterfallScreen(
                 softWrap = false,
             )
 
-            Spacer(modifier = Modifier.width(10.dp))
+            // The update counter is diagnostic; the landscape side panel (no spectrum strip)
+            // drops it so a narrow panel keeps the frequency and LIVE whole.
+            if (showSpectrum) {
+                Spacer(modifier = Modifier.width(10.dp))
 
-            Text(
-                text = "$updateCount",
-                color = TextDim,
-                fontFamily = GeistMonoFamily,
-                fontSize = 9.sp,
-                maxLines = 1,
-                softWrap = false,
-            )
+                Text(
+                    text = "$updateCount",
+                    color = TextDim,
+                    fontFamily = GeistMonoFamily,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
 
             Spacer(modifier = Modifier.width(6.dp))
 

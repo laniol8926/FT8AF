@@ -210,7 +210,11 @@ fun TabBar(
             ) {
                 FT8AFIcons.Sliders(color = color, strokeWidth = if (moreControlsOpen) 1.8f else 1.5f)
                 Text(
-                    text = stringResource(R.string.controls_drawer_more),
+                    // "More" in the compact (landscape) bar: "More controls" was cut to
+                    // "More control" on a narrow phone with display zoom up.
+                    text = stringResource(
+                        if (compact) R.string.controls_drawer_more_short else R.string.controls_drawer_more,
+                    ),
                     color = color,
                     fontSize = 10.5.sp,
                     fontWeight = if (moreControlsOpen) FontWeight.SemiBold else FontWeight.Medium,

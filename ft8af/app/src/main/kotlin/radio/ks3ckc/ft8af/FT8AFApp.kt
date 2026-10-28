@@ -171,6 +171,9 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     val isLandscape =
         LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
     val drawerPeekHeight = if (isLandscape) 0.dp else OperateDrawerPeekHeight
+    // Landscape title-row width in dp: on a narrow phone the SWR and PWR chips give way (they stay
+    // in the QSO panel header) so the RX / "TX in Xs" status keeps its room.
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
     // Window-space Y of the reserved peek slot's bottom (== tab bar top). The drawer overlay
     // anchors its bottom edge here so the collapsed sheet lines up exactly with the reserved
     // inline space and grows upward from there.
@@ -653,11 +656,11 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                     txSlot = txSlot,
                                     onSelectTxPeriod = onSelectTxPeriodAction,
                                 )
-                                if (lastSwrRatio.isNotEmpty()) {
+                                if (lastSwrRatio.isNotEmpty() && screenWidthDp >= TitleRowSwrMinWidthDp) {
                                     Spacer(modifier = Modifier.width(TitleRowGap))
                                     CompactSwrChip(ratioText = lastSwrRatio)
                                 }
-                                if ((operatorPowerWatts ?: 0f) > 0f) {
+                                if ((operatorPowerWatts ?: 0f) > 0f && screenWidthDp >= TitleRowPwrMinWidthDp) {
                                     Spacer(modifier = Modifier.width(TitleRowGap))
                                     CompactPowerChip(
                                         powerText = com.k1af.ft8af.ft8transmit.MeterProtectionController
@@ -1110,7 +1113,16 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
 
 /**
  * Gap between the landscape Decode title row's buttons and chips. Kept small so the row fits
- * an ~850 dp phone (Galaxy A32) with Call CQ, Hunt, the status, the CAT chip, TUNE, Even/Odd
+ * a Galaxy A32 (777 dp usable in landscape) with Call CQ, Hunt, the status, the CAT chip, TUNE, Even/Odd
  * and the SWR and PWR chips all showing, without squeezing the "TX in Xs" countdown.
  */
 private val TitleRowGap = 4.dp
+
+/**
+ * Narrowest screens (dp) that still show the PWR and SWR chips on the landscape title row. Below
+ * these the chips give way, PWR first, so the status keeps its room (on a Galaxy A32 with
+ * display zoom up it reported ~685 dp; a normal A32 reports 777 dp after the system bars and
+ * fits everything). Both readings stay in the QSO panel header.
+ */
+private const val TitleRowPwrMinWidthDp = 760
+private const val TitleRowSwrMinWidthDp = 730

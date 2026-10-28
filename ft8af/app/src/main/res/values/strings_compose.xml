@@ -737,6 +737,7 @@
     <string name="controls_drawer_expand">Expand controls</string>
     <string name="controls_drawer_collapse">Collapse controls</string>
     <string name="controls_drawer_more">More controls</string>
+    <string name="controls_drawer_more_short">More</string>
     <string name="settings_per_band_volume">Save Output Level per Band</string>
     <string name="settings_per_band_volume_desc">Remember the TX volume separately for each band and restore it on band change</string>
     <string name="per_band_volume_restored">TX volume %1$d%% restored for %2$s</string>

@@ -81,6 +81,10 @@ internal fun InputLevelIndicator(
             fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.06.sp,
+            // Never wrap: when a narrow strip squeezes the meter it is clipped, not stacked
+            // letter by letter ("R" over "X").
+            maxLines = 1,
+            softWrap = false,
         )
 
         Spacer(modifier = Modifier.width(4.dp))
@@ -115,6 +119,8 @@ internal fun InputLevelIndicator(
             color = TextMuted,
             fontFamily = GeistMonoFamily,
             fontSize = 9.sp,
+            maxLines = 1,
+            softWrap = false,
         )
 
         Spacer(modifier = Modifier.width(4.dp))
@@ -125,6 +131,8 @@ internal fun InputLevelIndicator(
             fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.06.sp,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }
