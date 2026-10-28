@@ -1652,8 +1652,84 @@ public class FT8TransmitSignal {
             ToastMessage.show(String.format("QSO : %s , at %s", toCallsign.callsign
                     , BaseRigOperation.getFrequencyAllInfo(GeneralVariables.band)));
             mutableQsoCompletedAt.postValue(messageEndTime);// signal UI celebration
+            lastLoggedCall = toCallsign.callsign;
+            lastLoggedBand = GeneralVariables.band;
+            lastLoggedAt = UtcTimer.getSystemTime();
+            repeatAnswers = 0;
         }
 
+    }
+
+    // The QSO just logged: a repeat from this station soon after (he missed our
+    // RR73/73) is the same QSO -- answer it, never log it again.
+    private volatile String lastLoggedCall = "";
+    // TX switched itself off after a logged QSO (Auto-CQ off). While set, a repeat
+    // from the station just logged re-arms TX for an answer (see answerRepeatAfterLog).
+    private volatile boolean stoppedAfterQso = false;
+    private int repeatAnswers = 0;// answers to the logged station since the QSO; capped
+    static final int MAX_REPEAT_ANSWERS = 2;
+    private volatile long lastLoggedBand = 0;
+    private volatile long lastLoggedAt = 0;
+
+    /** How long after logging a station a repeat from him still counts as the same QSO. */
+    static final long SAME_QSO_WINDOW_MS = 5 * 60 * 1000;
+
+    /** Package-visible for testing. */
+    /**
+     * Auto-CQ off: switch TX off after a logged QSO, ready to answer a repeat from
+     * that station. Keeps the Max 73 Sends gate (setActivated(false) clears it for a
+     * fresh run) so a capped station is still not re-answered.
+     */
+    private void stopAfterLoggedQso() {
+        String capped = cappedCallsign;
+        setActivated(false);
+        cappedCallsign = capped;
+        stoppedAfterQso = true;
+    }
+
+    static boolean isSameQsoAsLogged(String call, long band, long nowMs,
+                                     String loggedCall, long loggedBand, long loggedAt) {
+        return call != null && call.equals(loggedCall) && band == loggedBand
+                && nowMs - loggedAt < SAME_QSO_WINDOW_MS;
+    }
+
+    /**
+     * TX stopped itself after logging a QSO, and the station just logged repeats his
+     * R+report or RR73 to us: he missed our RR73/73. Answer him as if the QSO were
+     * still open (RR73 to a report, 73 to an RR73) by re-arming TX for it; the QSO is
+     * not logged again (updateQSlRecordList skips a just-logged station) and TX stops
+     * again when the answer completes. At most {@link #MAX_REPEAT_ANSWERS} answers.
+     *
+     * @return true if an answer was armed
+     */
+    private boolean answerRepeatAfterLog(ArrayList<Ft8Message> messages) {
+        if (repeatAnswers >= MAX_REPEAT_ANSWERS) return false;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Ft8Message msg = messages.get(i);
+            if (!GeneralVariables.checkIsMyCallsign(msg.getCallsignTo())) continue;
+            if (!isJustLogged(msg.getCallsignFrom())) continue;
+            int theirOrder = GeneralVariables.checkFunOrder(msg);
+            // The Max 73 Sends cap ended this QSO: the operator's limit wins.
+            if (isCappedContinuation(cappedCallsign, msg.getCallsignFrom(), theirOrder)) continue;
+            if (theirOrder != 3 && theirOrder != 4) continue;// R+report or RR73/RRR
+            repeatAnswers++;
+            GeneralVariables.fileLog("QSO: " + msg.getCallsignFrom() + " repeated order "
+                    + theirOrder + " after we logged -> answer " + (theirOrder + 1)
+                    + " (not logged again, " + repeatAnswers + "/" + MAX_REPEAT_ANSWERS + ")");
+            setTransmit(new TransmitCallsign(msg.i3, msg.n3, msg.getCallsignFrom(), msg.freq_hz
+                            , msg.getSequence(), msg.hasSnr() ? msg.snr : 0)
+                    , theirOrder + 1
+                    , msg.extraInfo);
+            setActivated(true);// clears stoppedAfterQso; completion stops TX again
+            GeneralVariables.resetLaunchSupervision();
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isJustLogged(String call) {
+        return isSameQsoAsLogged(call, GeneralVariables.band, UtcTimer.getSystemTime(),
+                lastLoggedCall, lastLoggedBand, lastLoggedAt);
     }
 
     /**
@@ -1983,6 +2059,10 @@ public class FT8TransmitSignal {
     public void updateQSlRecordList(int order, TransmitCallsign toCall) {
         if (toCall == null) return;
         if (toCall.callsign.equals("CQ")) return;
+        // Just logged him on this band: a repeat (he missed our RR73/73) gets an answer
+        // but is the same QSO. Leave the saved record alone -- deleteIfSaved below
+        // would drop it and the reply would log the QSO a second time.
+        if (isJustLogged(toCall.callsign)) return;
 
         QSLRecord record = GeneralVariables.qslRecordList.getRecordByCallsign(toCall.callsign);
         if (record == null) {
@@ -2044,23 +2124,21 @@ public class FT8TransmitSignal {
     /**
      * Decide whether to stop transmitting after a QSO completes.
      *
-     * <p>A QSO started by tapping a decode ({@code singleQsoMode}) is a single
-     * shot: when it finishes we stop rather than idling on CQ. The operator
-     * keeps the run going by enabling Hunt ({@code autoFollowCQ}) or Auto-CQ
-     * after QSO ({@code autoCQAfterQSO}); a queued caller or Hunt target that
-     * already picked up the next contact ({@code continued}) also keeps us
-     * active. A run that did not start as a single tapped QSO (e.g. pressing CQ)
-     * is never stopped here.
+     * <p>Auto-CQ after QSO ({@code autoCQAfterQSO}) decides it, however the QSO
+     * started (a tapped decode or an answer to our CQ): off, TX stops once the
+     * QSO is logged (WSJT-X "Disable Tx after sending 73"); on, we call CQ again.
+     * Hunt ({@code autoFollowCQ}) keeps hunting, and a queued caller or Hunt target
+     * that already picked up the next contact ({@code continued}) is answered.
+     * (Fork change: a QSO answered from our own CQ used to stay armed on CQ.)
      *
      * @param continued      a dequeued caller or Hunt/auto-follow already set up the next QSO
      * @param autoCQAfterQSO the Auto-CQ-after-QSO setting (keep calling CQ)
      * @param autoFollowCQ   the Hunt toggle (auto-answer any CQ)
-     * @param singleQsoMode  the active run started as a single tapped QSO
      * @return true if TX should be deactivated now
      */
     static boolean shouldStopAfterQso(boolean continued, boolean autoCQAfterQSO,
-                                      boolean autoFollowCQ, boolean singleQsoMode) {
-        return singleQsoMode && !continued && !autoCQAfterQSO && !autoFollowCQ;
+                                      boolean autoFollowCQ) {
+        return !continued && !autoCQAfterQSO && !autoFollowCQ;
     }
 
     /**
@@ -2130,6 +2208,10 @@ public class FT8TransmitSignal {
         // or silence this cycle is not a failed try.
         boolean afterPause = !evidenceOnly && pausedSlot;
         if (afterPause) pausedSlot = false;
+
+        if (!activated && stoppedAfterQso && answerRepeatAfterLog(messages)) {
+            return;
+        }
 
         if (GeneralVariables.houndMode) {// DXpedition Hound: dedicated QSO handler
             if (evidenceOnly) return;// Hound sequencing stays fast-pass-only
@@ -2228,9 +2310,9 @@ public class FT8TransmitSignal {
             // operator enabled Hunt or Auto-CQ after QSO, or a caller/Hunt target
             // already kept the run alive.
             if (shouldStopAfterQso(continued, GeneralVariables.autoCQAfterQSO,
-                    GeneralVariables.autoFollowCQ, singleQsoMode)) {
-                GeneralVariables.fileLog("QSO: single tapped QSO done, Hunt & Auto-CQ off -> stop TX");
-                setActivated(false);
+                    GeneralVariables.autoFollowCQ)) {
+                GeneralVariables.fileLog("QSO: QSO done, Auto-CQ & Hunt off -> stop TX");
+                stopAfterLoggedQso();
             }
             setCurrentFunctionOrder(functionOrder);// set current message
             mutableFunctionOrder.postValue(functionOrder);
@@ -2593,6 +2675,7 @@ public class FT8TransmitSignal {
             return;
         }
         if (activated) {
+            stoppedAfterQso = false;// operator (or a repeat answer) re-armed TX
             // Tune and FT8 TX are mutually exclusive (issue #408): arming the
             // sequencer ends a running tune so the scheduled TX can key cleanly.
             tuneController.requestStop(TuneController.STOP_TX);
@@ -2944,9 +3027,9 @@ public class FT8TransmitSignal {
         // or a caller was queued. (Force-log never auto-follows a CQ, so Hunt
         // keeps us active to pick up on a later cycle rather than chasing now.)
         if (shouldStopAfterQso(continued, GeneralVariables.autoCQAfterQSO,
-                GeneralVariables.autoFollowCQ, singleQsoMode)) {
-            GeneralVariables.fileLog("QSO: force-logged single tapped QSO, Hunt & Auto-CQ off -> stop TX");
-            setActivated(false);
+                GeneralVariables.autoFollowCQ)) {
+            GeneralVariables.fileLog("QSO: force-logged QSO, Auto-CQ & Hunt off -> stop TX");
+            stopAfterLoggedQso();
         }
 
         setCurrentFunctionOrder(functionOrder);

@@ -150,8 +150,12 @@ fun DecodeScreen(
     // linger): the effect above can miss it when the sheet is reopened
     // while already at order 5 (e.g. a re-tap mid-QSO), which left the
     // sheet up after the QSO had logged and reset to CQ. (#249)
+    // A QSO that reached RR73/73 and reset to CQ is complete even when TX then
+    // switched itself off (Auto-CQ off), so that closes the sheet too; a user STOP
+    // mid-QSO keeps its target, so it never reads as a completion here.
     LaunchedEffect(txToCallsign?.callsign, txActivated, sheetCallsign) {
-        if (sheetCallsign != null && txActivated && txToCallsign?.callsign == "CQ") {
+        if (sheetCallsign != null && txToCallsign?.callsign == "CQ"
+            && (txActivated || lastQsoFunctionOrder >= 4)) {
             kotlinx.coroutines.delay(if (lastQsoFunctionOrder == 5) 5000 else 2000)
             mainViewModel.qsoSheetCallsign.postValue(null)
             mainViewModel.qsoSheetMinimized.postValue(false)

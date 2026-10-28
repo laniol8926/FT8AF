@@ -188,49 +188,55 @@ public class FT8TransmitSignalTest {
     }
 
     // ---- shouldStopAfterQso -------------------------------------------------
-    // After tapping a single CQ in the decode list to work one station, the run
-    // must STOP once that QSO completes — it must not keep calling CQ or hunting
-    // unless the operator has Hunt or Auto-CQ-after-QSO enabled. Pure decision
-    // logic extracted from parseMessageToFunction so it can be tested directly.
+    // Auto-CQ after QSO decides what happens once a QSO is logged, however it
+    // started (tapped decode or an answer to our CQ): off -> TX stops, on -> CQ
+    // again. Hunt keeps hunting; a queued caller already picked up is answered.
 
     @Test
-    public void shouldStop_singleTappedQso_huntAndAutoCqOff_stops() {
-        // The core request: tap a CQ, finish the QSO, then stop.
+    public void shouldStop_huntAndAutoCqOff_stops() {
         assertThat(FT8TransmitSignal.shouldStopAfterQso(
                 /*continued*/ false, /*autoCQAfterQSO*/ false,
-                /*autoFollowCQ*/ false, /*singleQsoMode*/ true)).isTrue();
+                /*autoFollowCQ*/ false)).isTrue();
     }
 
     @Test
-    public void shouldStop_singleTappedQso_huntOn_keepsRunning() {
-        // HUNT enabled -> keep hunting the next CQ after the tapped QSO.
+    public void shouldStop_huntOn_keepsRunning() {
         assertThat(FT8TransmitSignal.shouldStopAfterQso(
-                false, false, /*autoFollowCQ*/ true, true)).isFalse();
+                false, false, /*autoFollowCQ*/ true)).isFalse();
     }
 
     @Test
-    public void shouldStop_singleTappedQso_autoCqOn_keepsRunning() {
-        // Auto-CQ after QSO enabled -> keep calling CQ after the tapped QSO.
+    public void shouldStop_autoCqOn_keepsRunning() {
         assertThat(FT8TransmitSignal.shouldStopAfterQso(
-                false, /*autoCQAfterQSO*/ true, false, true)).isFalse();
+                false, /*autoCQAfterQSO*/ true, false)).isFalse();
     }
 
     @Test
-    public void shouldStop_singleTappedQso_callerQueued_keepsRunning() {
-        // A queued caller / Hunt target already picked up the next contact, so
-        // answer them rather than stopping — even with Hunt & Auto-CQ off.
+    public void shouldStop_callerQueued_keepsRunning() {
         assertThat(FT8TransmitSignal.shouldStopAfterQso(
-                /*continued*/ true, false, false, true)).isFalse();
+                /*continued*/ true, false, false)).isFalse();
+    }
+
+    // ---- isSameQsoAsLogged ---------------------------------------------------
+    // A repeat from the station just logged (he missed our RR73/73) is answered
+    // but must not be logged a second time.
+
+    @Test
+    public void isSameQsoAsLogged_sameCallBandWithinWindow() {
+        long t = 1_000_000L;
+        assertThat(FT8TransmitSignal.isSameQsoAsLogged("KW8CW", 7074000L, t + 60_000,
+                "KW8CW", 7074000L, t)).isTrue();
     }
 
     @Test
-    public void shouldStop_notSingleQso_neverStops() {
-        // A run that did not start as a tapped QSO (e.g. pressing CQ) is never
-        // stopped by this rule, regardless of the other flags.
-        assertThat(FT8TransmitSignal.shouldStopAfterQso(
-                false, false, false, /*singleQsoMode*/ false)).isFalse();
-        assertThat(FT8TransmitSignal.shouldStopAfterQso(
-                true, true, true, false)).isFalse();
+    public void isSameQsoAsLogged_otherCallBandOrLater_isNewQso() {
+        long t = 1_000_000L;
+        assertThat(FT8TransmitSignal.isSameQsoAsLogged("W4IHQ", 7074000L, t + 60_000,
+                "KW8CW", 7074000L, t)).isFalse();
+        assertThat(FT8TransmitSignal.isSameQsoAsLogged("KW8CW", 14074000L, t + 60_000,
+                "KW8CW", 7074000L, t)).isFalse();
+        assertThat(FT8TransmitSignal.isSameQsoAsLogged("KW8CW", 7074000L,
+                t + FT8TransmitSignal.SAME_QSO_WINDOW_MS, "KW8CW", 7074000L, t)).isFalse();
     }
 
     // ---- mayAutoCall --------------------------------------------------------
