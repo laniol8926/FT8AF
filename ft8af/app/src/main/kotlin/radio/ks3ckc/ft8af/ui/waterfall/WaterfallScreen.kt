@@ -187,14 +187,11 @@ fun WaterfallScreen(
             .fillMaxSize()
             .background(BgApp),
     ) {
-        // The TX offset frequency used to fill a top bar of its own; it now sits in the bottom
-        // strip beside LIVE, so the waterfall gets that height. Follows the finger while the
-        // waterfall is being touched, else the committed base frequency.
-        val freqText = if (touchedFreqHz > 0) {
-            "$touchedFreqHz Hz"
-        } else {
-            GeneralVariables.getBaseFrequencyStr() + " Hz"
-        }
+        // The TX offset frequency sits in the bottom strip beside LIVE (it used to fill a top bar of
+        // its own, so the waterfall gets that height). Read from the observed txFreq state, not
+        // GeneralVariables, so it follows the finger while the waterfall is touched and also
+        // updates when the offset moves without a tap, e.g. a clear-slot CQ relocation (#947).
+        val freqText = waterfallHeaderFreqText(touchedFreqHz, txFreq)
 
         // While the user is touching the spectrum, drive the TX bandwidth
         // markers from the touched frequency so the red brackets follow the
@@ -483,6 +480,14 @@ private fun WaterfallCanvas(
  */
 internal fun displayTxFrequencyHz(touchedFreqHz: Int, baseFreqHz: Float): Float =
     if (touchedFreqHz > 0) touchedFreqHz.toFloat() else baseFreqHz
+
+/**
+ * Top-bar frequency label: the touched column while a tap cursor is active,
+ * otherwise the committed TX offset, rounded to whole Hz like
+ * `GeneralVariables.getBaseFrequencyStr()`.
+ */
+internal fun waterfallHeaderFreqText(touchedFreqHz: Int, baseFreqHz: Float): String =
+    "${Math.round(displayTxFrequencyHz(touchedFreqHz, baseFreqHz))} Hz"
 
 /**
  * Route one spectrum touch event to the screen's callbacks, given the

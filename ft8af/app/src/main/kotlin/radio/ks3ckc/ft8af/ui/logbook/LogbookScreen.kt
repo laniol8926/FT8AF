@@ -423,9 +423,11 @@ fun LogbookScreen(mainViewModel: MainViewModel) {
                             )
                             scope.launch {
                                 val result = withContext(Dispatchers.IO) {
-                                    val db = mainViewModel.databaseOpr?.db
+                                    val opr = mainViewModel.databaseOpr
                                         ?: return@withContext null
-                                    ThirdPartyService.syncAllQSOs(db) { done, total, ok1, ok2, ok3 ->
+                                    // Takes the helper, not just its db: with "Download QSOs from
+                                    // Wavelog" on it inserts through the ADIF import's path (#965).
+                                    ThirdPartyService.syncAllQSOs(opr) { done, total, ok1, ok2, ok3 ->
                                         // Marshal back to main thread for state update
                                         syncDialogState = syncDialogState?.copy(
                                             done = done,
@@ -446,6 +448,8 @@ fun LogbookScreen(mainViewModel: MainViewModel) {
                                     cloudlogError = result?.cloudlogError,
                                     qrzError = result?.qrzError,
                                     wrlError = result?.wrlError,
+                                    cloudlogAlreadyPresent = result?.cloudlogAlreadyPresent ?: 0,
+                                    cloudlogDownloaded = result?.cloudlogDownloaded ?: 0,
                                 )
                                 // Re-query QSLTable so the row chips pick up the
                                 // newly-set synced_cloudlog / synced_qrz / synced_wrl flags.
@@ -599,6 +603,8 @@ private data class SyncDialogState(
     val cloudlogError: String? = null,
     val qrzError: String? = null,
     val wrlError: String? = null,
+    val cloudlogAlreadyPresent: Int = 0,
+    val cloudlogDownloaded: Int = 0,
 )
 
 @Composable
@@ -2460,6 +2466,28 @@ private fun CatchUpSyncDialog(
                         color = TextMuted,
                         fontSize = 12.sp,
                     )
+                    if (state.cloudlogAlreadyPresent > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = stringResource(
+                                R.string.log_sync_cloudlog_already_present,
+                                state.cloudlogAlreadyPresent,
+                            ),
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    if (state.cloudlogDownloaded > 0) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = stringResource(
+                                R.string.log_sync_cloudlog_downloaded,
+                                state.cloudlogDownloaded,
+                            ),
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                        )
+                    }
                 }
                 if (state.qrzAttempted) {
                     Spacer(modifier = Modifier.height(4.dp))

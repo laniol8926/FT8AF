@@ -45,6 +45,19 @@ public final class QmxCatTones {
     }
 
     /**
+     * Whether the tone loop ends with {@link #KEY_UP}. Not on a mid-over message
+     * swap (a restart is pending and the over is still transmitting): PTT stays
+     * keyed across a swap, as on the audio path, and the replay's first TA only
+     * changes the tone. Keying up there would rely on the replay's TA re-keying
+     * the radio without a fresh {@code TX;}, which the CAT manual doesn't
+     * promise. A stop clears {@code transmitting}, so it still keys up here, and
+     * the end-of-over {@code RX;} unkeys the radio either way.
+     */
+    public static boolean keyUpAfterTones(boolean restartPending, boolean transmitting) {
+        return !(restartPending && transmitting);
+    }
+
+    /**
      * Symbols to skip when the over starts {@code lateMs} into its slot, so the
      * transmission still ends on the slot boundary (the audio path drops the
      * same span of samples).

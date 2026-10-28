@@ -712,12 +712,30 @@ public class MicRecorder {
      * restart capture the operator explicitly stopped. {@link #reinitialize()}
      * itself does the equivalent teardown inline rather than calling this, so
      * its own internal stop/rebuild cycle never clears that intent flag.
+     *
+     * <p>Retires the AudioRecord reader thread before returning (new
+     * generation, stop the recording to unblock its read(), bounded join),
+     * so a {@link #start()} right after -- e.g. RX resuming after a short TX
+     * pause -- can't leave the old reader running alongside the new one on
+     * the same AudioRecord (a fatal native abort), or let the old reader's
+     * exit stop the new recording.
      */
     public synchronized void stopRecord() {
+        captureGeneration++;
         isRunning = false;
         shouldBeRunning = false;
         if (useUsbAudio && usbAudioDevice != null) {
             usbAudioDevice.stopCapture();
+        }
+        if (audioRecord != null) {
+            try {
+                if (audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                    audioRecord.stop();
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "stopRecord: error stopping AudioRecord: " + e.getMessage());
+            }
+            joinCaptureThread();
         }
     }
 
@@ -849,6 +867,16 @@ public class MicRecorder {
      */
     static boolean shouldRestartAfterReinitialize(boolean shouldBeRunning) {
         return shouldBeRunning;
+    }
+
+    /** Current reader-thread generation. Package-visible for testing. */
+    int captureGenerationForTest() {
+        return captureGeneration;
+    }
+
+    /** The most recent AudioRecord reader thread. Package-visible for testing. */
+    Thread captureThreadForTest() {
+        return captureThread;
     }
 
     /**

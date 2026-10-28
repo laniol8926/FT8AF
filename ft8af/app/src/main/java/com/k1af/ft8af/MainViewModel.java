@@ -114,11 +114,13 @@ import com.k1af.ft8af.rigs.KenwoodTS2000Rig;
 import com.k1af.ft8af.rigs.KenwoodTS440Rig;
 import com.k1af.ft8af.rigs.KenwoodTS570Rig;
 import com.k1af.ft8af.rigs.KenwoodTS590Rig;
+import com.k1af.ft8af.rigs.QrpLabsQmxRig;
 import com.k1af.ft8af.rigs.OnRigStateChanged;
 import com.k1af.ft8af.rigs.TrUSDXRig;
 import com.k1af.ft8af.rigs.Wolf_sdr_450Rig;
 import com.k1af.ft8af.rigs.XieGu6100NetRig;
 import com.k1af.ft8af.rigs.XieGu6100Rig;
+import com.k1af.ft8af.rigs.XieGuG106Rig;
 import com.k1af.ft8af.rigs.XieGuRig;
 import com.k1af.ft8af.rigs.Yaesu2Rig;
 import com.k1af.ft8af.rigs.Yaesu2_847Rig;
@@ -1003,10 +1005,14 @@ public class MainViewModel extends ViewModel {
                         baseRig != null && baseRig.supportWaveOverCAT());
             }
 
-            // Whether this over's beginKeying() actually paused RX capture, so
-            // endKeying() only resumes what it paused (see
-            // shouldPauseRxCaptureForTx's javadoc for why/when).
-            private boolean rxPausedForThisKeying = false;
+            // Whether the FT8 over's / the tune carrier's beginKeying() actually
+            // paused RX capture, so its endKeying() only resumes what it paused
+            // (see shouldPauseRxCaptureForTx's javadoc for why/when). One flag
+            // per keying source: arming TX only *requests* a tune stop, so the
+            // tune's endKeying() can run after the over's beginKeying(), and a
+            // single shared flag would let one consume the other's pause.
+            private volatile boolean rxPausedForOver = false;
+            private volatile boolean rxPausedForTune = false;
 
             /**
              * Assert PTT (+ pause SCO) through the configured control path. Shared
@@ -1014,19 +1020,7 @@ public class MainViewModel extends ViewModel {
              * CAT/RTS/DTR branching lives in one place; with no control path
              * (VOX), this is a no-op and the audio itself keys the rig.
              */
-            private void beginKeying() {
-                rxPausedForThisKeying = hamRecorder != null && shouldPauseRxCaptureForTx(
-                        hamRecorder.isMicSource(),
-                        hamRecorder.getMicRecorder().isUsingUsbDirect(),
-                        GeneralVariables.usbAudioInputVendorId,
-                        GeneralVariables.usbAudioInputProductId,
-                        GeneralVariables.usbAudioOutputVendorId,
-                        GeneralVariables.usbAudioOutputProductId);
-                if (rxPausedForThisKeying) {
-                    hamRecorder.pauseForTx();
-                }
-                fileLog("PTT: keying, RX capture " + (rxPausedForThisKeying ? "paused" : "left running"));
-
+            private void beginKeying(boolean tune) {
                 boolean keysViaControlPath = GeneralVariables.controlMode == ControlMode.CAT
                         || GeneralVariables.controlMode == ControlMode.RTS
                         || GeneralVariables.controlMode == ControlMode.DTR;
@@ -1058,10 +1052,32 @@ public class MainViewModel extends ViewModel {
                     pttSafetyLatch.onKeyed();
                     baseRig.setPTT(true);
                 }
+
+                // Last, so nothing above can throw between the pause and the
+                // caller's matching endKeying(): the TX audio itself only opens
+                // after the PTT settle delay, still well after this.
+                boolean pause = hamRecorder != null && shouldPauseRxCaptureForTx(
+                        isQmxRig(baseRig),
+                        hamRecorder.isMicSource(),
+                        hamRecorder.getMicRecorder().isUsingUsbDirect(),
+                        GeneralVariables.usbAudioInputVendorId,
+                        GeneralVariables.usbAudioInputProductId,
+                        GeneralVariables.usbAudioOutputVendorId,
+                        GeneralVariables.usbAudioOutputProductId);
+                if (pause) {
+                    hamRecorder.pauseForTx();
+                }
+                fileLog("PTT: keying " + (tune ? "tune" : "over") + ", RX capture "
+                        + (pause ? "paused" : "left running"));
+                if (tune) {
+                    rxPausedForTune = pause;
+                } else {
+                    rxPausedForOver = pause;
+                }
             }
 
-            /** Release PTT (+ restore SCO); counterpart of {@link #beginKeying()}. */
-            private void endKeying() {
+            /** Release PTT (+ restore SCO); counterpart of {@link #beginKeying(boolean)}. */
+            private void endKeying(boolean tune) {
                 if (GeneralVariables.controlMode == ControlMode.CAT
                         || GeneralVariables.controlMode == ControlMode.RTS
                         || GeneralVariables.controlMode == ControlMode.DTR) {
@@ -1081,15 +1097,22 @@ public class MainViewModel extends ViewModel {
                 // fresh snapshot in beginKeying().
                 txScoLatch.keyUp();
 
-                if (rxPausedForThisKeying) {
-                    rxPausedForThisKeying = false;
+                boolean paused;
+                if (tune) {
+                    paused = rxPausedForTune;
+                    rxPausedForTune = false;
+                } else {
+                    paused = rxPausedForOver;
+                    rxPausedForOver = false;
+                }
+                if (paused) {
                     hamRecorder.resumeAfterTx();
                 }
             }
 
             @Override
             public void onBeforeTransmit(Ft8Message message, int functionOder) {
-                beginKeying();
+                beginKeying(false);
                 if (ft8TransmitSignal.isActivated()) {
                     GeneralVariables.transmitMessages.add(message);
                     //mutableTransmitMessages.postValue(GeneralVariables.transmitMessages);
@@ -1099,17 +1122,17 @@ public class MainViewModel extends ViewModel {
 
             @Override
             public void onAfterTransmit(Ft8Message message, int functionOder) {
-                endKeying();
+                endKeying(false);
             }
 
             @Override
             public void onTuneKeyDown() {
-                beginKeying();
+                beginKeying(true);
             }
 
             @Override
             public void onTuneKeyUp() {
-                endKeying();
+                endKeying(true);
             }
 
             @Override
@@ -2432,30 +2455,47 @@ public class MainViewModel extends ViewModel {
      * selection opens a genuine stereo track with the left channel at full
      * scale and the right silenced (see {@link AudioChannelSelect}) --
      * underdriven either way until the operator finds the manual Settings
-     * toggle. Defaults {@code txAudioChannel} to {@code LEFT} the first time
-     * the QMX connects, but only when the operator has never touched that
-     * setting at all (no "txAudioChannel" config row yet) -- an explicit
-     * choice, even {@code BOTH} itself, is never overridden.
+     * toggle. While a QMX is the connected rig, uses {@code LEFT} for TX, but
+     * only when the operator has never touched that setting at all (no
+     * "txAudioChannel" config row) -- an explicit choice, even {@code BOTH}
+     * itself, is never overridden. Applied in memory on every rig connect and
+     * never saved, so switching to another rig goes back to {@code BOTH}
+     * instead of leaving that rig on a left-only TX it never asked for.
      */
-    private void applyQmxTxChannelDefaultIfApplicable(int hamlibModelId) {
+    private void applyTxChannelDefaultForRig(boolean rigIsQmx) {
         if (databaseOpr == null) return;
-        if (!shouldDefaultQmxTxChannelToLeft(hamlibModelId,
-                databaseOpr.hasConfigKey(AudioChannelSelect.TX_CONFIG_KEY))) {
-            return;
+        boolean keyExists = databaseOpr.hasConfigKey(AudioChannelSelect.TX_CONFIG_KEY);
+        int channel = defaultTxChannelForRig(rigIsQmx, keyExists, GeneralVariables.txAudioChannel);
+        if (channel != GeneralVariables.txAudioChannel) {
+            GeneralVariables.txAudioChannel = channel;
+            GeneralVariables.fileLog("TX audio channel defaulted to "
+                    + (channel == AudioChannelSelect.LEFT ? "LEFT (QMX)" : "BOTH")
+                    + " (no saved user choice)");
         }
-        GeneralVariables.txAudioChannel = AudioChannelSelect.LEFT;
-        databaseOpr.writeConfig(AudioChannelSelect.TX_CONFIG_KEY,
-                String.valueOf(AudioChannelSelect.LEFT), null);
-        GeneralVariables.fileLog(
-                "QMX: defaulted TX audio channel to LEFT (first connect, no prior user choice)");
     }
 
     /**
-     * The decision behind {@link #applyQmxTxChannelDefaultIfApplicable}, pure
-     * and testable without a real {@code DatabaseOpr}/{@code Context}.
+     * The decision behind {@link #applyTxChannelDefaultForRig}, pure and
+     * testable without a real {@code DatabaseOpr}/{@code Context}: the TX
+     * channel to use for the rig being connected. A saved choice
+     * ({@code txChannelConfigKeyExists}) keeps {@code current}; otherwise the
+     * QMX gets {@code LEFT} and every other rig the {@code BOTH} default.
      */
-    static boolean shouldDefaultQmxTxChannelToLeft(int hamlibModelId, boolean txChannelConfigKeyExists) {
-        return hamlibModelId == HamlibRig.QRPLABS_QMX_MODEL_ID && !txChannelConfigKeyExists;
+    static int defaultTxChannelForRig(boolean rigIsQmx, boolean txChannelConfigKeyExists,
+                                      int current) {
+        if (txChannelConfigKeyExists) return current;
+        return rigIsQmx ? AudioChannelSelect.LEFT : AudioChannelSelect.BOTH;
+    }
+
+    /**
+     * Whether {@code rig} is a QRP Labs QMX, through either rig-list entry: the
+     * hamlib backend or the native {@link QrpLabsQmxRig}. The RX pause and the
+     * LEFT TX channel default work around the radio's USB audio, so they apply
+     * whichever CAT driver talks to it.
+     */
+    static boolean isQmxRig(BaseRig rig) {
+        return rig instanceof QrpLabsQmxRig
+                || (rig instanceof HamlibRig && ((HamlibRig) rig).isQmx());
     }
 
     /**
@@ -2463,11 +2503,12 @@ public class MainViewModel extends ViewModel {
      * reliably reaches full drive; over phone audio it often can't (two of two test phones
      * read 1-2 bars, it needs 3). Turn them on the first time a QMX connects, but only when
      * the operator has never set the option (no "qmxCatTones" config row yet), so an
-     * explicit off is never overridden. Same rule as the TX channel default above.
+     * explicit off is never overridden. Same rule as {@link #applyTxChannelDefaultForRig},
+     * and like it covers both QMX entries (Hamlib and native, {@link #isQmxRig}).
      */
-    private void applyQmxCatTonesDefaultIfApplicable(int hamlibModelId) {
+    private void applyCatTonesDefaultForRig(boolean rigIsQmx) {
         if (databaseOpr == null) return;
-        if (!shouldDefaultQmxCatTonesOn(hamlibModelId,
+        if (!shouldDefaultQmxCatTonesOn(rigIsQmx,
                 databaseOpr.hasConfigKey(com.k1af.ft8af.ft8transmit.QmxCatTones.CONFIG_KEY))) {
             return;
         }
@@ -2477,20 +2518,26 @@ public class MainViewModel extends ViewModel {
                 "QMX: turned on CAT tones (first connect, no prior user choice)");
     }
 
-    /** The decision behind {@link #applyQmxCatTonesDefaultIfApplicable}; pure for tests. */
-    static boolean shouldDefaultQmxCatTonesOn(int hamlibModelId, boolean catTonesConfigKeyExists) {
-        return hamlibModelId == HamlibRig.QRPLABS_QMX_MODEL_ID && !catTonesConfigKeyExists;
+    /** The decision behind {@link #applyCatTonesDefaultForRig}; pure for tests. */
+    static boolean shouldDefaultQmxCatTonesOn(boolean rigIsQmx, boolean catTonesConfigKeyExists) {
+        return rigIsQmx && !catTonesConfigKeyExists;
     }
 
     /**
      * Whether RX capture must be paused for the duration of this TX (see
      * {@link HamRecorder#pauseForTx()} for the real-hardware failure this
-     * works around). True only when RX is actually holding an Android
-     * capture session on the exact same USB device TX is about to play on --
-     * deliberately narrow, since the conflict was only confirmed for that
-     * exact combination:
+     * works around). True only for the QRP Labs QMX, and only when RX is
+     * actually holding an Android capture session on the exact same USB
+     * device TX is about to play on. The QMX gate matters: matching VID:PID
+     * alone is true for every single-cable USB rig (IC-7300, IC-705,
+     * IC-9700, FT-991A, Digirig, SignaLink...) whose operator picked the
+     * rig's codec for both directions, and pausing those would blank the
+     * waterfall during TX, break full-duplex satellite monitoring, and risk
+     * delaying the last RX slot's decode -- for a HAL conflict only ever
+     * confirmed with a QMX:
      *
      * <ul>
+     *   <li>the rig must be a QMX ({@link #isQmxRig});
      *   <li>RX must be the phone-audio path ({@code HamRecorder.isMicSource()}),
      *       not a LAN-connected rig -- those never touch this HAL at all, and
      *       toggling capture off would spuriously gate their audio too (see
@@ -2508,10 +2555,10 @@ public class MainViewModel extends ViewModel {
      * {@code LIBUSB_ERROR_IO} (motorola edge 2022 + QMX). The reference app
      * that drives the QMX to full level over raw USB stops capture first.
      */
-    static boolean shouldPauseRxCaptureForTx(boolean rxIsMicSource, boolean rxIsUsbDirect,
-            int usbInputVendorId, int usbInputProductId,
+    static boolean shouldPauseRxCaptureForTx(boolean rigIsQmx, boolean rxIsMicSource,
+            boolean rxIsUsbDirect, int usbInputVendorId, int usbInputProductId,
             int usbOutputVendorId, int usbOutputProductId) {
-        if (!rxIsMicSource || rxIsUsbDirect) {
+        if (!rigIsQmx || !rxIsMicSource || rxIsUsbDirect) {
             return false;
         }
         return usbInputVendorId != 0
@@ -2567,11 +2614,17 @@ public class MainViewModel extends ViewModel {
             case InstructionSet.KENWOOD_TS590:
                 baseRig = new KenwoodTS590Rig();//KENWOOD TS590
                 break;
+            case InstructionSet.QRPLABS_QMX:
+                baseRig = new QrpLabsQmxRig();//QRP Labs QMX (TS-590 CAT, DATA mode MD6;)
+                break;
             case InstructionSet.GUOHE_Q900:
                 baseRig = new GuoHeQ900Rig();//GuoHe Q900
                 break;
             case InstructionSet.XIEGUG90S://XieGu, USB mode
                 baseRig = new XieGuRig(GeneralVariables.civAddress);//XieGu G90S
+                break;
+            case InstructionSet.XIEGU_G106:
+                baseRig = new XieGuG106Rig(GeneralVariables.civAddress);
                 break;
             case InstructionSet.ELECRAFT:
                 baseRig = new ElecraftRig();//ELECRAFT
@@ -2625,12 +2678,12 @@ public class MainViewModel extends ViewModel {
                 RigNameList.RigName selected = ctx == null ? null
                         : RigNameList.getInstance(ctx).getRigNameByIndex(GeneralVariables.modelNo);
                 int hamlibModelId = HamlibRig.modelIdFor(selected);
-                applyQmxTxChannelDefaultIfApplicable(hamlibModelId);
-                applyQmxCatTonesDefaultIfApplicable(hamlibModelId);
                 baseRig = new HamlibRig(hamlibModelId);
                 break;
             }
         }
+        applyTxChannelDefaultForRig(isQmxRig(baseRig));
+        applyCatTonesDefaultForRig(isQmxRig(baseRig));
 
         // Store the rig name for PSKReporter software string.
         // Use the user-selected model name from RigNameList (same source as the
@@ -2696,6 +2749,22 @@ public class MainViewModel extends ViewModel {
         if (hamRecorder != null) {
             hamRecorder.reinitializeMicRecorder();
         }
+    }
+
+    /**
+     * RECORD_AUDIO was just granted: bring up the mic capture that could not
+     * open at startup without it (see {@link HamRecorder#restartMicAfterPermissionGrant}).
+     * On a plain daemon thread, not the caller's: the grant arrives on the main
+     * thread, and the reinit joins the old capture thread (up to a second) and
+     * can wait on another reinit holding the MicRecorder lock.
+     */
+    public void restartAudioAfterMicGrant() {
+        final HamRecorder recorder = hamRecorder;
+        if (recorder == null) return;
+        GeneralVariables.fileLog("RECORD_AUDIO granted: restarting mic capture");
+        Thread restart = new Thread(recorder::restartMicAfterPermissionGrant, "MicGrantRestart");
+        restart.setDaemon(true);
+        restart.start();
     }
 
     /**
@@ -2876,7 +2945,7 @@ public class MainViewModel extends ViewModel {
      */
     private void sendQmxToneKeyUp() {
         BaseRig rig = baseRig;
-        if (!(rig instanceof HamlibRig) || !((HamlibRig) rig).isQmx()) return;
+        if (!isQmxRig(rig)) return;
         BaseRigConnector connector = rig.getConnector();
         if (connector == null) return;
         connector.sendData(com.k1af.ft8af.ft8transmit.QmxCatTones.KEY_UP
@@ -2891,7 +2960,7 @@ public class MainViewModel extends ViewModel {
      * a lost unkey isn't seen as undelivered.
      */
     void unkeyStrandedQmx() {
-        if (!(baseRig instanceof HamlibRig) || !((HamlibRig) baseRig).isQmx()) return;
+        if (!isQmxRig(baseRig)) return;
         if (ft8TransmitSignal != null
                 && (ft8TransmitSignal.isTransmitting() || ft8TransmitSignal.isTuning())) {
             return;

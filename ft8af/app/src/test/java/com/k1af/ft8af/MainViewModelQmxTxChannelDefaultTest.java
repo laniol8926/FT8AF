@@ -2,45 +2,46 @@ package com.k1af.ft8af;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import com.k1af.ft8af.rigs.HamlibRig;
+import com.k1af.ft8af.wave.AudioChannelSelect;
 
 import org.junit.Test;
 
 /**
- * Tests {@link MainViewModel#shouldDefaultQmxTxChannelToLeft} -- the decision
- * behind defaulting a QMX's TX audio to the left channel on first connect
- * (real-hardware finding: FT8AF's historical {@code BOTH} default
- * underdrives this radio's modulator; WSJT-X and QFT8 both need an explicit
- * mono/left selection for full drive). Must fire only for the QMX, and only
- * when the operator has never touched the TX channel setting themselves.
+ * Tests {@link MainViewModel#defaultTxChannelForRig} -- the TX audio channel
+ * used for the rig being connected (real-hardware finding: FT8AF's historical
+ * {@code BOTH} default underdrives the QMX's modulator; WSJT-X and QFT8 both
+ * need an explicit mono/left selection for full drive). The QMX gets
+ * {@code LEFT} only while it is the connected rig and only when the operator
+ * has never saved a TX channel choice themselves.
  */
 public class MainViewModelQmxTxChannelDefaultTest {
 
     @Test
-    public void qmxWithNoPriorChoice_defaults() {
-        assertThat(MainViewModel.shouldDefaultQmxTxChannelToLeft(
-                HamlibRig.QRPLABS_QMX_MODEL_ID, false)).isTrue();
+    public void qmxWithNoSavedChoice_usesLeft() {
+        assertThat(MainViewModel.defaultTxChannelForRig(
+                true, false, AudioChannelSelect.BOTH)).isEqualTo(AudioChannelSelect.LEFT);
     }
 
     @Test
-    public void qmxWithAnExistingChoice_neverOverridden() {
-        // Even if the existing choice happens to be the same as the historical
-        // default (BOTH) -- the row's mere existence means the operator (or an
-        // earlier run of this same default) already decided, and that decision
-        // must stick.
-        assertThat(MainViewModel.shouldDefaultQmxTxChannelToLeft(
-                HamlibRig.QRPLABS_QMX_MODEL_ID, true)).isFalse();
+    public void savedChoice_neverOverridden() {
+        // Even a saved BOTH -- the row's existence means the operator decided.
+        assertThat(MainViewModel.defaultTxChannelForRig(
+                true, true, AudioChannelSelect.BOTH)).isEqualTo(AudioChannelSelect.BOTH);
+        assertThat(MainViewModel.defaultTxChannelForRig(
+                false, true, AudioChannelSelect.RIGHT)).isEqualTo(AudioChannelSelect.RIGHT);
     }
 
     @Test
-    public void otherHamlibRig_neverDefaulted() {
-        // 1036 = Yaesu FT-891 (Hamlib) -- no evidence this applies to any rig
-        // but the QMX specifically.
-        assertThat(MainViewModel.shouldDefaultQmxTxChannelToLeft(1036, false)).isFalse();
+    public void switchingFromQmxToAnotherRig_goesBackToBoth() {
+        // The QMX default was applied in memory only (LEFT); the next rig
+        // connected with no saved choice must not inherit left-only TX.
+        assertThat(MainViewModel.defaultTxChannelForRig(
+                false, false, AudioChannelSelect.LEFT)).isEqualTo(AudioChannelSelect.BOTH);
     }
 
     @Test
-    public void nonHamlibModelId_neverDefaulted() {
-        assertThat(MainViewModel.shouldDefaultQmxTxChannelToLeft(0, false)).isFalse();
+    public void otherRigWithNoSavedChoice_usesBoth() {
+        assertThat(MainViewModel.defaultTxChannelForRig(
+                false, false, AudioChannelSelect.BOTH)).isEqualTo(AudioChannelSelect.BOTH);
     }
 }

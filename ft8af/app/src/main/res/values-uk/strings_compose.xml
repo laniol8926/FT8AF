@@ -230,6 +230,8 @@
     <string name="log_sync_enable_services">Увімкніть Cloudlog/Wavelog/Nextlog, QRZ або World Radio League у Налаштуваннях, потім повторіть.</string>
     <string name="log_sync_progress_count">%1$d з %2$d QSOs</string>
     <string name="log_sync_cloudlog_accepted">Cloudlog / Wavelog / Nextlog: %1$d прийнято</string>
+    <string name="log_sync_cloudlog_already_present">Cloudlog / Wavelog / Nextlog: %1$d вже в журналі</string>
+    <string name="log_sync_cloudlog_downloaded">Cloudlog / Wavelog / Nextlog: завантажено %1$d</string>
     <string name="log_sync_qrz_accepted">QRZ: %1$d прийнято</string>
     <string name="log_sync_nothing_to_upload">У журналі ще немає QSOs для вивантаження.</string>
     <string name="log_sync_working">Робота…</string>
@@ -494,6 +496,9 @@
     <string name="settings_qrz_profile_lookup_desc">Ім’я користувача + пароль для QRZ XML API (аватари)</string>
     <string name="settings_cloudlog">Cloudlog / Wavelog / Nextlog</string>
     <string name="settings_cloudlog_desc">Автоматично вивантажувати QSOs до екземпляра Cloudlog, Wavelog або Nextlog</string>
+    <string name="settings_cloudlog_download">Завантажувати QSO з Wavelog під час синхронізації</string>
+    <string name="settings_cloudlog_download_desc">Синхронізація також додає QSO, які є у вашому журналі Wavelog, але відсутні в цьому журналі. Вони не надсилаються до QRZ чи World Radio League.</string>
+    <string name="settings_cloudlog_download_unsupported">Потрібен Wavelog: цей сервер не може видати список своїх QSO.</string>
 
     <!-- ===== Settings: advanced ===== -->
     <string name="settings_ptt_delay">Затримка PTT</string>
@@ -556,6 +561,7 @@
     <string name="settings_username_hint">Ваше ім’я користувача QRZ.com</string>
     <string name="settings_password">Пароль</string>
     <string name="settings_enabled_bands_dialog_desc">Приховані діапазони не з’являтимуться у виборі частоти.</string>
+    <string name="settings_enabled_bands_keep_one">Принаймні один діапазон має залишатися увімкненим.</string>
     <string name="settings_select_serial_port">Виберіть послідовний порт</string>
     <string name="settings_tx_volume_advice">Регулюйте наживо — ваш наступний TX використає цей рівень. Стежте за ALC радіо й зменшуйте, доки воно лише торкається лінії.</string>
     <string name="settings_input_volume">Гучність входу</string>

@@ -380,16 +380,19 @@ capture, and its opens never fail. Fixed by doing the same thing around
 every "over"/TUNE key-down: `MainViewModel`'s shared `beginKeying()`/
 `endKeying()` (already the single choke point for PTT and SCO around TX, see
 items above) now calls `HamRecorder.pauseForTx()`/`resumeAfterTx()`, gated by
-`MainViewModel.shouldPauseRxCaptureForTx()` — deliberately narrow: only when
-RX is actually an Android capture session (not a LAN rig, not already
-USB-direct) on the *same* USB VID:PID as TX's output (not USB-direct output
-either, which is separately broken for unrelated reasons). Don't assume this
-generalizes to every USB audio chipset — it may be specific to this HAL —
-but the guard is cheap and a no-op whenever TX/RX aren't sharing one USB
-device, so there's little reason to narrow it further without a
-contradicting report. (Since extended to USB-direct TX output too: with the
-HAL's capture still open on the same rig, every libusb iso submit failed
-with `LIBUSB_ERROR_IO`.)
+`MainViewModel.shouldPauseRxCaptureForTx()`: only for the QRP Labs QMX, and
+only when RX is actually an Android capture session (not a LAN rig, not
+already USB-direct) on the *same* USB VID:PID as TX's output. USB-direct TX
+output pauses too: with the HAL's capture still open on the same rig, every
+libusb iso submit failed with `LIBUSB_ERROR_IO`. Keep the QMX gate: a
+matching VID:PID alone is true for every single-cable USB rig (IC-7300,
+IC-705, IC-9700, FT-991A, Digirig, SignaLink...), and pausing RX there blanks
+the waterfall during TX and breaks full-duplex satellite monitoring for a HAL
+conflict that was only ever confirmed with a QMX. Widen it only on a
+confirmed report from another rig. Pauses nest (a tune carrier and an over
+can overlap), so `HamRecorder` counts them, and `MicRecorder.stopRecord()`
+joins the old reader thread so a quick resume can't leave two readers on one
+`AudioRecord`.
 
 **6. Some phones can't drive the QMX hard enough over audio at all; use CAT
 tones.** On a motorola edge 2022 the QMX's input meter read 1–2 bars (it

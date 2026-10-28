@@ -42,4 +42,19 @@ public class QmxCatTonesTest {
         assertThat(QmxCatTones.symbolsToSkip(480, 0.160f, 79)).isEqualTo(3);
         assertThat(QmxCatTones.symbolsToSkip(60000, 0.160f, 79)).isEqualTo(79);
     }
+
+    @Test
+    public void keyUp_afterANormalEndOrAStop() {
+        assertThat(QmxCatTones.keyUpAfterTones(false, true)).isTrue();  // over finished
+        assertThat(QmxCatTones.keyUpAfterTones(false, false)).isTrue(); // stopped
+        // A swap queued and then a STOP: isTransmitting is cleared, so key up.
+        assertThat(QmxCatTones.keyUpAfterTones(true, false)).isTrue();
+    }
+
+    @Test
+    public void noKeyUp_acrossAMidOverMessageSwap() {
+        // The replay's first TA must find the radio still transmitting; it is
+        // not promised to re-key without a fresh TX;.
+        assertThat(QmxCatTones.keyUpAfterTones(true, true)).isFalse();
+    }
 }

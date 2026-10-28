@@ -1548,6 +1548,16 @@ public class DatabaseOpr extends SQLiteOpenHelper {
 
     public boolean doInsertQSLData(QSLRecord record, AfterInsertQSLData afterInsertQSLData,
                                    boolean appendToAdifFile) {
+        return doInsertQSLData(record, afterInsertQSLData, appendToAdifFile, true);
+    }
+
+    /**
+     * As {@link #doInsertQSLData(QSLRecord, AfterInsertQSLData, boolean)}; {@code stampPota}
+     * false skips the POTA stamping, for QSOs downloaded from another log (issue #965), which
+     * were made before the activation now running.
+     */
+    public boolean doInsertQSLData(QSLRecord record, AfterInsertQSLData afterInsertQSLData,
+                                   boolean appendToAdifFile, boolean stampPota) {
         if (record.getToCallsign() == null) {
             if (afterInsertQSLData!=null){
                 afterInsertQSLData.doAfterInsert(true,true,false);//Invalid QSL: not written at all
@@ -1557,9 +1567,11 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         // POTA: if an activation is running, stamp MY_SIG/MY_SIG_INFO; if the worked
         // station is currently spotted on pota.app, stamp SIG/SIG_INFO too (P2P case).
         // No-op when no activation/spot, so non-POTA contacts are unaffected.
-        radio.ks3ckc.ft8af.pota.PotaSessionManager.stampQso(
-                record,
-                radio.ks3ckc.ft8af.pota.PotaSpotsRepository.parkRefFor(record.getToCallsign()));
+        if (stampPota) {
+            radio.ks3ckc.ft8af.pota.PotaSessionManager.stampQso(
+                    record,
+                    radio.ks3ckc.ft8af.pota.PotaSpotsRepository.parkRefFor(record.getToCallsign()));
+        }
 
         String querySQL;
         if (!checkQSLCallsign(record)) {//If record doesn't exist, add it
@@ -3067,6 +3079,12 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 if (name.equalsIgnoreCase("perBandOutputLevels")) {//Per-band TX output levels ("20m=60,40m=85")
                     GeneralVariables.perBandOutputLevels = result == null ? "" : result;
                 }
+                if (name.equalsIgnoreCase("perBandInputLevel")) {//Save RX input volume per band (issue #927), defaults off
+                    GeneralVariables.savePerBandInputLevel = "1".equals(result);
+                }
+                if (name.equalsIgnoreCase("perBandInputLevels")) {//Per-band RX input volumes ("20m=100,10m=160")
+                    GeneralVariables.perBandInputLevels = result == null ? "" : result;
+                }
                 if (name.equalsIgnoreCase("autoClearTxFreq")) {//Auto-select clear CQ offset (issue #418)
                     GeneralVariables.autoClearTxFreq = "1".equals(result);
                 }
@@ -3264,6 +3282,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 // cloudlogs
                 if (name.equalsIgnoreCase("enableCloudlog")) {
                     GeneralVariables.enableCloudlog = result.equals("1");
+                }
+                if (name.equalsIgnoreCase("cloudlogDownloadQsos")) {
+                    GeneralVariables.cloudlogDownloadQsos = result.equals("1");
                 }
                 if (name.equalsIgnoreCase("cloudlogServerAddress")) {
                     GeneralVariables.cloudlogServerAddress = result;

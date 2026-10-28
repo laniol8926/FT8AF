@@ -2,6 +2,7 @@ package radio.ks3ckc.ft8af.ui.settings
 
 import android.content.Context
 import android.media.AudioManager
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -53,8 +54,12 @@ import com.k1af.ft8af.wave.AudioChannelCapability
 import com.k1af.ft8af.wave.AudioChannelSelect
 import com.k1af.ft8af.ft8transmit.QmxCatTones
 import com.k1af.ft8af.wave.UsbAudioDevice
+import radio.ks3ckc.ft8af.PER_BAND_INPUT_LEVEL_KEY
 import radio.ks3ckc.ft8af.PER_BAND_OUTPUT_LEVEL_KEY
+import radio.ks3ckc.ft8af.inputLevelChangedInDialog
+import radio.ks3ckc.ft8af.inputLevelFromGainPercent
 import radio.ks3ckc.ft8af.outputLevelFromVolumePercent
+import radio.ks3ckc.ft8af.saveInputLevelForCurrentBand
 import radio.ks3ckc.ft8af.saveOutputLevelForCurrentBand
 import radio.ks3ckc.ft8af.theme.*
 import radio.ks3ckc.ft8af.ui.components.FT8AFIconButton
@@ -111,7 +116,19 @@ fun RadioAudioSettings(
     // defensive config-load clamp existed) can't start the row/slider invalid.
     var inputVolume by remember {
         mutableIntStateOf(
-            clampVolumePercent((GeneralVariables.inputGainPercent * 100).toInt(), INPUT_VOLUME_MAX),
+            clampVolumePercent(
+                inputLevelFromGainPercent(GeneralVariables.inputGainPercent), INPUT_VOLUME_MAX,
+            ),
+        )
+    }
+    // Level when the Input Volume dialog opened: dismissing without moving the
+    // slider must not overwrite this band's saved per-band level (issue #927).
+    var inputVolumeAtOpen by remember { mutableIntStateOf(inputVolume) }
+    // A band change from this screen's picker may restore a per-band input
+    // volume (issue #927); re-read it so the row shows the restored value.
+    LaunchedEffect(bandIndexLive) {
+        inputVolume = clampVolumePercent(
+            inputLevelFromGainPercent(GeneralVariables.inputGainPercent), INPUT_VOLUME_MAX,
         )
     }
 
@@ -410,10 +427,14 @@ fun RadioAudioSettings(
             excludedBands = excludedBands,
             onDismiss = { showEnabledBands = false },
             onToggle = { waveLength, enabled ->
-                val updated = excludedBands.toMutableSet()
-                if (enabled) updated.remove(waveLength) else updated.add(waveLength)
                 // Never let the user hide every band; at least one must remain.
-                if (updated.size >= OperationBand.getAllWaveLengths().size) return@BandToggleDialog
+                val updated = OperationBand.toggleExcludedBand(
+                    OperationBand.getAllWaveLengths(), excludedBands, waveLength, enabled,
+                )
+                if (updated == null) {
+                    Toast.makeText(context, R.string.settings_enabled_bands_keep_one, Toast.LENGTH_SHORT).show()
+                    return@BandToggleDialog
+                }
                 excludedBands = updated
                 GeneralVariables.excludedBands = java.util.HashSet(updated)
                 mainViewModel.databaseOpr.writeConfig(
@@ -500,6 +521,9 @@ fun RadioAudioSettings(
             onDismiss = {
                 showInputVolume = false
                 mainViewModel.databaseOpr.writeConfig("inputVolume", inputVolume.toString(), null)
+                if (inputLevelChangedInDialog(inputVolumeAtOpen, inputVolume)) {
+                    saveInputLevelForCurrentBand(mainViewModel.databaseOpr, inputVolume)
+                }
             },
         )
     }
@@ -676,12 +700,12 @@ fun RadioAudioSettings(
                     )
                     SectionDivider()
                     run {
-                        val total = OperationBand.getAllWaveLengths().size
+                        val waveLengths = OperationBand.getAllWaveLengths()
                         SettingsRow(
                             label = stringResource(R.string.settings_enabled_bands),
                             value = stringResource(
                                 R.string.settings_bands_enabled_format,
-                                total - excludedBands.size, total,
+                                OperationBand.countEnabledBands(waveLengths, excludedBands), waveLengths.size,
                             ),
                             showChevron = true,
                             onClick = { showEnabledBands = true },
@@ -736,7 +760,10 @@ fun RadioAudioSettings(
                         description = stringResource(R.string.settings_input_volume_desc),
                         value = stringResource(R.string.settings_percent_format, inputVolume),
                         showChevron = true,
-                        onClick = { showInputVolume = true },
+                        onClick = {
+                            inputVolumeAtOpen = inputVolume
+                            showInputVolume = true
+                        },
                     )
                     SectionDivider()
                     run {
@@ -933,6 +960,31 @@ fun RadioAudioSettings(
                             },
                         )
                     }
+                    SectionDivider()
+                    run {
+                        var perBandInput by remember {
+                            mutableStateOf(GeneralVariables.savePerBandInputLevel)
+                        }
+                        SettingsRow(
+                            label = stringResource(R.string.settings_per_band_input_volume),
+                            description = stringResource(R.string.settings_per_band_input_volume_desc),
+                            toggle = perBandInput,
+                            onToggleChange = { enabled ->
+                                perBandInput = enabled
+                                GeneralVariables.savePerBandInputLevel = enabled
+                                mainViewModel.databaseOpr.writeConfig(
+                                    PER_BAND_INPUT_LEVEL_KEY, if (enabled) "1" else "0", null,
+                                )
+                                // Seed the current band, mirroring the output-level toggle.
+                                if (enabled) {
+                                    saveInputLevelForCurrentBand(
+                                        mainViewModel.databaseOpr,
+                                        inputLevelFromGainPercent(GeneralVariables.inputGainPercent),
+                                    )
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -940,7 +992,8 @@ fun RadioAudioSettings(
 }
 
 /**
- * Per-band visibility toggles. Lists every distinct band name from bands.txt;
+ * Per-band visibility toggles. Lists every distinct band name in the band plan
+ * (bands.txt plus custom dials), lowest frequency first;
  * a band that's switched off is hidden from both band pickers.
  */
 @Composable

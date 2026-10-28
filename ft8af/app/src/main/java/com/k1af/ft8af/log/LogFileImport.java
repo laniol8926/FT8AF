@@ -68,19 +68,35 @@ public class LogFileImport {
      * @throws IOException if the underlying read fails
      */
     static String readFully(InputStream stream) throws IOException {
+        return readFully(stream, MAX_IMPORT_BYTES);
+    }
+
+    /**
+     * {@link #readFully(InputStream)} with the cap passed in, so the cap can be tested
+     * without buffering {@link #MAX_IMPORT_BYTES} of data inside a test JVM's heap.
+     *
+     * @param maxBytes most bytes read before the stream is rejected
+     * @throws IOException if the underlying read fails, or the stream is longer than
+     *                     {@code maxBytes}
+     */
+    static String readFully(InputStream stream, int maxBytes) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         byte[] chunk = new byte[8192];
-        int total = 0;
+        long total = 0;
         int n;
         while ((n = stream.read(chunk)) > 0) {
             total += n;
-            if (total > MAX_IMPORT_BYTES) {
-                throw new IOException("log file exceeds "
-                        + (MAX_IMPORT_BYTES / (1024 * 1024)) + " MB limit");
+            if (total > maxBytes) {
+                throw new IOException("log file exceeds " + describeLimit(maxBytes) + " limit");
             }
             buffer.write(chunk, 0, n);
         }
         return buffer.toString(StandardCharsets.UTF_8.name());
+    }
+
+    /** {@code maxBytes} for the error message: whole MB when it is at least 1 MB. */
+    private static String describeLimit(int maxBytes) {
+        return maxBytes >= 1024 * 1024 ? (maxBytes / (1024 * 1024)) + " MB" : maxBytes + " bytes";
     }
 
     /**

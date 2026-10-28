@@ -503,4 +503,25 @@ public class DatabaseOprConfigHydrationTest {
 
         assertThat(GeneralVariables.civAddressFormatKnown).isFalse();
     }
+
+    /** "Download QSOs from Wavelog when syncing" (issue #965) survives a restart. */
+    @Test
+    public void cloudlogDownloadQsos_isHydrated() {
+        boolean saved = GeneralVariables.cloudlogDownloadQsos;
+        try {
+            GeneralVariables.cloudlogDownloadQsos = false;
+            Map<String, String> config = new LinkedHashMap<>();
+            config.put("cloudlogDownloadQsos", "1");
+            opr.writeConfigSync(config);
+            hydrate();
+            assertThat(GeneralVariables.cloudlogDownloadQsos).isTrue();
+
+            config.put("cloudlogDownloadQsos", "0");
+            opr.writeConfigSync(config);
+            hydrate();
+            assertThat(GeneralVariables.cloudlogDownloadQsos).isFalse();
+        } finally {
+            GeneralVariables.cloudlogDownloadQsos = saved;
+        }
+    }
 }

@@ -90,6 +90,18 @@ fun selectBandIndex(mainViewModel: MainViewModel, context: Context, index: Int) 
             android.widget.Toast.LENGTH_SHORT,
         ).show()
     }
+    // Per-band RX input volume (issue #927): same restore rule for the
+    // receive gain. Live on the next audio buffer, like the settings slider.
+    val restoredInput = radio.ks3ckc.ft8af.applyRestoredInputLevelForBand(newWaveLength) { level ->
+        mainViewModel.databaseOpr.writeConfig("inputVolume", level.toString(), null)
+    }
+    if (restoredInput != null) {
+        android.widget.Toast.makeText(
+            context,
+            context.getString(R.string.per_band_input_volume_restored, restoredInput, newWaveLength),
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
+    }
 
     val cm = GeneralVariables.controlMode
     val connected = mainViewModel.isRigConnected()
@@ -176,11 +188,10 @@ fun FrequencyPickerSheet(
 /**
  * The picker's body: band tiles, the show/hide-alternates toggle, and the
  * alternates list. With alternates shown (and wrapping onto extra lines on
- * narrow screens, #930) it can be taller than a short or landscape screen; it
- * relies on [FT8AFBottomSheet], which already scrolls its content. It must not
- * scroll itself: a vertical scroll nested inside the sheet's is measured with
- * infinite height and crashed the app every time "All bands & custom
- * frequency" was opened.
+ * narrow screens, #930) it can be taller than a short or landscape screen;
+ * [FT8AFBottomSheet] already wraps its content in a vertical scroll, so this
+ * body must not add its own. A second verticalScroll nested inside the sheet's
+ * is measured with an infinite max height and crashes on open (#972).
  */
 @Composable
 internal fun FrequencyPickerContent(

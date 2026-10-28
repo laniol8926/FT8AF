@@ -231,11 +231,8 @@ public class HamRecorder {
         isRunning = false;
     }
 
-    // Whether pauseForTx() actually stopped a running capture, so
-    // resumeAfterTx() only restarts it when it was genuinely running before
-    // -- never reviving capture the operator had deliberately stopped, and
-    // never double-counting a TX that started while already paused.
-    private boolean rxWasRunningBeforeTxPause = false;
+    // Nesting state for pauseForTx()/resumeAfterTx(); see TxPauseState.
+    private final TxPauseState txPause = new TxPauseState();
 
     /**
      * Release RX capture for the duration of one TX "over"/TUNE key-down, when
@@ -258,32 +255,52 @@ public class HamRecorder {
      * <p>Counterpart: {@link #resumeAfterTx()}.
      */
     public synchronized void pauseForTx() {
-        rxWasRunningBeforeTxPause = isRunning;
-        if (rxWasRunningBeforeTxPause) {
+        if (txPause.onPause(isRunning)) {
             stopRecord();
         }
     }
 
     /**
      * Restart RX capture after a TX "over"/TUNE key-up, undoing {@link
-     * #pauseForTx()} -- but only when that call actually paused a running
-     * capture, so a TX that happens while the operator had RX off (or while
-     * this was already paused) does not unexpectedly turn capture back on.
+     * #pauseForTx()} -- but only once every outstanding pause has been
+     * resumed, and only when the outermost pause actually stopped a running
+     * capture, so a TX that happens while the operator had RX off does not
+     * unexpectedly turn capture back on. A resume with no pause outstanding
+     * is ignored.
      */
     public synchronized void resumeAfterTx() {
-        if (shouldResumeAfterTxPause(rxWasRunningBeforeTxPause)) {
-            rxWasRunningBeforeTxPause = false;
+        if (txPause.onResume()) {
             startRecord();
         }
     }
 
     /**
-     * The decision behind {@link #resumeAfterTx()}, pure and testable:
-     * resume only when {@link #pauseForTx()} actually stopped a running
-     * capture.
+     * Nesting state behind {@link #pauseForTx()}/{@link #resumeAfterTx()},
+     * pure so it is testable without a recorder. A tune carrier and an FT8
+     * over can overlap (arming TX only requests the tune stop), so pauses
+     * nest: only the first stops capture, and only the last resume restarts
+     * it -- and only if that first pause actually stopped a running capture,
+     * never reviving one the operator had deliberately stopped.
      */
-    static boolean shouldResumeAfterTxPause(boolean wasRunningBeforePause) {
-        return wasRunningBeforePause;
+    static final class TxPauseState {
+        private int depth = 0;
+        private boolean wasRunning = false;
+
+        /** A pause began; true when the caller must stop the running capture. */
+        boolean onPause(boolean running) {
+            if (depth++ > 0) return false;
+            wasRunning = running;
+            return running;
+        }
+
+        /** A pause ended; true when the caller must restart capture. */
+        boolean onResume() {
+            if (depth == 0) return false;
+            if (--depth > 0) return false;
+            boolean restart = wasRunning;
+            wasRunning = false;
+            return restart;
+        }
     }
 
     /** The underlying mic capture, for routing introspection (issue #759). */
@@ -293,10 +310,10 @@ public class HamRecorder {
 
     /**
      * Reinitialize the mic recorder to pick up newly connected USB audio devices.
-     * Re-wires the data listener after reinit.
+     * The data listener is wired first, so the capture the reinit restarts
+     * delivers to it from its first buffer.
      */
     public void reinitializeMicRecorder() {
-        micRecorder.reinitialize();
         if (isMicRecord) {
             micRecorder.setOnDataListener(new MicRecorder.OnDataListener() {
                 @Override
@@ -305,6 +322,31 @@ public class HamRecorder {
                 }
             });
         }
+        micRecorder.reinitialize();
+    }
+
+    /**
+     * RECORD_AUDIO was just granted (first launch). The capture started in the
+     * constructor ran before the prompt was answered, so its AudioRecord failed
+     * and stopped; rebuild it now instead of leaving RX deaf until the next app
+     * launch. The reinit restarts it because start() recorded the intent before
+     * failing (MicRecorder.shouldBeRunning).
+     */
+    public void restartMicAfterPermissionGrant() {
+        if (!restartMicOnGrant(isRunning, isMicRecord, micRecorder.isUsingUsbDirect())) return;
+        reinitializeMicRecorder();
+    }
+
+    /**
+     * Whether a RECORD_AUDIO grant should rebuild the capture: only an
+     * AudioRecord capture on the mic source needed the permission. Network
+     * audio and a working direct-libusb USB capture are left alone -- tearing
+     * the latter down would drop RX and churn the libusb session for nothing.
+     *
+     * <p>Package-visible for testing.
+     */
+    static boolean restartMicOnGrant(boolean running, boolean micSource, boolean usbDirect) {
+        return phoneMicCaptureInUse(running, micSource, usbDirect);
     }
 
     /**
