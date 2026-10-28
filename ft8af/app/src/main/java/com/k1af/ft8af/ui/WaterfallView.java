@@ -388,6 +388,8 @@ public class WaterfallView extends View {
             // method for the timestamp gridline and reused here.)
             if (messageGate.shouldStamp(slotMillis, messages)) {
                 Log.d(TAG, String.format("Drawing %d messages on waterfall", messages.size()));
+                boolean landscape = getResources().getConfiguration().orientation
+                        == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
                 for (Ft8Message msg : messages) {
 
                 if (msg.inMyCall()) {//Related to me
@@ -410,10 +412,11 @@ public class WaterfallView extends View {
 
 //                _canvas.drawTextOnPath(msg.getMessageText(true), path
 //                        , 0, 0, messagePaintBack);//Message background
-                _canvas.drawTextOnPath(msg.getMessageText(true), path
+                String label = waterfallLabel(msg, landscape);
+                _canvas.drawTextOnPath(label, path
                         , 0, 0, messagePaint);//Message
                 if (GeneralVariables.checkQSLCallsign(msg.getCallsignFrom())) {//Draw strikethrough line
-                    float text_len = messagePaint.measureText(msg.getMessageText(true));
+                    float text_len = messagePaint.measureText(label);
                     float text_start = ((pathEnd- pathStart)-text_len)/2;
                     float text_high =dpToPixel(4);//messagePaint.getFontSpacing()/2;
                     _canvas.drawLine(msg.freq_hz * freq_width + text_high , text_start
@@ -424,6 +427,18 @@ public class WaterfallView extends View {
         }
 
 
+    }
+
+    /**
+     * Waterfall label for a decode. Landscape (fork): a CQ keeps its whole message so
+     * every CQ is readable; anything else shows only the sending callsign, which is
+     * what locates a station on the waterfall. Portrait shows the full message.
+     */
+    static String waterfallLabel(Ft8Message msg, boolean landscape) {
+        String full = msg.getMessageText(true);
+        if (!landscape || msg.checkIsCQ()) return full;
+        String from = msg.getCallsignFrom();
+        return (from == null || from.trim().isEmpty()) ? full : from;
     }
 
     public void setTouch_x(int touch_x) {
