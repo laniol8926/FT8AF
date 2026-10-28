@@ -461,11 +461,21 @@ fun ActiveQsoPanel(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Message log
+            // Message log. Landscape with the QSO sheet open: ~4 rows (it scrolls,
+            // newest at the bottom) so the sheet's waterfall above has room to show.
+            val sheetOpenCallsign by mainViewModel.qsoSheetCallsign.observeAsState()
+            val sheetMinimized by mainViewModel.qsoSheetMinimized.observeAsState(false)
+            val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
             MessageLog(
                 entries = qsoMessages,
                 transmittingMessage = transmittingMessage.orEmpty(),
                 isTransmitting = isTransmitting,
+                maxHeight = if (landscape && sheetOpenCallsign != null && !sheetMinimized) {
+                    QsoLogMaxHeightUnderSheet
+                } else {
+                    160.dp
+                },
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -645,11 +655,14 @@ private fun StationHeader(
     }
 }
 
+private val QsoLogMaxHeightUnderSheet = 96.dp
+
 @Composable
 private fun MessageLog(
     entries: List<QsoLogEntry>,
     transmittingMessage: String,
     isTransmitting: Boolean,
+    maxHeight: androidx.compose.ui.unit.Dp = 160.dp,
 ) {
     val listState = rememberLazyListState()
 
@@ -684,7 +697,7 @@ private fun MessageLog(
             state = listState,
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 160.dp)
+                .heightIn(max = maxHeight)
                 .clip(RoundedCornerShape(6.dp))
                 .background(BgApp),
             verticalArrangement = Arrangement.spacedBy(2.dp),

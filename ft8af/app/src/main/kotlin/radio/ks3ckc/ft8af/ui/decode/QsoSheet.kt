@@ -28,6 +28,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -124,7 +126,9 @@ private fun QsoSheetContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
+            // No top gap while the waterfall leads the sheet: it sits right under the
+            // drag handle, where the docked QSO panel covers it least (landscape).
+            .padding(start = 20.dp, end = 20.dp, top = if (isActivated) 0.dp else 16.dp, bottom = 16.dp),
     ) {
         // -- Waterfall (while TX is on): see who is on our TX frequency -- after a
         // Pause it shows our own slot -- and tap a clear spot to QSY.
@@ -137,9 +141,33 @@ private fun QsoSheetContent(
             ) {
                 radio.ks3ckc.ft8af.ui.waterfall.WaterfallScreen(mainViewModel, showSpectrum = false)
             }
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(8.dp))
         }
 
+        // Station info (header + picture through the path map) is collapsed while TX
+        // is on, so the waterfall and the QSO itself own the sheet; one tap shows it.
+        // Looking a station up with TX off keeps the full sheet as before.
+        var showStationInfo by androidx.compose.runtime.saveable.rememberSaveable(callsign) {
+            mutableStateOf(!isActivated)
+        }
+        if (isActivated) {
+            Text(
+                text = stringResource(
+                    if (showStationInfo) R.string.qsosheet_hide_station_info
+                    else R.string.qsosheet_show_station_info,
+                    callsign,
+                ),
+                color = Accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                fontFamily = GeistMonoFamily,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showStationInfo = !showStationInfo }
+                    .padding(vertical = 8.dp),
+            )
+        }
+        if (showStationInfo) {
         // -- Station header --
         StationHeader(
             callsign = callsign,
@@ -187,6 +215,7 @@ private fun QsoSheetContent(
             country = message.fromWhere,
             state = usState,
         )
+        }// showStationInfo
 
         // -- QSO sequence visualizer --
         val liveQsoIsThisCallsign =

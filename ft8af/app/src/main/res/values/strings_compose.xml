@@ -228,6 +228,8 @@
     <string name="qsopanel_log_action">LOG</string>
     <string name="qsopanel_pause_action">PAUSE</string>
     <string name="qsopanel_paused">PAUSED</string>
+    <string name="qsosheet_show_station_info">▸ Station info: %1$s</string>
+    <string name="qsosheet_hide_station_info">▾ Hide station info</string>
     <string name="tx_freq_locked_while_transmitting">TX frequency can\'t change while transmitting</string>
     <string name="qsopanel_queue">QUEUE</string>
 
