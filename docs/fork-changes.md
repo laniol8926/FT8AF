@@ -1,8 +1,10 @@
 # Changes on the laniol8926/FT8AF fork (`dev`)
 
 This is what the fork's `dev` branch adds on top of `patrickrb/FT8AF` `dev`,
-as of 2026-10-27. These changes enhance the app; they don't replace upstream
-behaviour. Where a control moved, the original is still in place.
+as of 2026-10-28. Upstream `dev` (70 commits) was merged in on 2026-10-27.
+These changes enhance the app; they don't replace upstream behaviour. Where a
+control moved, the original is still in place. Layout changes are landscape
+only; portrait is as upstream.
 
 Pull requests already sent upstream are noted. Everything else is on the fork
 only.
@@ -31,6 +33,67 @@ only.
 | Balanced decode depth between Fast and Deep | PR #959 (merged) |
 | Per-slot counts on every time-group divider that match the rows shown | fork |
 | Landscape layout: controls on the title row, a split view with the decode list beside the map or waterfall, a 30-character message column, compact view by default | fork; see [landscape-layout.md](landscape-layout.md) |
+| Worked-before rows: a red strike-through on the message text (drawn over it; `TextDecoration` was too faint), like the waterfall's worked labels | fork |
+| Landscape QSO layout: while TX is on the QSO panel fills the left column and the waterfall runs the full height on the right; see below | fork |
+
+## QSO sequencing (fork)
+
+| Change | Where |
+|---|---|
+| A QSO is logged when our RR73/73 goes out, not when the sequencer advances to it | upstream PR #975 (open) |
+| No "No signals decoded" flash at the clear-every-cycle boundary | upstream PR #976 (open) |
+| **Stop After** counts a partner re-sending the message we answer (he didn't copy us), so "3" means three tries; only real progress resets it | `FT8TransmitSignal.isPartnerRepeat` |
+| **TX watchdog** refreshes when the QSO progresses or a station is tapped (it switched TX off mid-QSO); 1–4 minute options added; a timeout is logged | `doOnSecTimer`, `TransmissionSettings` |
+| **Auto-CQ after QSO decides what follows a logged QSO**, however it started: off → TX off (WSJT-X "Disable Tx after sending 73"), on → CQ. The QSO panel ✕ follows the same rule | `shouldStopAfterQso`, `userCancelQso` |
+| After TX stopped itself, a repeat from the station just logged (his R+report or RR73) is answered (RR73 / 73, at most twice) without logging the QSO again; a station ended by Max 73 Sends is left alone | `answerRepeatAfterLog`, `isSameQsoAsLogged` |
+| A late (deep-pass) reply swaps the over on the air within the late-start tolerance, not only inside the audio slack | `shouldRestartForNewOrder(..., lateStartToleranceMs)` |
+| An over cut off by Pause doesn't use up a Max 73 Send | `togglePause` |
+| QSO start (TIME_ON) stamped once on our first over, kept when the same station is picked up again within 5 min | `keepsQsoStart` |
+| The UI is handed copies of the TX target; a target reset in place left the panel and decode list showing the old station | `TransmitCallsign.copy` |
+
+## Operating aids (fork)
+
+- **Pause** (QSO panel header, next to LOG): holds TX while it stays armed;
+  pressed mid-over it keys up at once so the waterfall shows our own slot.
+  Released inside our slot, TX starts late within the late-start tolerance,
+  otherwise at our next slot. A held slot doesn't count toward Stop After.
+- **TX frequency can't change while an over is on the air** (waterfall tap or
+  Settings), with a toast; between overs it changes as before.
+- **White line on the QSO partner's frequency** on every waterfall, beside the
+  red TX markers.
+
+## Timing (fork)
+
+- **Receive audio latency correction.** With the clock set by NTP or GPS the
+  decode DTs still read about +1 s on the motorola + QMX: the captured audio
+  runs behind the air. While NTP/GPS owns the clock and sync-from-decodes is
+  on, the self-sync estimator shifts only the receive window (config key
+  `rxLatencyMs`, ~740–890 ms here), so DT reads ~0 and the early decode pass
+  no longer cuts off the end of every signal. TX timing is untouched. The
+  saved shift is restored before the first slot after a restart.
+- **A slot that starts while RX capture is paused for TX is still decoded**
+  (zero-padded to stay aligned); before, the partner's whole slot was lost
+  after a late over.
+
+## Landscape QSO layout (fork)
+
+On the Decode screen in landscape, while TX is on (calling CQ or in a QSO):
+
+- the right panel is the waterfall, full height, even if Map was picked;
+- the decode list is hidden and the QSO panel fills the left column: header
+  (station, report, SWR, PWR, PAUSE, LOG, ✕ — no "QSO" tag or "tap to
+  view"), the exchange list using the whole height, the TX buttons;
+- the QSO sheet doesn't open by itself, overlays only the left column when
+  opened, and leaves out the station info and QSO sequence during a QSO.
+
+On other tabs in landscape the docked QSO panel carries its own waterfall on
+its right side. The decode list returns when TX is off.
+
+## Diagnostics added to `debug.log`
+
+Every decode addressed to us (`RX to me:`), every skipped TX slot and why,
+who switched TX off (`QSO: TX off, from …`), refused TX-frequency changes,
+late decodes too late to swap, receive-latency shifts, repeat answers.
 
 ## Bands, map and waterfall
 
@@ -106,3 +169,15 @@ only.
   lint/detekt/ktlint run on pull requests, and the lint steps only warn.
 - Hardware: motorola edge 2022 (Android 15) and Galaxy A32 (Android 13),
   both with a QRP Labs QMX over USB.
+- After the upstream merge, rigs were appended to `rigaddress.txt`, so a
+  saved rig index can point at a different rig: re-pick "Qrp Labs QMX
+  (Hamlib)" once. A rig model change in Settings now reconnects on USB
+  without a restart.
+
+## Open items
+
+- A periodic vertical shift of the landscape display (seen 2026-10-28).
+- ADIF export doesn't write `STATE`; email share has no attachment.
+- Other `ToastMessage` notices (e.g. late start) still go only to the debug
+  list, which the Compose UI doesn't show.
+- The voice-command mic button covers the QSO sheet's close button.
