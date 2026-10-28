@@ -272,6 +272,10 @@ public class FT8TransmitSignal {
                 }
                 // stop if auto-supervision timeout exceeded
                 if (GeneralVariables.isLaunchSupervisionTimeout()) {
+                    if (activated) {
+                        GeneralVariables.fileLog("QSO: TX watchdog timeout ("
+                                + GeneralVariables.launchSupervision / 1000 + " s) -> TX off");
+                    }
                     setActivated(false);
                     return;
                 }
@@ -2123,6 +2127,10 @@ public class FT8TransmitSignal {
                 finalAckSends, GeneralVariables.max73Sends));
         if (newOrder != -1) {// if there is a message sequence, reply received; reset error counter
             GeneralVariables.noReplyCount = 0;
+            // A QSO that is getting replies is not a runaway TX: refresh the
+            // watchdog so it can't switch TX off mid-QSO (it did, just as a 73
+            // was due). Unanswered CQs and a silent partner still time out.
+            GeneralVariables.resetLaunchSupervision();
         }
 
         // Who else is calling me this pass, and who has stopped. Done before any

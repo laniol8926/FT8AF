@@ -1615,8 +1615,10 @@ public class MainViewModel extends ViewModel {
         if (!ft8TransmitSignal.isActivated()) {
             ft8TransmitSignal.setActivated(true);
             GeneralVariables.transmitMessages.add(message);
-            GeneralVariables.resetLaunchSupervision();
         }
+        // Tapping a station is operator activity: refresh the TX watchdog even
+        // when TX was already on (e.g. calling CQ), not only when this tap starts it.
+        GeneralVariables.resetLaunchSupervision();
         // Tapping a decode works one specific station: mark this run as a single
         // QSO so it stops after completion instead of idling on CQ — unless Hunt
         // or Auto-CQ after QSO is enabled. (Must come after setActivated(true),
