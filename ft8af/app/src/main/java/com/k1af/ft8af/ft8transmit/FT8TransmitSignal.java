@@ -2596,6 +2596,19 @@ public class FT8TransmitSignal {
             pauseHeld = false;
             mutablePauseArmed.postValue(false);
         }
+        if (this.activated && !activated) {
+            // Name who switched TX off: several paths do it silently (Stop, a WSJT-X
+            // HaltTx, mode change, one-shot free text...), which made an unexplained
+            // stop mid-session impossible to trace from the debug log.
+            StackTraceElement[] st = new Throwable().getStackTrace();
+            StringBuilder from = new StringBuilder();
+            for (int i = 1; i < st.length && i <= 3; i++) {
+                if (from.length() > 0) from.append(" < ");
+                from.append(st[i].getClassName().replaceAll(".*\\.", ""))
+                        .append('.').append(st[i].getMethodName());
+            }
+            GeneralVariables.fileLog("QSO: TX off, from " + from);
+        }
         this.activated = activated;
         if (!this.activated) {//force stop transmitting
             setTransmitting(false);
