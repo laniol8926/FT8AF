@@ -172,7 +172,11 @@ fun DecodeRow(
         // Worked-before rows get a red strike-through on the message, like the
         // waterfall's, so the eye skips them without reading across to the WORKED pill
         // on the far right (for operators who keep worked stations shown, not hidden).
-        val worked = hoistedStatus == QsoStatus.WORKED || hoistedStatus == QsoStatus.CONFIRMED
+        // Landscape only (fork); portrait is as upstream.
+        val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val worked = landscape &&
+            (hoistedStatus == QsoStatus.WORKED || hoistedStatus == QsoStatus.CONFIRMED)
 
         Column(modifier = Modifier.weight(1f)) {
             if (compact) {
