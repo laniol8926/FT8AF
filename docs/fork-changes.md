@@ -33,7 +33,7 @@ only.
 | Balanced decode depth between Fast and Deep | PR #959 (merged) |
 | Per-slot counts on every time-group divider that match the rows shown | fork |
 | Landscape layout: controls on the title row, a split view with the decode list beside the map or waterfall, a 30-character message column, compact view by default | fork; see [landscape-layout.md](landscape-layout.md) |
-| Worked-before rows: a red strike-through on the message text (drawn over it; `TextDecoration` was too faint), like the waterfall's worked labels | fork |
+| Worked-before rows (landscape): a red strike-through on the message text (drawn over it; `TextDecoration` was too faint) | fork |
 | Landscape QSO layout: while TX is on the QSO panel fills the left column and the waterfall runs the full height on the right; see below | fork |
 
 ## QSO sequencing (fork)
@@ -63,7 +63,13 @@ only.
   to us and the QSO partner (callsign) are labelled; other stations show just
   their trace, and there is no strike-through on the waterfall.
 - **White line on the QSO partner's frequency** on every waterfall, beside the
-  red TX markers.
+  red TX markers (portrait too, for now).
+- **The waterfall keeps its history across a rotation.** The view going away
+  hands its picture to the new one, scaled to the new size (frequencies stay
+  aligned), if it is under 60 s old. Kept per orientation: landscape only
+  restores a landscape picture, so its trimmed labels aren't replaced by
+  portrait's full ones; portrait may start from the landscape picture.
+  (`WaterfallView.onDetachedFromWindow`, `restoreHandedOver`)
 
 ## Timing (fork)
 
@@ -179,7 +185,9 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
 
 ## Open items
 
-- A periodic vertical shift of the landscape display (seen 2026-10-28).
+- A periodic vertical shift of the landscape display (seen 2026-10-28). To
+  catch it: a screenshot burst over adb plus logcat when it happens.
+- Whether the white partner line should be landscape-only too.
 - ADIF export doesn't write `STATE`; email share has no attachment.
 - Other `ToastMessage` notices (e.g. late start) still go only to the debug
   list, which the Compose UI doesn't show.
