@@ -292,12 +292,16 @@ public class FT8TransmitSignal {
                     // target becomes a real callsign) this is false and the reply transmits.
                     // When huntCallsCQ is true, skip this check — let doTransmit send CQ
                     // while idle, and checkCQMeOrFollowCQMessage will interrupt to answer.
+                    // Every skip of our TX slot is logged: an over that silently never
+                    // started (TX still showing on) was untraceable on 2026-10-27.
                     if (shouldSuppressIdleHunt(GeneralVariables.huntCallsCQ,
                             GeneralVariables.autoFollowCQ, functionOrder, toCallsign)) {
+                        GeneralVariables.fileLog("QSO: TX slot skipped, Hunt idle (not calling CQ)");
                         return;
                     }
                     if (GeneralVariables.myCallsign.length() < 3) {
                         // my callsign is invalid, cannot transmit!
+                        GeneralVariables.fileLog("QSO: TX slot skipped, callsign not set");
                         ToastMessage.show(GeneralVariables.getStringFromResource(R.string.callsign_error));
                         return;
                     }
@@ -309,6 +313,7 @@ public class FT8TransmitSignal {
                     // so a held start still clips no leading audio. See FastDecodeGate.
                     if (pauseHeld) {
                         pausedSlot = true;
+                        GeneralVariables.fileLog("QSO: TX slot skipped, paused");
                         return;
                     }
                     holdForFastDecode(utc);
