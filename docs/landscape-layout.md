@@ -224,6 +224,13 @@ rows (`DecodeListPanelWidth`), so the toggle is hidden there.
   smaller and narrower. The whole filter row then fits on the A32.
 - The waterfall's bottom strip lets the input meter give up its end on a
   narrow panel, so the frequency, count and LIVE never wrap.
+- Narrower still (display zoom up, or a smaller phone), the PWR chip shows only
+  from 760 dp and SWR from 730 dp of usable width. Below that they give way so
+  the RX / "TX in Xs" status always shows; both readings stay in the QSO panel
+  header. A normal A32 reports 777 dp (853 dp minus system bars) and shows
+  everything; with `wm density 340` it reports ~685 dp.
+- The compact landscape tab bar labels the drawer tab "More". The waterfall
+  side panel drops its diagnostic update counter.
 
 ### Empty-state clipping
 
