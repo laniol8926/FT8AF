@@ -99,6 +99,17 @@ public class FT8TransmitSignal {
     //********************************************
     // Information below is used for saving QSL data
     private long messageStartTime = 0;// message start time
+    private String startedCall = "";// station messageStartTime belongs to
+
+    /**
+     * Whether setTransmit to {@code call} keeps the running QSO start: same station
+     * as the one it was stamped for, within {@link #SAME_QSO_WINDOW_MS}.
+     * Package-visible for testing.
+     */
+    static boolean keepsQsoStart(String call, String startedCall, long startMs, long nowMs) {
+        return startMs != 0 && call != null && call.equals(startedCall)
+                && nowMs - startMs < SAME_QSO_WINDOW_MS;
+    }
     private long messageEndTime = 0;// message end time
     private String toMaidenheadGrid = "";// target grid info
     private int sendReport = 0;// report I sent to the other party
@@ -682,7 +693,13 @@ public class FT8TransmitSignal {
     public void setTransmit(TransmitCallsign transmitCallsign
             , int functionOrder, String toMaidenheadGrid) {
 
-        messageStartTime = 0;// reset start time
+        // Reset the QSO start for a new station -- but not when the same station comes
+        // back within a few minutes (e.g. we gave up, then his late RR73 arrived):
+        // that is the same QSO, and resetting made TIME_ON equal TIME_OFF (AA6MU).
+        if (!keepsQsoStart(transmitCallsign.callsign, startedCall, messageStartTime,
+                UtcTimer.getSystemTime())) {
+            messageStartTime = 0;
+        }
 
         Log.d(TAG, "Preparing transmit data...");
         if (GeneralVariables.checkFun1(toMaidenheadGrid)) {
@@ -3961,12 +3978,12 @@ public class FT8TransmitSignal {
         @SuppressLint("DefaultLocale")
         @Override
         public void run() {
-            //todo may need modification here: maintain a list recording each callsign, grid, time, and band
-            if (transmitSignal.functionOrder == 1 || transmitSignal.functionOrder == 2) {// when message is at 1 or 2, QSO has started
+            // QSO start (ADIF TIME_ON) = our first over to this station. Stamped once:
+            // re-stamping every order-1/2 over moved it to the last retry, and CQ
+            // overs are not part of the QSO.
+            if (transmitSignal.messageStartTime == 0 && transmitSignal.functionOrder != 6) {
                 transmitSignal.messageStartTime = UtcTimer.getSystemTime();
-            }
-            if (transmitSignal.messageStartTime == 0) {// if no start time, use current time
-                transmitSignal.messageStartTime = UtcTimer.getSystemTime();
+                transmitSignal.startedCall = transmitSignal.toCallsign.callsign;
             }
 
             // for displaying the message content to be transmitted

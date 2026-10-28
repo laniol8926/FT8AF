@@ -810,4 +810,23 @@ public class FT8TransmitSignalTest {
         assertThat(FT8TransmitSignal.isPartnerRepeat(4, 3)).isFalse();
         assertThat(FT8TransmitSignal.isPartnerRepeat(5, 4)).isFalse();
     }
+
+    // ---- keepsQsoStart -------------------------------------------------------
+    // AA6MU 2026-10-28: we gave up, his late RR73 re-picked him up, and resetting
+    // the start made TIME_ON equal TIME_OFF in the log.
+
+    @Test
+    public void keepsQsoStart_sameStationSoonAfter() {
+        assertThat(FT8TransmitSignal.keepsQsoStart("AA6MU", "AA6MU", 1_000_000L,
+                1_000_000L + 90_000)).isTrue();
+    }
+
+    @Test
+    public void keepsQsoStart_newStationNoStartOrStale_resets() {
+        long t = 1_000_000L;
+        assertThat(FT8TransmitSignal.keepsQsoStart("KW8CW", "AA6MU", t, t + 1000)).isFalse();
+        assertThat(FT8TransmitSignal.keepsQsoStart("AA6MU", "AA6MU", 0, t)).isFalse();
+        assertThat(FT8TransmitSignal.keepsQsoStart("AA6MU", "AA6MU", t,
+                t + FT8TransmitSignal.SAME_QSO_WINDOW_MS)).isFalse();
+    }
 }
