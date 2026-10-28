@@ -259,12 +259,17 @@ fun TransmissionSettings(
                     SettingsRow(
                         label = stringResource(R.string.settings_tx_rx_split),
                         description = stringResource(R.string.settings_tx_rx_split_desc),
-                        toggle = synFrequency,
-                        onToggleChange = { checked ->
-                            synFrequency = checked
-                            GeneralVariables.synFrequency = checked
+                        // "Split" ON means TX and RX are independent, which is synFrequency
+                        // OFF: synFrequency is "locked TX=RX" (the legacy screen's "Lockd
+                        // TX=RX" / "Tx/Rx Split"), which moves TX onto the station being
+                        // answered and stops a waterfall tap setting TX. This row used to
+                        // show synFrequency directly, so turning Split on locked TX=RX.
+                        toggle = !synFrequency,
+                        onToggleChange = { split ->
+                            synFrequency = !split
+                            GeneralVariables.synFrequency = !split
                             mainViewModel.databaseOpr.writeConfig(
-                                "synFreq", if (checked) "1" else "0", null,
+                                "synFreq", if (split) "0" else "1", null,
                             )
                         },
                     )
