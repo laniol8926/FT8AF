@@ -72,6 +72,9 @@ public class WaterfallView extends View {
     private float txFrequency = -1f;
     private boolean txActive = false;
     private final Paint txMarkerPaint = new Paint();
+    // White line on the frequency of the station we are in QSO with (fork); -1 = none.
+    private float partnerFrequency = -1f;
+    private final Paint partnerMarkerPaint = new Paint();
 
     // Draws the UTC timestamp line once per slot boundary of the current mode (15s FT8,
     // 7.5s FT4, 3.75s FT2), not a fixed 15s that would skip the faster modes' boundaries.
@@ -211,6 +214,10 @@ public class WaterfallView extends View {
         txMarkerPaint.setStrokeWidth(1.5f * getResources().getDisplayMetrics().density);
         txMarkerPaint.setStyle(Paint.Style.STROKE);
 
+        partnerMarkerPaint.setColor(0xFFFFFFFF);
+        partnerMarkerPaint.setStrokeWidth(1.5f * getResources().getDisplayMetrics().density);
+        partnerMarkerPaint.setStyle(Paint.Style.STROKE);
+
         timestampLinePaint.setColor(0x6000ffff);
         timestampLinePaint.setStrokeWidth(1);
         timestampLinePaint.setStyle(Paint.Style.STROKE);
@@ -236,6 +243,14 @@ public class WaterfallView extends View {
                     txFrequency + halfBw, getWidth(), spectrumWidth);
             canvas.drawLine(x1, 0, x1, getHeight(), txMarkerPaint);
             canvas.drawLine(x2, 0, x2, getHeight(), txMarkerPaint);
+        }
+
+        // QSO partner's frequency: one white line, same frequency convention as the
+        // TX markers (they bracket the TX frequency, this marks the partner's).
+        if (partnerFrequency > 0 && freq_width > 0) {
+            float px = SpectrumTouchMath.freqHzToPixelX(
+                    partnerFrequency, getWidth(), spectrumWidth);
+            canvas.drawLine(px, 0, px, getHeight(), partnerMarkerPaint);
         }
 
         //Draw touch cursor. freq_hz is computed in setTouch_x so getFreq_hz()
@@ -427,6 +442,11 @@ public class WaterfallView extends View {
 
     public int getFreq_hz() {
         return freq_hz;
+    }
+
+    /** Frequency (Hz) of the station we are in QSO with, or -1 for none. */
+    public void setPartnerFrequency(float freq) {
+        this.partnerFrequency = freq;
     }
 
     public void setTxFrequency(float freq) {

@@ -377,6 +377,8 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     // (waterfall tab). Without this, switching to/from the Waterfall tab
     // destroys and recreates the composable at a new tree position, losing all
     // RX/TX messages in the mini log. (#250 follow-up)
+    // Set once screenTab is known (below): landscape + docked panel gets a side waterfall.
+    val qsoPanelSideWaterfall = remember { mutableStateOf(false) }
     val qsoPanel = remember {
         movableContentOf { panelModifier: Modifier ->
             ActiveQsoPanel(
@@ -385,6 +387,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 onCollapse = { qsoPanelExpandedState.value = false },
                 onReopenSheet = { currentReopenQsoSheetState.value() },
                 modifier = panelModifier,
+                sideWaterfall = qsoPanelSideWaterfall.value,
             )
         }
     }
@@ -531,6 +534,8 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     val panelTab = if (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) activeTab else sidePanelTab
     // The screen actually shown in the content area: the Decode screen for the whole split view.
     val screenTab = if (actionsOnDecodeTitle) FT8AFTab.DECODE else activeTab
+    val sideWaterfall = isLandscape && !qsoPanelOverlaysContent(screenTab)
+    androidx.compose.runtime.SideEffect { qsoPanelSideWaterfall.value = sideWaterfall }
 
     Box(modifier = Modifier.fillMaxSize().background(BgApp)) {
         // Keep the content clear of the display cutout (and the status bar, should it

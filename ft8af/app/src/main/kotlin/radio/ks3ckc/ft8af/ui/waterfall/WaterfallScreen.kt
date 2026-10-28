@@ -155,6 +155,12 @@ fun WaterfallScreen(
                 wView.setSpectrumWidth(GeneralVariables.getSpectrumWidth())
                 wView.setTxFrequency(currentTxFreq)
                 wView.setTxActive(currentTxActive)
+                // White line on the QSO partner's frequency while a QSO is on.
+                val target = mainViewModel.ft8TransmitSignal.mutableToCallsign.value
+                val qsoOn = mainViewModel.ft8TransmitSignal.mutableIsActivated.value == true
+                wView.setPartnerFrequency(
+                    if (qsoOn && target != null && target.haveTargetCallsign()) target.frequency else -1f,
+                )
                 val messages = if (mainViewModel.markMessage) mainViewModel.currentMessages else null
                 wView.setWaveData(fft, messages)
                 wView.invalidate()

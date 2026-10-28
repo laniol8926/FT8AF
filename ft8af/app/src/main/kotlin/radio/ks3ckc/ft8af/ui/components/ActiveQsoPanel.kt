@@ -256,6 +256,9 @@ fun ActiveQsoPanel(
     onCollapse: () -> Unit = {},
     onReopenSheet: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    // Landscape and docked (not floating over the Waterfall tab): put a waterfall
+    // in the panel's otherwise empty right side.
+    sideWaterfall: Boolean = false,
 ) {
     val toCallsign by mainViewModel.ft8TransmitSignal.mutableToCallsign.observeAsState()
     val isActivated by mainViewModel.ft8TransmitSignal.mutableIsActivated.observeAsState(false)
@@ -424,6 +427,18 @@ fun ActiveQsoPanel(
                 }
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
+          // Landscape: the panel's right side is empty, so a waterfall lives there
+          // (full panel height) -- the QSO and the band side by side (fork).
+          SideWaterfallLayout(
+            sideWaterfall = sideWaterfall,
+            minHeight = PanelSideWaterfallMinHeight,
+            waterfall = {
+                Box(modifier = Modifier.clip(RoundedCornerShape(6.dp))) {
+                    radio.ks3ckc.ft8af.ui.waterfall.WaterfallScreen(mainViewModel, showSpectrum = false)
+                }
+            },
+          ) {
+          Column {
             // Station header. When a sheet exists but the user has
             // minimized it, the header acts as the "reopen" affordance.
             StationHeader(
@@ -461,21 +476,11 @@ fun ActiveQsoPanel(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Message log. Landscape with the QSO sheet open: ~4 rows (it scrolls,
-            // newest at the bottom) so the sheet's waterfall above has room to show.
-            val sheetOpenCallsign by mainViewModel.qsoSheetCallsign.observeAsState()
-            val sheetMinimized by mainViewModel.qsoSheetMinimized.observeAsState(false)
-            val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
-                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+            // Message log
             MessageLog(
                 entries = qsoMessages,
                 transmittingMessage = transmittingMessage.orEmpty(),
                 isTransmitting = isTransmitting,
-                maxHeight = if (landscape && sheetOpenCallsign != null && !sheetMinimized) {
-                    QsoLogMaxHeightUnderSheet
-                } else {
-                    160.dp
-                },
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -499,6 +504,8 @@ fun ActiveQsoPanel(
                     mainViewModel.qsoSheetMinimized.postValue(false)
                 } else null,
             )
+          }// Column
+          }// SideWaterfallLayout
         }
     }
 }
@@ -655,14 +662,56 @@ private fun StationHeader(
     }
 }
 
-private val QsoLogMaxHeightUnderSheet = 96.dp
+// Landscape side waterfall (fork): never shorter than this, so it stays readable
+// while calling CQ, when the panel itself is only a header and the TX row.
+private val PanelSideWaterfallMinHeight = 140.dp
+// Share of the panel width the QSO side keeps; the waterfall takes the rest.
+private const val PanelQsoWidthFraction = 0.55f
+
+/**
+ * Lays [content] (the QSO panel body) on the left and [waterfall] on the right,
+ * the waterfall as tall as the body (at least [minHeight]). The body is measured
+ * first because its LazyColumn can't report intrinsic heights. Without
+ * [sideWaterfall] it is just [content], full width.
+ */
+@Composable
+private fun SideWaterfallLayout(
+    sideWaterfall: Boolean,
+    minHeight: androidx.compose.ui.unit.Dp,
+    waterfall: @Composable () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    if (!sideWaterfall) {
+        content()
+        return
+    }
+    val gapPx = with(androidx.compose.ui.platform.LocalDensity.current) { 10.dp.roundToPx() }
+    val minPx = with(androidx.compose.ui.platform.LocalDensity.current) { minHeight.roundToPx() }
+    androidx.compose.ui.layout.Layout(
+        contents = listOf(content, waterfall),
+    ) { (bodyMeasurables, waterfallMeasurables), constraints ->
+        val width = constraints.maxWidth
+        val bodyWidth = (width * PanelQsoWidthFraction).toInt()
+        val body = bodyMeasurables.map {
+            it.measure(constraints.copy(minWidth = 0, maxWidth = bodyWidth, minHeight = 0))
+        }
+        val height = maxOf(body.maxOfOrNull { it.height } ?: 0, minPx)
+        val wfWidth = (width - bodyWidth - gapPx).coerceAtLeast(0)
+        val wf = waterfallMeasurables.map {
+            it.measure(androidx.compose.ui.unit.Constraints.fixed(wfWidth, height))
+        }
+        layout(width, height) {
+            body.forEach { it.place(0, 0) }
+            wf.forEach { it.place(bodyWidth + gapPx, 0) }
+        }
+    }
+}
 
 @Composable
 private fun MessageLog(
     entries: List<QsoLogEntry>,
     transmittingMessage: String,
     isTransmitting: Boolean,
-    maxHeight: androidx.compose.ui.unit.Dp = 160.dp,
 ) {
     val listState = rememberLazyListState()
 
@@ -697,7 +746,7 @@ private fun MessageLog(
             state = listState,
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = maxHeight)
+                .heightIn(max = 160.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .background(BgApp),
             verticalArrangement = Arrangement.spacedBy(2.dp),

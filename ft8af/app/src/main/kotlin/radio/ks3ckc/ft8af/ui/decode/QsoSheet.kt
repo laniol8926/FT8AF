@@ -121,31 +121,18 @@ private fun QsoSheetContent(
 
     val usState = UsStateLookup.stateFromGrid(context, message.maidenGrid)
 
+    val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            // No top gap while the waterfall leads the sheet: it sits right under the
-            // drag handle, where the docked QSO panel covers it least (landscape).
-            .padding(start = 20.dp, end = 20.dp, top = if (isActivated) 0.dp else 16.dp, bottom = 16.dp),
+            .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
-        // -- Waterfall (while TX is on): see who is on our TX frequency -- after a
-        // Pause it shows our own slot -- and tap a clear spot to QSY.
-        if (isActivated) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(QsoSheetWaterfallHeight)
-                    .clip(RoundedCornerShape(8.dp)),
-            ) {
-                radio.ks3ckc.ft8af.ui.waterfall.WaterfallScreen(mainViewModel, showSpectrum = false)
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
-        // Station info (header + picture through the path map) is left out while TX is
-        // on: the QSO panel's header already names the station, and the waterfall and
-        // the QSO own the sheet. Looking a station up with TX off shows it as before.
-        if (!isActivated) {
+        // Station info (header + picture through the path map) is left out during a
+        // QSO in landscape (fork): the QSO panel's header already names the station
+        // and the panel carries the waterfall. Portrait, and lookups with TX off, keep
+        // the full sheet.
+        if (!(isActivated && landscape)) {
         // -- Station header --
         StationHeader(
             callsign = callsign,
@@ -505,9 +492,6 @@ private fun StatCard(
 // ---------------------------------------------------------------------------
 
 private val QsoStepLabels = listOf("call", "report", "roger", "confirm", "73")
-
-// Tall enough for the waterfall plus its frequency ruler and bottom strip.
-private val QsoSheetWaterfallHeight = 170.dp
 
 /**
  * Resolve which step (0..4) the QSO is currently on, or -1 for "not started".
