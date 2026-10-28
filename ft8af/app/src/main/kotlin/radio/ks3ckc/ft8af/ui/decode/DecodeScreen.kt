@@ -146,12 +146,13 @@ fun DecodeScreen(
     // straight from order 1-3 to 6 (CQ) without passing through order 5,
     // so the above effect never fires. Detect this by watching the target
     // callsign revert to "CQ" while still activated (not a user STOP).
-    // Guard with lastQsoFunctionOrder != 5 so normal 73-completion still
-    // gets the full 5s linger from the effect above. (#249)
+    // After a 73 completion this also clears the sheet (with the full 5s
+    // linger): the effect above can miss it when the sheet is reopened
+    // while already at order 5 (e.g. a re-tap mid-QSO), which left the
+    // sheet up after the QSO had logged and reset to CQ. (#249)
     LaunchedEffect(txToCallsign?.callsign, txActivated, sheetCallsign) {
-        if (sheetCallsign != null && txActivated && txToCallsign?.callsign == "CQ"
-            && lastQsoFunctionOrder != 5) {
-            kotlinx.coroutines.delay(2000)
+        if (sheetCallsign != null && txActivated && txToCallsign?.callsign == "CQ") {
+            kotlinx.coroutines.delay(if (lastQsoFunctionOrder == 5) 5000 else 2000)
             mainViewModel.qsoSheetCallsign.postValue(null)
             mainViewModel.qsoSheetMinimized.postValue(false)
         }
