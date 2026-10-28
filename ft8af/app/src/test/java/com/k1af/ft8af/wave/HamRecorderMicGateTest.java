@@ -72,4 +72,26 @@ public class HamRecorderMicGateTest {
         assertThat(s.onPause(true)).isTrue();
         assertThat(s.onResume()).isTrue();
     }
+
+    @Test
+    public void txPauseState_holdsStoppedCapture_onlyWhilePausingARunningCapture() {
+        HamRecorder.TxPauseState s = new HamRecorder.TxPauseState();
+        assertThat(s.holdsStoppedCapture()).isFalse();
+        s.onPause(true);
+        assertThat(s.holdsStoppedCapture()).isTrue();
+        s.onResume();
+        assertThat(s.holdsStoppedCapture()).isFalse();
+        // Operator had RX off: a TX pause holds nothing that will restart.
+        s.onPause(false);
+        assertThat(s.holdsStoppedCapture()).isFalse();
+    }
+
+    @Test
+    public void padSamples_skipsTheGapLessTheFirstChunk() {
+        int rate = 12000; // HamRecorder.sampleRateInHz
+        // 1 s off, first chunk 0.1 s long -> 0.9 s of zeros keeps it slot-aligned.
+        assertThat(HamRecorder.VoiceDataMonitor.padSamples(1000, rate / 10))
+                .isEqualTo(rate - rate / 10);
+        assertThat(HamRecorder.VoiceDataMonitor.padSamples(50, rate)).isEqualTo(0);
+    }
 }

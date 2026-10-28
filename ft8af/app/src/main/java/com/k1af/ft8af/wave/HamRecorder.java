@@ -268,6 +268,11 @@ public class HamRecorder {
      * unexpectedly turn capture back on. A resume with no pause outstanding
      * is ignored.
      */
+    /** Whether capture is stopped by {@link #pauseForTx()} and will restart on resume. */
+    public synchronized boolean isPausedForTx() {
+        return txPause.holdsStoppedCapture();
+    }
+
     public synchronized void resumeAfterTx() {
         if (txPause.onResume()) {
             startRecord();
@@ -291,6 +296,11 @@ public class HamRecorder {
             if (depth++ > 0) return false;
             wasRunning = running;
             return running;
+        }
+
+        /** True while a TX pause holds a capture it stopped (it will restart on resume). */
+        boolean holdsStoppedCapture() {
+            return depth > 0 && wasRunning;
         }
 
         /** A pause ended; true when the caller must restart capture. */
@@ -364,9 +374,18 @@ public class HamRecorder {
      * @param getVoiceDataDone callback triggered when recording data reaches the specified duration
      */
     public VoiceDataMonitor getVoiceData(int duration, boolean afterDoneRemove, OnGetVoiceDataDone getVoiceDataDone) {
-        if (isRunning) {
+        // A slot that starts while capture is paused for a TX over (a late over runs
+        // up to the slot boundary) must still be decoded: register its monitor now and
+        // pad the gap with silence when capture resumes, so the audio stays aligned to
+        // the slot start. Returning null here silently lost the partner's whole slot.
+        boolean pausedForTx = !isRunning && isPausedForTx();
+        if (isRunning || pausedForTx) {
             VoiceDataMonitor dataMonitor = new VoiceDataMonitor(duration, this
                     , afterDoneRemove, getVoiceDataDone);
+            if (pausedForTx && afterDoneRemove) {
+                dataMonitor.padFromMillis = System.currentTimeMillis();
+                Log.d(TAG, "voice monitor registered while paused for TX; gap will be zero-padded");
+            }
             dataMonitor.voiceDataMonitor = dataMonitor;//used for the monitor to remove itself
             voiceDataMonitorList.add(dataMonitor);
             doDataMonitorChanged();
@@ -422,6 +441,16 @@ public class HamRecorder {
         //getVoiceData is the address of this monitor, used to remove this monitor from the recorder's listener list.
         // After constructing GetVoiceData, IMPORTANT!!! this variable must be assigned! Otherwise this monitor cannot be removed.
         public VoiceDataMonitor voiceDataMonitor = null;
+
+        //Set when registered while capture was paused for TX (see getVoiceData): the
+        //wall time the slot buffer starts at. Cleared once the gap has been padded.
+        volatile long padFromMillis = 0;
+
+        /** Zero samples to skip for a capture gap of gapMillis that ended with a chunk of chunkSize samples. */
+        static int padSamples(long gapMillis, int chunkSize) {
+            long samples = gapMillis * HamRecorder.sampleRateInHz / 1000 - chunkSize;
+            return (int) Math.max(0, samples);
+        }
 
         /** Samples collected so far (test/diagnostic visibility). */
         int collectedSamples() {
@@ -503,6 +532,14 @@ public class HamRecorder {
                         //chunk's copy (issue #404).
                         if (afterDoneRemove && completed.get()) {
                             return;
+                        }
+                        if (padFromMillis > 0) {
+                            //Registered while capture was paused for TX: skip ahead
+                            //(the buffer is zero-initialized) by the time capture was
+                            //off, less this chunk's own length, to stay slot-aligned.
+                            dataCount = Math.min(voiceData.length, padSamples(
+                                    System.currentTimeMillis() - padFromMillis, size));
+                            padFromMillis = 0;
                         }
                         remainingSize = size+dataCount-voiceData.length;//if greater than 0, this is the remaining data amount
 
