@@ -426,8 +426,8 @@ fun DecodeScreen(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-            val hideListForQso = leftColumnFooter != null && txActivated &&
-                txToCallsign?.haveTargetCallsign() == true
+            // Whenever TX is on -- in a QSO or calling CQ -- the panel owns the column.
+            val hideListForQso = leftColumnFooter != null && txActivated
             Column(
                 modifier = (
                     when {

@@ -410,9 +410,9 @@ fun ActiveQsoPanel(
         sent = sentReportOrNull(mainViewModel.ft8TransmitSignal.sentTargetReport),
     )
 
-    // Landscape split view, in a QSO: the panel owns the whole left column and the
-    // exchange list grows into it instead of capping at 160 dp (fork).
-    val fillColumn = inLeftColumn && hasTarget && isActivated
+    // Landscape split view, TX on (QSO or calling CQ): the panel owns the whole left
+    // column and the exchange list grows into it instead of capping at 160 dp (fork).
+    val fillColumn = inLeftColumn && isActivated
     val fillModifier = if (fillColumn) Modifier.fillMaxHeight() else Modifier
     AnimatedVisibility(
         visible = expanded && (hasTarget || isActivated),
