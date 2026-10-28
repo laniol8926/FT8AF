@@ -192,18 +192,17 @@ fun TransmissionSettings(
 
     // -- TX Watchdog Picker --
     if (showWatchdog) {
-        // Build the same options as LaunchSupervisionSpinnerAdapter:
-        // index 0 = Off (0 ms), index 1..10 = (index*10-5) minutes
-        val watchdogOptions = mutableListOf(stringResource(R.string.common_off))
-        for (i in 1..10) {
-            watchdogOptions.add(stringResource(R.string.settings_minutes_format, i * 10 - 5))
+        // Off, then short WSJT-X-style limits (1-4 min), then the
+        // LaunchSupervisionSpinnerAdapter steps (5, 15, 25 ... 95 min).
+        val watchdogMinutesOptions = listOf(0, 1, 2, 3, 4) + (1..10).map { it * 10 - 5 }
+        val watchdogOptions = watchdogMinutesOptions.map { min ->
+            if (min == 0) stringResource(R.string.common_off)
+            else stringResource(R.string.settings_minutes_format, min)
         }
-        // Find current selection index from stored ms value
-        val currentWatchdogIndex = if (watchdogMs == 0) {
-            0
-        } else {
-            ((watchdogMs - 5 * 60 * 1000) / 60 / 1000 / 10).coerceIn(0, 10)
-        }
+        // Find current selection index from stored ms value (nearest step)
+        val currentWatchdogIndex = watchdogMinutesOptions.indices.minByOrNull {
+            kotlin.math.abs(watchdogMinutesOptions[it] * 60 * 1000 - watchdogMs)
+        } ?: 0
         ListPickerDialog(
             title = stringResource(R.string.settings_tx_watchdog),
             items = watchdogOptions,
@@ -211,8 +210,7 @@ fun TransmissionSettings(
             onDismiss = { showWatchdog = false },
             onSelect = { index ->
                 showWatchdog = false
-                // Same formula as LaunchSupervisionSpinnerAdapter.getTimeOut()
-                val ms = if (index == 0) 0 else (index * 10 - 5) * 60 * 1000
+                val ms = watchdogMinutesOptions[index] * 60 * 1000
                 GeneralVariables.launchSupervision = ms
                 watchdogMs = ms
                 mainViewModel.databaseOpr.writeConfig(

@@ -2125,11 +2125,16 @@ public class FT8TransmitSignal {
                 toCallsign != null ? toCallsign.callsign : "null",
                 GeneralVariables.noReplyCount, GeneralVariables.noReplyLimit,
                 finalAckSends, GeneralVariables.max73Sends));
-        if (newOrder != -1) {// if there is a message sequence, reply received; reset error counter
+        // The partner re-sent the message we are already answering (e.g. his report
+        // again while we send R+report): he didn't copy us. That is a failed attempt
+        // like a silent cycle, so it counts toward the Stop After limit instead of
+        // resetting it -- otherwise a station that never copies us is called forever.
+        boolean partnerRepeated = isPartnerRepeat(functionOrder, newOrder);
+        if (newOrder != -1 && !partnerRepeated) {// reply moved the QSO on; reset error counter
             GeneralVariables.noReplyCount = 0;
-            // A QSO that is getting replies is not a runaway TX: refresh the
-            // watchdog so it can't switch TX off mid-QSO (it did, just as a 73
-            // was due). Unanswered CQs and a silent partner still time out.
+            // A QSO that is progressing is not a runaway TX: refresh the watchdog
+            // so it can't switch TX off mid-QSO (it did, just as a 73 was due).
+            // Unanswered CQs and a partner who doesn't copy us still time out.
             GeneralVariables.resetLaunchSupervision();
         }
 
@@ -2224,6 +2229,20 @@ public class FT8TransmitSignal {
                 return;
             }
 
+            // He re-sent what we are answering: count it once (fast pass only, like a
+            // no-reply) and give up at the Stop After limit, as WSJT-X operators expect
+            // "3" to mean three tries at this message.
+            if (partnerRepeated && !evidenceOnly) {
+                GeneralVariables.noReplyCount++;
+                GeneralVariables.fileLog(String.format("QSO: repeat %d (order=%d to=%s re-sent, didn't copy us)",
+                        GeneralVariables.noReplyCount, functionOrder,
+                        toCallsign != null ? toCallsign.callsign : "?"));
+                if (shouldGiveUpTarget(GeneralVariables.noReplyLimit, GeneralVariables.noReplyCount)) {
+                    giveUpTarget(messages);
+                    return;
+                }
+            }
+
             // originally newOrder == 1, but sometimes the other party sends a signal report directly, i.e. message 2
             if (newOrder == 1 || newOrder == 2) {// this is the first reply from the other party
                 resetTargetReport();// reset the signal reports
@@ -2285,22 +2304,37 @@ public class FT8TransmitSignal {
         // generic limit fire first at a lower threshold.
         if (functionOrder < 4
                 && shouldGiveUpTarget(GeneralVariables.noReplyLimit, GeneralVariables.noReplyCount)) {
-            GeneralVariables.fileLog("QSO: give up calling " + toCallsign.callsign
-                    + " (order=" + functionOrder + ", limit) -> CQ/next");
-            // try queued callers first, then check watched messages, then fall back to CQ
-            if (!dequeueNextCaller()) {
-                if (!getNewTargetCallsign(messages)) {//check CQ messages in watch list; returns true if a new target is found
-                    functionOrder = 6;
-                    toCallsign.callsign = "CQ";
-                }
-            }
-            generateFun();
-            setCurrentFunctionOrder(functionOrder);// set current message
-            mutableToCallsign.postValue(toCallsign);
-            mutableFunctionOrder.postValue(functionOrder);
-
+            giveUpTarget(messages);
         }
 
+    }
+
+    /** Stop After limit reached: drop the target for a queued caller, a watched CQ, or CQ. */
+    private void giveUpTarget(ArrayList<Ft8Message> messages) {
+        GeneralVariables.fileLog("QSO: give up calling " + toCallsign.callsign
+                + " (order=" + functionOrder + ", limit) -> CQ/next");
+        // try queued callers first, then check watched messages, then fall back to CQ
+        if (!dequeueNextCaller()) {
+            if (!getNewTargetCallsign(messages)) {//check CQ messages in watch list; returns true if a new target is found
+                functionOrder = 6;
+                toCallsign.callsign = "CQ";
+            }
+        }
+        generateFun();
+        setCurrentFunctionOrder(functionOrder);// set current message
+        mutableToCallsign.postValue(toCallsign);
+        mutableFunctionOrder.postValue(functionOrder);
+    }
+
+    /**
+     * Whether the partner re-sent the message we are already answering, so we would
+     * send the same message again: newOrder + 1 == our order. Only before RR73
+     * (orders 1-3); orders 4 and 5 have their own completion caps.
+     *
+     * <p>Package-visible and static for unit tests.
+     */
+    static boolean isPartnerRepeat(int functionOrder, int newOrder) {
+        return newOrder != -1 && functionOrder < 4 && newOrder + 1 == functionOrder;
     }
 
     // ==================== FT8 DXpedition Hound ====================

@@ -786,4 +786,22 @@ public class FT8TransmitSignalTest {
     public void performanceModeName_unrecognizedValue_doesNotThrow() {
         assertThat(FT8TransmitSignal.performanceModeName(-99)).contains("-99");
     }
+
+    @Test
+    public void isPartnerRepeat_reportResentWhileWeSendRReport() {
+        // We send R+report (3); he sends his report (2) again: he didn't copy us.
+        assertThat(FT8TransmitSignal.isPartnerRepeat(3, 2)).isTrue();
+        // We send our report (2); he sends his grid (1) again.
+        assertThat(FT8TransmitSignal.isPartnerRepeat(2, 1)).isTrue();
+    }
+
+    @Test
+    public void isPartnerRepeat_progressOrSilenceIsNotARepeat() {
+        assertThat(FT8TransmitSignal.isPartnerRepeat(3, 4)).isFalse(); // RR73 arrived
+        assertThat(FT8TransmitSignal.isPartnerRepeat(1, 2)).isFalse(); // first report
+        assertThat(FT8TransmitSignal.isPartnerRepeat(3, -1)).isFalse(); // silence
+        // RR73/73 have their own caps.
+        assertThat(FT8TransmitSignal.isPartnerRepeat(4, 3)).isFalse();
+        assertThat(FT8TransmitSignal.isPartnerRepeat(5, 4)).isFalse();
+    }
 }
