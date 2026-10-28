@@ -211,8 +211,8 @@ fun WaterfallScreen(
             },
             onTouchUp = { freqHz ->
                 if (freqHz > 0 && !GeneralVariables.synFrequency) {
-                    mainViewModel.databaseOpr.writeConfig("freq", freqHz.toString(), null)
-                    GeneralVariables.setBaseFrequency(freqHz.toFloat())
+                    // Refused (with a toast) while an over is on the air.
+                    if (!mainViewModel.trySetTxFrequency(freqHz.toFloat())) touchedFreqHz = -1
                 }
             },
             modifier = Modifier
@@ -240,8 +240,7 @@ fun WaterfallScreen(
             },
             onTouchUp = { freqHz ->
                 if (freqHz > 0 && !GeneralVariables.synFrequency) {
-                    mainViewModel.databaseOpr.writeConfig("freq", freqHz.toString(), null)
-                    GeneralVariables.setBaseFrequency(freqHz.toFloat())
+                    if (!mainViewModel.trySetTxFrequency(freqHz.toFloat())) touchedFreqHz = -1
                 }
             },
             modifier = Modifier

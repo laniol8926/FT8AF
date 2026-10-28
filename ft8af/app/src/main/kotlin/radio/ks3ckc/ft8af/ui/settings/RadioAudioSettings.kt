@@ -461,8 +461,7 @@ fun RadioAudioSettings(
             onSave = { value ->
                 showAudioFreq = false
                 val clamped = value.toFloat().coerceIn(100f, audioFreqMax.toFloat())
-                GeneralVariables.setBaseFrequency(clamped)
-                mainViewModel.databaseOpr.writeConfig("freq", clamped.toInt().toString(), null)
+                mainViewModel.trySetTxFrequency(clamped)// refused while transmitting
             },
         )
     }

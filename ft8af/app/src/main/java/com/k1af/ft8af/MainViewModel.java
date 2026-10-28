@@ -1844,6 +1844,25 @@ public class MainViewModel extends ViewModel {
         return (deltaFreq >= 100 && deltaFreq <= max) ? deltaFreq : -1;
     }
 
+    /**
+     * Operator sets the TX audio frequency (waterfall tap, Settings). Refused while
+     * an over is on the air: the tones already playing would jump mid-message and
+     * the partner would lose it. Between overs it applies and is saved as usual.
+     *
+     * @return true if the frequency was changed
+     */
+    public boolean trySetTxFrequency(float hz) {
+        if (ft8TransmitSignal != null && ft8TransmitSignal.isTransmitting()) {
+            ToastMessage.show(GeneralVariables.getStringFromResource(
+                    R.string.tx_freq_locked_while_transmitting));
+            fileLog("TX freq change to " + Math.round(hz) + " Hz refused: transmitting");
+            return false;
+        }
+        databaseOpr.writeConfig("freq", String.valueOf(Math.round(hz)), null);
+        GeneralVariables.setBaseFrequency(hz);
+        return true;
+    }
+
     /** Inbound Reply: call the referenced station, preferring the real decode. */
     private void handleWsjtxReply(String call, String grid, int snr, int deltaFreq) {
         if (ft8TransmitSignal == null || call == null || call.isEmpty()) {
