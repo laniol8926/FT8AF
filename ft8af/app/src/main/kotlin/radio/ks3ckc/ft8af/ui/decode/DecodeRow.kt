@@ -22,12 +22,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
@@ -165,6 +169,10 @@ fun DecodeRow(
         // a derived callsign+grid snippet so free-text/telemetry messages
         // (which have no parsed callsignFrom) aren't left blank.
         val hoistedMsgText = message.getMessageText()?.trim().orEmpty()
+        // Worked-before rows get a red strike-through on the message, like the
+        // waterfall's, so the eye skips them without reading across to the WORKED pill
+        // on the far right (for operators who keep worked stations shown, not hidden).
+        val worked = hoistedStatus == QsoStatus.WORKED || hoistedStatus == QsoStatus.CONFIRMED
 
         Column(modifier = Modifier.weight(1f)) {
             if (compact) {
@@ -227,6 +235,7 @@ fun DecodeRow(
                             for (label in labels) {
                                 DecodeRowLabelChip(label)
                             }
+                            var textWidthPx by remember { mutableFloatStateOf(0f) }
                             Text(
                                 text = hoistedMsgText,
                                 color = when (emphasis) {
@@ -239,7 +248,8 @@ fun DecodeRow(
                                 maxLines = 1,
                                 softWrap = false,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
+                                onTextLayout = { textWidthPx = it.getLineRight(0) },
+                                modifier = Modifier.weight(1f).workedStrike(worked) { textWidthPx },
                             )
                         }
 
@@ -344,12 +354,15 @@ fun DecodeRow(
                 // Full decoded message text (canonical FT8 frame, e.g. "K1ABC W9XYZ EN37"
                 // or "CQ POTA W1ABC FN42"). This is what was actually transmitted.
                 if (hoistedMsgText.isNotEmpty()) {
+                    var textWidthPx by remember { mutableFloatStateOf(0f) }
                     Text(
                         text = hoistedMsgText,
                         color = TextMuted,
                         fontFamily = GeistMonoFamily,
                         fontSize = 12.sp,
                         letterSpacing = 0.02.sp,
+                        onTextLayout = { textWidthPx = it.getLineRight(0) },
+                        modifier = Modifier.workedStrike(worked) { textWidthPx },
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                 }
@@ -860,3 +873,21 @@ internal fun computeBeamHeadingText(message: Ft8Message): String {
         ?: return ""
     return formatHeading(headings.shortPathDeg)
 }
+
+/**
+ * Red strike-through across a worked-before row's message text (fork). Drawn over
+ * the text rather than via TextDecoration.LineThrough, which always takes the text
+ * colour and is too faint on muted rows. [textWidthPx] is the laid-out text width,
+ * so the line stops at the end of the text instead of spanning a weighted cell.
+ */
+internal fun Modifier.workedStrike(worked: Boolean, textWidthPx: () -> Float): Modifier =
+    if (!worked) this else drawWithContent {
+        drawContent()
+        val y = size.height / 2f
+        drawLine(
+            color = StatusBad,
+            start = Offset(0f, y),
+            end = Offset(textWidthPx().coerceAtMost(size.width), y),
+            strokeWidth = 1.5.dp.toPx(),
+        )
+    }
