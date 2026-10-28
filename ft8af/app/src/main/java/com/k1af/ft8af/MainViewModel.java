@@ -829,6 +829,13 @@ public class MainViewModel extends ViewModel {
                                 m.callsignTo, m.callsignFrom, m.extraInfo,
                                 m.modifier == null ? "null" : m.modifier,
                                 m.getMessageText()));
+                    } else if (GeneralVariables.checkIsMyCallsign(m.callsignTo)) {
+                        // Every decode addressed to us, so a QSO trace shows what the
+                        // partner actually sent next to what the sequencer did with it.
+                        fileLog(String.format(java.util.Locale.US,
+                                "RX%s to me: [%s] snr=%d dt=%.1f f=%.0f slot=%d",
+                                isDeep ? "(deep)" : "", m.getMessageText(),
+                                m.snr, m.time_sec, m.freq_hz, m.getSequence()));
                     }
                 }
 
