@@ -391,6 +391,12 @@ public class WaterfallView extends View {
                 boolean landscape = getResources().getConfiguration().orientation
                         == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
                 for (Ft8Message msg : messages) {
+                // Landscape (fork): label only CQs, decodes addressed to us and the QSO
+                // partner; every other station is just its trace.
+                if (landscape && !msg.checkIsCQ() && !msg.inMyCall()
+                        && !isPartner(msg.getCallsignFrom())) {
+                    continue;
+                }
 
                 if (msg.inMyCall()) {//Related to me
                     messagePaint.setColor(0xffffb2b2);
@@ -415,7 +421,9 @@ public class WaterfallView extends View {
                 String label = waterfallLabel(msg, landscape);
                 _canvas.drawTextOnPath(label, path
                         , 0, 0, messagePaint);//Message
-                if (GeneralVariables.checkQSLCallsign(msg.getCallsignFrom())) {//Draw strikethrough line
+                // Strike-through on worked stations: portrait only (fork) -- in landscape
+                // the decode list already strikes them, and the waterfall stays clean.
+                if (!landscape && GeneralVariables.checkQSLCallsign(msg.getCallsignFrom())) {//Draw strikethrough line
                     float text_len = messagePaint.measureText(label);
                     float text_start = ((pathEnd- pathStart)-text_len)/2;
                     float text_high =dpToPixel(4);//messagePaint.getFontSpacing()/2;
@@ -462,6 +470,18 @@ public class WaterfallView extends View {
     /** Frequency (Hz) of the station we are in QSO with, or -1 for none. */
     public void setPartnerFrequency(float freq) {
         this.partnerFrequency = freq;
+    }
+
+    // Callsign of the station we are in QSO with, or null (fork: keeps its label).
+    private volatile String partnerCallsign = null;
+
+    public void setPartnerCallsign(String callsign) {
+        this.partnerCallsign = callsign;
+    }
+
+    private boolean isPartner(String callsign) {
+        String p = partnerCallsign;
+        return p != null && callsign != null && p.equalsIgnoreCase(callsign);
     }
 
     public void setTxFrequency(float freq) {

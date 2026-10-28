@@ -59,8 +59,9 @@ only.
   otherwise at our next slot. A held slot doesn't count toward Stop After.
 - **TX frequency can't change while an over is on the air** (waterfall tap or
   Settings), with a toast; between overs it changes as before.
-- **Waterfall labels (landscape):** CQs show the whole message; every other
-  decode shows only the sending callsign.
+- **Waterfall labels (landscape):** only CQs (whole message), decodes addressed
+  to us and the QSO partner (callsign) are labelled; other stations show just
+  their trace, and there is no strike-through on the waterfall.
 - **White line on the QSO partner's frequency** on every waterfall, beside the
   red TX markers.
 
