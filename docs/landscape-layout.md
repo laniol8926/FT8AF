@@ -136,12 +136,12 @@ reconnects.
 ### TUNE and Even/Odd on the title row
 
 - **TUNE** (`CompactTuneButton`) is the drawer's `SecondaryButton` TUNE at
-  the title row's 36 dp height and a fixed 56 dp width: tap starts the tune
+  the title row's 36 dp height and a fixed 48 dp width: tap starts the tune
   carrier, it turns amber with its countdown ("TUNE 7s", wrapping to two
   lines), tap again stops it. It is enabled by the same rule as the drawer's
   TUNE, now shared as `tuneButtonEnabled()`: always while tuning (to stop),
   otherwise only when no CQ/QSO is running and nothing is transmitting.
-- **Even/Odd** (`CompactTxPeriodButton`, 56 dp) replaces the drawer's
+- **Even/Odd** (`CompactTxPeriodButton`, 44 dp) replaces the drawer's
   two-segment TX PERIOD control on the title row. It reads **Even** or
   **Odd** for the selected slot (`tx_period_even_short` /
   `tx_period_odd_short`), and a tap switches to the other slot
@@ -206,12 +206,24 @@ navigation bar, which the app hides; a swipe up from the bottom edge still
 reveals it). The selection pill widens to cover icon and label. This roughly
 halves the bar's height.
 
-### Compact view by default in landscape
+### Always compact in landscape
 
-`DecodeScreen` keeps two compact/expanded states. Portrait uses the saved
-choice (`GeneralVariables.simpleCallItemMode`, DB key `msgMode`). Landscape
-always opens compact; the ≡ toggle still switches it there for the moment,
-without changing the saved portrait choice.
+`DecodeScreen` keeps the saved compact/expanded choice for portrait
+(`GeneralVariables.simpleCallItemMode`, DB key `msgMode`), with its ≡ toggle.
+Landscape is always compact, since the split-view list is sized for compact
+rows (`DecodeListPanelWidth`), so the toggle is hidden there.
+
+### Fitting a narrower phone (Galaxy A32, ~853 dp)
+
+- The title row's gaps are a shared 4 dp (`TitleRowGap`); Hunt's padding is 8 dp,
+  TUNE 48 dp, Even/Odd 44 dp. With Call CQ, Hunt, the status, the CAT chip,
+  TUNE, Even/Odd, SWR and PWR all showing, the "TX in Xs" countdown keeps its
+  seconds.
+- The **CQ Calls** and **CQ POTA** filter chips are stacked ("CQ" over "Calls" /
+  "POTA"): `FilterChips` draws a label containing a line break on two lines,
+  smaller and narrower. The whole filter row then fits on the A32.
+- The waterfall's bottom strip lets the input meter give up its end on a
+  narrow panel, so the frequency, count and LIVE never wrap.
 
 ### Empty-state clipping
 

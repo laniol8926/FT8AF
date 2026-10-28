@@ -74,6 +74,11 @@ only.
   QSO is logged without `TX_PWR` when no power is set, never with 0.
 - **Operator power is a decimal** ("4.7W", not rounded), editable as one in
   Settings. Older whole-watt values still load.
+- **The running `ft8af_log.adi` can be found.** It's still written to the
+  app's own files folder, which file managers can't open on Android 11+.
+  After each logged QSO the whole file is also copied to
+  **Download/FT8AF/ft8af_log.adi**, next to the exports (via MediaStore on
+  Android 10+). (`AdifLogFile.mirrorToDownloads`)
 
 ## Smaller fixes
 

@@ -615,7 +615,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                     onStop = onStopAction,
                                     onOpenCqOptions = onOpenCqOptionsAction,
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(TitleRowGap))
                                 CompactHuntButton(
                                     actions = actions,
                                     onToggle = onToggleHuntAction,
@@ -623,7 +623,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                 )
                                 // The status line ("Listening / Next transmit window") and the
                                 // CAT chip move up here too, freeing their docked row below.
-                                Spacer(modifier = Modifier.width(10.dp))
+                                Spacer(modifier = Modifier.width(TitleRowGap + 2.dp))
                                 OperateStatusRow(
                                     isTransmitting = isTransmitting,
                                     isTuning = isTuning,
@@ -640,7 +640,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                     // Even/Odd keep their full width.
                                     modifier = Modifier.weight(1f, fill = false),
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(TitleRowGap))
                                 CompactTuneButton(
                                     isTuning = isTuning,
                                     isActivated = isActivated,
@@ -648,17 +648,17 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                                     tuneRemainingSec = tuneRemainingSec,
                                     onToggleTune = onToggleTuneAction,
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(TitleRowGap))
                                 CompactTxPeriodButton(
                                     txSlot = txSlot,
                                     onSelectTxPeriod = onSelectTxPeriodAction,
                                 )
                                 if (lastSwrRatio.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Spacer(modifier = Modifier.width(TitleRowGap))
                                     CompactSwrChip(ratioText = lastSwrRatio)
                                 }
                                 if ((operatorPowerWatts ?: 0f) > 0f) {
-                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Spacer(modifier = Modifier.width(TitleRowGap))
                                     CompactPowerChip(
                                         powerText = com.k1af.ft8af.ft8transmit.MeterProtectionController
                                             .formatPowerWatts(operatorPowerWatts ?: 0f),
@@ -1107,3 +1107,10 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
         )
     }
 }
+
+/**
+ * Gap between the landscape Decode title row's buttons and chips. Kept small so the row fits
+ * an ~850 dp phone (Galaxy A32) with Call CQ, Hunt, the status, the CAT chip, TUNE, Even/Odd
+ * and the SWR and PWR chips all showing, without squeezing the "TX in Xs" countdown.
+ */
+private val TitleRowGap = 4.dp

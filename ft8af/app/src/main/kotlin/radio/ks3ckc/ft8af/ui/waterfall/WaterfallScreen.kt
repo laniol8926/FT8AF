@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -296,7 +297,12 @@ fun WaterfallScreen(
 
             // Live RX input-level meter: too low / just right / too high, with
             // clipping indication when peaks hit full scale.
-            InputLevelIndicator(levels = inputLevels)
+            // Weighted (not filling) so on a narrow strip -- the landscape side panel on a
+            // ~850 dp phone -- the meter gives up its tail instead of LIVE wrapping to two lines.
+            InputLevelIndicator(
+                levels = inputLevels,
+                modifier = Modifier.weight(1f, fill = false).clipToBounds(),
+            )
 
             Spacer(modifier = Modifier.weight(1f))
 
@@ -307,6 +313,7 @@ fun WaterfallScreen(
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
+                softWrap = false,
             )
 
             Spacer(modifier = Modifier.width(10.dp))
@@ -316,6 +323,8 @@ fun WaterfallScreen(
                 color = TextDim,
                 fontFamily = GeistMonoFamily,
                 fontSize = 9.sp,
+                maxLines = 1,
+                softWrap = false,
             )
 
             Spacer(modifier = Modifier.width(6.dp))
@@ -326,6 +335,8 @@ fun WaterfallScreen(
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.08.sp,
+                maxLines = 1,
+                softWrap = false,
             )
         }
     }

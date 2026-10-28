@@ -252,11 +252,10 @@ fun DecodeScreen(
         android.content.res.Configuration.ORIENTATION_LANDSCAPE
 
     // Compact mode. Portrait uses the saved choice (GeneralVariables.simpleCallItemMode / DB key
-    // "msgMode"). Landscape always opens in compact, since its list is short; the toggle still
-    // switches it there for the moment, without touching the saved portrait choice.
+    // "msgMode") and keeps its toggle. Landscape is always compact: its split-view list is sized
+    // for compact rows (DecodeListPanelWidth), so the toggle is hidden there.
     var portraitCompact by rememberSaveable { mutableStateOf(GeneralVariables.simpleCallItemMode) }
-    var landscapeCompact by rememberSaveable { mutableStateOf(true) }
-    val compactMode = if (isLandscape) landscapeCompact else portraitCompact
+    val compactMode = isLandscape || portraitCompact
 
     // Clear-every-cycle mode — when on, the decode list is wiped at the start of
     // each cycle so it only shows the current slot. Persisted via
@@ -299,7 +298,7 @@ fun DecodeScreen(
                                 // on a narrow phone with the radio linked it squeezed the RX /
                                 // "TX in Xs" status off the row.
                                 if (landscapeActions != null) {
-                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     landscapeActions()
                                 } else {
                                     TopBarSubtitle(text = subtitleText, modifier = Modifier.padding(start = 8.dp))
@@ -340,23 +339,21 @@ fun DecodeScreen(
                             color = if (clearEachCycle) Accent else TextMuted,
                         )
                     }
-                    IconButton(
-                        onClick = {
-                            if (isLandscape) {
-                                landscapeCompact = !landscapeCompact
-                            } else {
+                    if (!isLandscape) {
+                        IconButton(
+                            onClick = {
                                 portraitCompact = !portraitCompact
                                 GeneralVariables.simpleCallItemMode = portraitCompact
                                 mainViewModel.databaseOpr.writeConfig(
                                     "msgMode", if (portraitCompact) "1" else "0", null,
                                 )
+                            },
+                        ) {
+                            if (compactMode) {
+                                radio.ks3ckc.ft8af.ui.components.FT8AFIcons.ViewExpanded(color = TextMuted)
+                            } else {
+                                radio.ks3ckc.ft8af.ui.components.FT8AFIcons.ViewCompact(color = TextMuted)
                             }
-                        },
-                    ) {
-                        if (compactMode) {
-                            radio.ks3ckc.ft8af.ui.components.FT8AFIcons.ViewExpanded(color = TextMuted)
-                        } else {
-                            radio.ks3ckc.ft8af.ui.components.FT8AFIcons.ViewCompact(color = TextMuted)
                         }
                     }
                     IconButton(
@@ -659,8 +656,10 @@ internal fun SortModeLabel(sortMode: DecodeSortMode) {
  */
 @Composable
 private fun filterLabel(key: String): String = when (key) {
-    "CQ Calls" -> stringResource(R.string.decode_filter_cq_calls)
-    "CQ POTA" -> stringResource(R.string.decode_filter_cq_pota)
+    // Stacked ("CQ" over "Calls" / "POTA") so the chips are narrower; FilterChips draws a
+    // label with a line break on two lines.
+    "CQ Calls" -> stringResource(R.string.decode_filter_cq_calls).replaceFirst(' ', '\n')
+    "CQ POTA" -> stringResource(R.string.decode_filter_cq_pota).replaceFirst(' ', '\n')
     "New DXCC" -> stringResource(R.string.decode_filter_new_dxcc)
     "New Zone" -> stringResource(R.string.decode_filter_new_zone)
     "New State" -> stringResource(R.string.decode_filter_new_state)

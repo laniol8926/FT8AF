@@ -1,14 +1,24 @@
 package com.k1af.ft8af.log;
 
+import android.content.ContentResolver;
+import android.content.ContentUris;
+import android.content.ContentValues;
 import android.content.Context;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.util.Log;
 
 import com.k1af.ft8af.GeneralVariables;
 import com.k1af.ft8af.rigs.BaseRigOperation;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -58,7 +68,11 @@ public final class AdifLogFile {
             if (dir == null) {
                 return;
             }
-            appendRecord(new File(dir, FILE_NAME), fromQslRecord(record));
+            File file = new File(dir, FILE_NAME);
+            appendRecord(file, fromQslRecord(record));
+            // The app's own files dir isn't browsable on Android 11+, so keep a copy where
+            // the operator can find it: Download/FT8AF, next to the exports.
+            mirrorToDownloads(context, file);
         } catch (Throwable t) {
             // Never let ADIF mirroring break QSO logging. Log the full cause (throwable
             // overload) so storage/IO issues are diagnosable in the field.
@@ -95,6 +109,68 @@ public final class AdifLogFile {
                 .sigInfo(record.getSigInfo())
                 .txPwr(record.getTxPwr())
                 .comment(record.getComment());
+    }
+
+    /**
+     * Copy the whole running log over {@code Download/FT8AF/ft8af_log.adi}, creating it the
+     * first time. A full copy (not an append) so the public file always matches the
+     * running one, whatever state it was left in. On Android 10+ through MediaStore: the
+     * entry this app created is found by name and path and rewritten ("wt"). If it was
+     * created by an earlier install (not ours to write), MediaStore makes a numbered copy
+     * instead. Never throws.
+     */
+    static void mirrorToDownloads(Context context, File source) {
+        synchronized (WRITE_LOCK) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ContentResolver resolver = context.getContentResolver();
+                    Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                    String relativePath = Environment.DIRECTORY_DOWNLOADS + "/FT8AF/";
+                    Uri target = null;
+                    try (Cursor c = resolver.query(collection,
+                            new String[]{MediaStore.Downloads._ID},
+                            MediaStore.Downloads.DISPLAY_NAME + "=? AND "
+                                    + MediaStore.Downloads.RELATIVE_PATH + "=?",
+                            new String[]{FILE_NAME, relativePath}, null)) {
+                        if (c != null && c.moveToFirst()) {
+                            target = ContentUris.withAppendedId(collection, c.getLong(0));
+                        }
+                    }
+                    if (target == null) {
+                        ContentValues values = new ContentValues();
+                        values.put(MediaStore.Downloads.DISPLAY_NAME, FILE_NAME);
+                        values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
+                        values.put(MediaStore.Downloads.RELATIVE_PATH, relativePath);
+                        target = resolver.insert(collection, values);
+                    }
+                    if (target == null) return;
+                    try (OutputStream os = resolver.openOutputStream(target, "wt");
+                         FileInputStream in = new FileInputStream(source)) {
+                        if (os != null) copy(in, os);
+                    }
+                } else {
+                    File dir = new File(Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DOWNLOADS), "FT8AF");
+                    //noinspection ResultOfMethodCallIgnored
+                    dir.mkdirs();
+                    try (FileInputStream in = new FileInputStream(source);
+                         FileOutputStream os = new FileOutputStream(new File(dir, FILE_NAME))) {
+                        copy(in, os);
+                    }
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "mirrorToDownloads failed", t);
+            }
+        }
+    }
+
+    private static void copy(java.io.InputStream in, OutputStream out) throws IOException {
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            out.write(buf, 0, n);
+        }
+        out.flush();
     }
 
     /**

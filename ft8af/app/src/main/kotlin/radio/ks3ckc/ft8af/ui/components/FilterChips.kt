@@ -16,6 +16,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import radio.ks3ckc.ft8af.theme.*
@@ -41,6 +43,9 @@ fun FilterChips(
             val bgColor = if (isSelected) AccentSoft else BgSurface2
             val borderColor = if (isSelected) BorderAmber else Border
             val textColor = if (isSelected) Accent else TextMuted
+            // A label with a line break ("CQ\nPOTA") is drawn stacked: smaller, tight
+            // lines, centred, so it fits the 32 dp chip and the chip is narrower.
+            val stacked = option.contains('\n')
 
             Row(
                 modifier = Modifier
@@ -49,13 +54,15 @@ fun FilterChips(
                     .background(bgColor, shape)
                     .border(1.dp, borderColor, shape)
                     .clickable { onSelected(option) }
-                    .padding(horizontal = 14.dp),
+                    .padding(horizontal = if (stacked) 10.dp else 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     text = option,
                     color = textColor,
-                    fontSize = 12.sp,
+                    fontSize = if (stacked) 10.sp else 12.sp,
+                    lineHeight = if (stacked) 11.sp else TextUnit.Unspecified,
+                    textAlign = if (stacked) TextAlign.Center else null,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
                     letterSpacing = 0.02.sp,
                 )

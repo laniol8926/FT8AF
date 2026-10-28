@@ -120,7 +120,7 @@ internal fun CompactTuneButton(
     SecondaryButton(
         // Fixed width so the row doesn't shift when "TUNE" becomes "Tune 7s" (which wraps onto
         // two lines at this width, as the drawer's TUNE already allows).
-        modifier = modifier.height(CompactCallCqHeight).width(56.dp),
+        modifier = modifier.height(CompactCallCqHeight).width(48.dp),
         label = tuneChipLabel(stringResource(R.string.tune_button), isTuning, tuneRemainingSec),
         active = isTuning,
         enabled = tuneButtonEnabled(isTuning, isActivated, isTransmitting),
@@ -156,7 +156,7 @@ internal fun CompactTxPeriodButton(
     Box(
         modifier = modifier
             .height(CompactCallCqHeight)
-            .width(56.dp)
+            .width(44.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(BgSurface3)
             .border(1.dp, Border, RoundedCornerShape(12.dp))
@@ -1047,7 +1047,7 @@ internal fun CompactHuntButton(
                 onLongClickLabel = stringResource(R.string.tx_hunt_options),
             )
             .semantics { toggleableState = ToggleableState(huntOn) }
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
