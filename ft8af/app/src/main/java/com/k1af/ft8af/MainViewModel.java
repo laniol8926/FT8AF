@@ -2439,6 +2439,30 @@ public class MainViewModel extends ViewModel {
     }
 
     /**
+     * QMX CAT tones (see {@link com.k1af.ft8af.ft8transmit.QmxCatTones}) are how the QMX
+     * reliably reaches full drive; over phone audio it often can't (two of two test phones
+     * read 1-2 bars, it needs 3). Turn them on the first time a QMX connects, but only when
+     * the operator has never set the option (no "qmxCatTones" config row yet), so an
+     * explicit off is never overridden. Same rule as the TX channel default above.
+     */
+    private void applyQmxCatTonesDefaultIfApplicable(int hamlibModelId) {
+        if (databaseOpr == null) return;
+        if (!shouldDefaultQmxCatTonesOn(hamlibModelId,
+                databaseOpr.hasConfigKey(com.k1af.ft8af.ft8transmit.QmxCatTones.CONFIG_KEY))) {
+            return;
+        }
+        GeneralVariables.qmxCatTones = true;
+        databaseOpr.writeConfig(com.k1af.ft8af.ft8transmit.QmxCatTones.CONFIG_KEY, "1", null);
+        GeneralVariables.fileLog(
+                "QMX: turned on CAT tones (first connect, no prior user choice)");
+    }
+
+    /** The decision behind {@link #applyQmxCatTonesDefaultIfApplicable}; pure for tests. */
+    static boolean shouldDefaultQmxCatTonesOn(int hamlibModelId, boolean catTonesConfigKeyExists) {
+        return hamlibModelId == HamlibRig.QRPLABS_QMX_MODEL_ID && !catTonesConfigKeyExists;
+    }
+
+    /**
      * Whether RX capture must be paused for the duration of this TX (see
      * {@link HamRecorder#pauseForTx()} for the real-hardware failure this
      * works around). True only when RX is actually holding an Android
@@ -2582,6 +2606,7 @@ public class MainViewModel extends ViewModel {
                         : RigNameList.getInstance(ctx).getRigNameByIndex(GeneralVariables.modelNo);
                 int hamlibModelId = HamlibRig.modelIdFor(selected);
                 applyQmxTxChannelDefaultIfApplicable(hamlibModelId);
+                applyQmxCatTonesDefaultIfApplicable(hamlibModelId);
                 baseRig = new HamlibRig(hamlibModelId);
                 break;
             }

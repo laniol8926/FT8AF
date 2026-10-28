@@ -16,7 +16,7 @@ Recommended QMX setup:
 | Audio Input | the QMX's regular USB audio entry |
 | Audio Output | the QMX's regular USB audio entry (**not** "(USB direct)") |
 | TX audio channel | Left (set automatically on first QMX connect) |
-| QMX: Send Tones over CAT | **On** |
+| QMX: Send Tones over CAT | **On** (automatic on first QMX connect) |
 
 ## The symptom
 
@@ -91,8 +91,9 @@ FT8AF's implementation:
   on, control mode is CAT, and the connected rig is a Hamlib QMX
   (`HamlibRig.isQmx()`). Commands go straight to the rig's serial connector,
   whose `sendData` is synchronized with Hamlib's own CAT traffic.
-- The setting is persisted under config key `qmxCatTones` and is off by
-  default.
+- The setting is persisted under config key `qmxCatTones`. It is turned on
+  automatically the first time a QMX connects (`applyQmxCatTonesDefaultIfApplicable`),
+  unless the operator has already set it either way. Other radios are unaffected.
 
 Measured on the motorola: an FT8 CQ goes out as **79 symbols in 66 `TA`
 commands**, with **0.3 ms worst-case** symbol lateness. The radio shows
