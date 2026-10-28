@@ -114,9 +114,26 @@ public class FT8SignalListener {
         boolean wasListening = utcTimer.isRunning();
         utcTimer.delete();
         utcTimer = new UtcTimer(mode.slotMillis, false, makeTimerCallback());
+        utcTimer.setTime_sec(rxLatencyMs);
         if (wasListening) {
             utcTimer.start();
         }
+    }
+
+    // Receive audio latency (ms): how far behind the air the captured audio runs
+    // (USB audio buffering in the rig/phone path; ~1 s with the QMX on the motorola).
+    // Each slot's recording starts this much after the boundary, so decode DTs read
+    // ~0 and the early pass doesn't cut off the end of every signal. RX only -- the
+    // transmit timer is separate, so this never moves our TX timing.
+    private volatile int rxLatencyMs = 0;
+
+    public int getRxLatencyMs() {
+        return rxLatencyMs;
+    }
+
+    public void setRxLatencyMs(int ms) {
+        rxLatencyMs = ms;
+        utcTimer.setTime_sec(ms);
     }
 
     public void startListen() {

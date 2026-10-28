@@ -193,6 +193,20 @@ public class MainViewModel extends ViewModel {
     // reset by the settings toggle / GPS discipline takeover. Public so
     // TimeSyncSettings can reset it when the operator flips the toggles.
     public final ClockSelfSync clockSelfSync = new ClockSelfSync();
+    // Fork: receive audio latency estimator (see the decode handler and
+    // FT8SignalListener.setRxLatencyMs). Runs while GPS/NTP sets the clock.
+    private final ClockSelfSync rxLatencySync = new ClockSelfSync();
+    static final int RX_LATENCY_MAX_MS = 3000;
+
+    /** Set (and persist) the receive-window shift; no-op if unchanged. */
+    private void applyRxLatency(int ms, String why) {
+        int old = GeneralVariables.rxLatencyMs;
+        if (old == ms) return;
+        GeneralVariables.rxLatencyMs = ms;
+        ft8SignalListener.setRxLatencyMs(ms);
+        databaseOpr.writeConfig("rxLatencyMs", String.valueOf(ms), null);
+        fileLog("rxLatency: receive window shift " + old + " -> " + ms + " ms (" + why + ")");
+    }
 
     // Robust, smoothed source for the DT figure the UI shows (clock-sync pill + Time Sync
     // readout). Always on — unlike clockSelfSync it never touches the clock, it only decides
@@ -790,11 +804,33 @@ public class MainViewModel extends ViewModel {
                                     + oldDelay + " -> " + newDelay + " ms ("
                                     + dtSamples.length + " decodes, slot utc=" + utc + ")");
                         }
+                        // The self-syncing clock owns timing (it moves RX and TX
+                        // together); a receive-latency shift on top would double-count.
+                        rxLatencySync.reset();
+                        applyRxLatency(0, "self-syncing clock owns timing");
                     } else {
                         // Feature off or GPS/NTP disciplining: drop any half-built
                         // confirmation streak so stale state can't act later.
                         clockSelfSync.reset();
+                        if (GeneralVariables.autoSyncClockFromDecodes) {
+                            // GPS/NTP has the clock right, so the DT left over is receive
+                            // audio latency: shift only the RX window by it. Same estimator
+                            // (median, outlier rejection, confirmation), sign flipped: a
+                            // late signal means record later.
+                            Integer neg = rxLatencySync.onSlot(utc, dtSamples,
+                                    -GeneralVariables.rxLatencyMs);
+                            if (neg != null) {
+                                applyRxLatency(Math.max(0, Math.min(RX_LATENCY_MAX_MS, -neg)),
+                                        dtSamples.length + " decodes");
+                            }
+                        } else {
+                            rxLatencySync.reset();
+                        }
                     }
+                }
+                if (ft8SignalListener.getRxLatencyMs() != GeneralVariables.rxLatencyMs) {
+                    // Saved value loaded after the listener was built, or a change above.
+                    ft8SignalListener.setRxLatencyMs(GeneralVariables.rxLatencyMs);
                 }
                 if (messages.size() == 0) {
                     //nothing left after filtering own echoes

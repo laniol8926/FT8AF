@@ -2965,6 +2965,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 if (name.equalsIgnoreCase("disciplineClockFromGPS")) {//Discipline clock from GPS (issue #373)
                     GeneralVariables.disciplineClockFromGPS = result.equals("1");
                 }
+                if (name.equalsIgnoreCase("rxLatencyMs")) {//Receive audio latency correction (fork, see MainViewModel)
+                    GeneralVariables.rxLatencyMs = parseConfigInt(result, 0);
+                }
                 if (name.equalsIgnoreCase("autoSyncClockFromDecodes")) {//Self-syncing clock from decode DT medians (ClockSelfSync)
                     GeneralVariables.autoSyncClockFromDecodes = result.equals("1");
                 }

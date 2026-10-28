@@ -658,6 +658,7 @@ public class GeneralVariables {
     public static boolean disciplineClockFromGPS = false;//Discipline the app clock (UtcTimer.delay) from GPS satellite time (issue #373). Off by default — consensual.
     public static int gpsClockIntervalMinutes = 5;//How often to re-read GPS time for clock discipline. Clamped 1-30 by GpsClockUpdater.
     public static boolean autoSyncClockFromDecodes = true;//Self-syncing clock: continuously trim UtcTimer.delay from the median decode DT (see ClockSelfSync). Inert while disciplineClockFromGPS or disciplineClockFromNtp is on (see ClockSelfSync.mayRun). ON by default (PR #758): the band is the time source every operator has, and the estimator is conservative enough (median + MAD rejection + deadband + confirmation) to run unattended.
+    public static volatile int rxLatencyMs = 0;//Receive audio latency (ms) the RX slot window is shifted by. Fork: measured from decode DTs while NTP/GPS sets the clock (the residual DT is then audio delay, not clock error); 0 when the self-syncing clock owns timing. RX only, never moves TX.
     //Runtime status for the Time Sync UI (not persisted): the offset the last GPS fix applied
     //to UtcTimer.delay. The last-sync *timestamp* is the retained value of mutableGpsClockSync
     //below, so there's no separate field for it.
