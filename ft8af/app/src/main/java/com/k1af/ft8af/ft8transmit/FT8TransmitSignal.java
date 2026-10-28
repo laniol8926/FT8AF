@@ -2453,19 +2453,31 @@ public class FT8TransmitSignal {
 
     /** Stop After limit reached: drop the target for a queued caller, a watched CQ, or CQ. */
     private void giveUpTarget(ArrayList<Ft8Message> messages) {
-        GeneralVariables.fileLog("QSO: give up calling " + toCallsign.callsign
+        String gaveUpOn = toCallsign.callsign;
+        GeneralVariables.fileLog("QSO: give up calling " + gaveUpOn
                 + " (order=" + functionOrder + ", limit) -> CQ/next");
         // try queued callers first, then check watched messages, then fall back to CQ
-        if (!dequeueNextCaller()) {
-            if (!getNewTargetCallsign(messages)) {//check CQ messages in watch list; returns true if a new target is found
-                functionOrder = 6;
-                toCallsign.callsign = "CQ";
-            }
+        boolean continued = dequeueNextCaller()
+                || getNewTargetCallsign(messages);//check CQ messages in watch list; returns true if a new target is found
+        // Picking the station we just gave up on again would only restart the loop.
+        if (continued && gaveUpOn != null && gaveUpOn.equals(toCallsign.callsign)) {
+            continued = false;
+        }
+        if (!continued) {
+            functionOrder = 6;
+            toCallsign.callsign = "CQ";
         }
         generateFun();
         setCurrentFunctionOrder(functionOrder);// set current message
         mutableToCallsign.postValue(toCallsign.copy());
         mutableFunctionOrder.postValue(functionOrder);
+        // Nobody else to work: like a finished QSO, Auto-CQ decides (fork) -- off (and
+        // Hunt off) stops TX instead of falling back to calling CQ.
+        if (shouldStopAfterQso(continued, GeneralVariables.autoCQAfterQSO,
+                GeneralVariables.autoFollowCQ)) {
+            GeneralVariables.fileLog("QSO: gave up on " + gaveUpOn + ", Auto-CQ & Hunt off -> stop TX");
+            setActivated(false);
+        }
     }
 
     /**
