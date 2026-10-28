@@ -472,16 +472,29 @@ public class WaterfallView extends View {
     // (fork). Rotating rebuilds the layout and so the view, which used to start the
     // new one black: the operator lost the band picture every rotation. The width maps
     // to the same frequency span in both, so a scaled copy stays frequency-aligned.
-    private static Bitmap handedOver = null;
-    private static long handedOverAt = 0;
+    // Kept per orientation: the labels are painted into the bitmap, and landscape
+    // labels only CQs / us / the partner, so a portrait picture (every decode
+    // labelled) must not come back into landscape. Portrait may start from the
+    // landscape picture (it only has fewer labels).
+    private static Bitmap handedOverLandscape = null;
+    private static long handedOverLandscapeAt = 0;
+    private static Bitmap handedOverPortrait = null;
+    private static long handedOverPortraitAt = 0;
     private static final long HANDOVER_MAX_AGE_MS = 60_000;
+    // Orientation the current bitmap was drawn in (set when it is created).
+    private boolean bitmapLandscape = false;
 
     @Override
     protected void onDetachedFromWindow() {
         if (lastBitMap != null && !lastBitMap.isRecycled()) {
             synchronized (WaterfallView.class) {
-                handedOver = lastBitMap;
-                handedOverAt = System.currentTimeMillis();
+                if (bitmapLandscape) {
+                    handedOverLandscape = lastBitMap;
+                    handedOverLandscapeAt = System.currentTimeMillis();
+                } else {
+                    handedOverPortrait = lastBitMap;
+                    handedOverPortraitAt = System.currentTimeMillis();
+                }
             }
         }
         super.onDetachedFromWindow();
@@ -489,15 +502,24 @@ public class WaterfallView extends View {
 
     /** Paint a recent handed-over history into the fresh bitmap, scaled to fit. */
     private void restoreHandedOver(int w, int h) {
-        Bitmap prev;
+        bitmapLandscape = getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        long now = System.currentTimeMillis();
+        Bitmap prev = null;
         synchronized (WaterfallView.class) {
-            prev = handedOver;
-            if (prev == null || prev == lastBitMap
-                    || System.currentTimeMillis() - handedOverAt > HANDOVER_MAX_AGE_MS) {
-                return;
+            if (bitmapLandscape) {
+                if (now - handedOverLandscapeAt <= HANDOVER_MAX_AGE_MS) prev = handedOverLandscape;
+            } else {
+                // Freshest of the two: portrait's own, else the landscape picture.
+                if (now - handedOverPortraitAt <= HANDOVER_MAX_AGE_MS
+                        && handedOverPortraitAt >= handedOverLandscapeAt) {
+                    prev = handedOverPortrait;
+                } else if (now - handedOverLandscapeAt <= HANDOVER_MAX_AGE_MS) {
+                    prev = handedOverLandscape;
+                }
             }
         }
-        if (prev.isRecycled()) return;
+        if (prev == null || prev == lastBitMap || prev.isRecycled()) return;
         _canvas.drawBitmap(prev, null, new android.graphics.Rect(0, 0, w, h), null);
     }
 
