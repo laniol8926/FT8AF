@@ -193,4 +193,23 @@ public class LateDecodeTxRestartTest {
         assertThat(FT8TransmitSignal.RESTART_HEADROOM_MS).isGreaterThan(0);
         assertThat(FT8TransmitSignal.RESTART_HEADROOM_MS).isLessThan(FT8_SLACK_MS);
     }
+
+    // ---- late-start tolerance widens the swap window (fork) ------------------
+
+    @Test
+    public void pastSlack_withinLateStartTolerance_swaps() {
+        // KW8CW 2026-10-27: his R-report landed ~0.2 s past the slack.
+        long msInCycle = FT8_SLACK_MS + 200;
+        assertThat(FT8TransmitSignal.shouldRestartForNewOrder(true, true, false,
+                2, 4, msInCycle, FT8_SLACK_MS, 2000)).isTrue();
+        // Upstream rule (no tolerance) leaves the old over on the air.
+        assertThat(FT8TransmitSignal.shouldRestartForNewOrder(true, true, false,
+                2, 4, msInCycle, FT8_SLACK_MS, 0)).isFalse();
+    }
+
+    @Test
+    public void pastSlackAndTolerance_doesNotSwap() {
+        assertThat(FT8TransmitSignal.shouldRestartForNewOrder(true, true, false,
+                2, 4, FT8_SLACK_MS + 2000, FT8_SLACK_MS, 2000)).isFalse();
+    }
 }

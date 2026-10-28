@@ -564,6 +564,23 @@ public class FT8TransmitSignal {
     }
 
     /**
+     * {@link #shouldRestartForNewOrder} widened by the operator's late-start tolerance
+     * (fork change): past the audio slack the swapped message goes out with its leading
+     * audio clipped to still end on the boundary -- the same trade the operator already
+     * accepts for a late manual start -- instead of re-sending the stale message for a
+     * whole cycle (KW8CW 2026-10-27: his R-report landed 0.2 s past the slack and our
+     * report went out again). Tolerance 0 is the upstream rule.
+     */
+    static boolean shouldRestartForNewOrder(boolean transmitting, boolean playbackRestartable,
+                                            boolean transmitFreeText,
+                                            int orderAtKeyUp, int orderNow, long msInCycle,
+                                            int audioSlackMillis, int lateStartToleranceMs) {
+        int tolerance = Math.max(0, Math.min(lateStartToleranceMs, MAX_LATE_START_TOLERANCE_MS));
+        return shouldRestartForNewOrder(transmitting, playbackRestartable, transmitFreeText,
+                orderAtKeyUp, orderNow, msInCycle, audioSlackMillis + tolerance);
+    }
+
+    /**
      * Build the replacement cycle timer for a new operating mode, carrying the manual
      * TX-delay offset ({@link UtcTimer#getTime_sec()}) from the outgoing timer onto the
      * fresh one. A new {@link UtcTimer} starts with {@code time_sec = 0}, so without this
@@ -2181,11 +2198,16 @@ public class FT8TransmitSignal {
                 GeneralVariables.connectMode, GeneralVariables.controlMode,
                 onDoTransmitted != null && onDoTransmitted.supportTransmitOverCAT());
         if (shouldRestartForNewOrder(isTransmitting, playbackRestartable, transmitFreeText,
-                orderAtKeyUp, functionOrder, msInCycle, mode.audioSlackMillis)) {
+                orderAtKeyUp, functionOrder, msInCycle, mode.audioSlackMillis,
+                GeneralVariables.lateStartTolerance)) {
             GeneralVariables.fileLog("QSO: late decode advanced order " + orderAtKeyUp
                     + " -> " + functionOrder + " at " + msInCycle
                     + "ms into slot; restarting TX with the new message");
             requestTxRestart();
+        } else if (isTransmitting && orderAtKeyUp != -1 && orderAtKeyUp != functionOrder) {
+            GeneralVariables.fileLog("QSO: late decode advanced order " + orderAtKeyUp
+                    + " -> " + functionOrder + " at " + msInCycle
+                    + "ms into slot; too late to swap, new message goes next cycle");
         }
     }
 
