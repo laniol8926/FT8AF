@@ -379,6 +379,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     // RX/TX messages in the mini log. (#250 follow-up)
     // Set once screenTab is known (below): landscape + docked panel gets a side waterfall.
     val qsoPanelSideWaterfall = remember { mutableStateOf(false) }
+    val qsoPanelInLeftColumnState = remember { mutableStateOf(false) }
     val qsoPanel = remember {
         movableContentOf { panelModifier: Modifier ->
             ActiveQsoPanel(
@@ -388,6 +389,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 onReopenSheet = { currentReopenQsoSheetState.value() },
                 modifier = panelModifier,
                 sideWaterfall = qsoPanelSideWaterfall.value,
+                inLeftColumn = qsoPanelInLeftColumnState.value,
             )
         }
     }
@@ -534,8 +536,16 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     val panelTab = if (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) activeTab else sidePanelTab
     // The screen actually shown in the content area: the Decode screen for the whole split view.
     val screenTab = if (actionsOnDecodeTitle) FT8AFTab.DECODE else activeTab
-    val sideWaterfall = isLandscape && !qsoPanelOverlaysContent(screenTab)
-    androidx.compose.runtime.SideEffect { qsoPanelSideWaterfall.value = sideWaterfall }
+    // Landscape split view (fork): the QSO panel docks under the decode list (left
+    // column) and the right panel runs the full height, so the waterfall there spans
+    // top to bottom. Elsewhere in landscape the panel docks full width and carries
+    // its own side waterfall.
+    val qsoPanelInLeftColumn = actionsOnDecodeTitle && screenTab == FT8AFTab.DECODE
+    val sideWaterfall = isLandscape && !qsoPanelOverlaysContent(screenTab) && !qsoPanelInLeftColumn
+    androidx.compose.runtime.SideEffect {
+        qsoPanelSideWaterfall.value = sideWaterfall
+        qsoPanelInLeftColumnState.value = qsoPanelInLeftColumn
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(BgApp)) {
         // Keep the content clear of the display cutout (and the status bar, should it
@@ -603,11 +613,19 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                         onOpenBandMode = onOpenBandModeAction,
                         landscapeSidePanel = if (actionsOnDecodeTitle) {
                             {
-                                when (panelTab) {
-                                    FT8AFTab.MAP -> MapScreen(mainViewModel, compactHeader = true)
+                                // While TX is on the right column is the waterfall even
+                                // if Map is picked: the QSO needs it (fork).
+                                when {
+                                    isActivated -> WaterfallScreen(mainViewModel, showSpectrum = false)
+                                    panelTab == FT8AFTab.MAP -> MapScreen(mainViewModel, compactHeader = true)
                                     else -> WaterfallScreen(mainViewModel, showSpectrum = false)
                                 }
                             }
+                        } else {
+                            null
+                        },
+                        leftColumnFooter = if (qsoPanelInLeftColumn) {
+                            { qsoPanel(Modifier) }
                         } else {
                             null
                         },
@@ -726,7 +744,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             // in progress. On the Waterfall tab it is floated over the content
             // above instead (see qsoPanelOverlaysContent) so it never resizes
             // the waterfall.
-            if (!qsoPanelOverlaysContent(screenTab)) {
+            if (!qsoPanelOverlaysContent(screenTab) && !qsoPanelInLeftColumn) {
                 qsoPanel(Modifier)
             }
 

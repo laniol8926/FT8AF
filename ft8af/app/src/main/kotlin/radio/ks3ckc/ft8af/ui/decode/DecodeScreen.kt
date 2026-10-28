@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -74,6 +75,9 @@ fun DecodeScreen(
     landscapeSlotBar: (@Composable () -> Unit)? = null,
     // Landscape split view: the map or waterfall, shown in a panel to the right of the list.
     landscapeSidePanel: (@Composable () -> Unit)? = null,
+    // Landscape split view (fork): the docked QSO panel, placed under the list so the
+    // side panel (waterfall) runs the full height on the right.
+    leftColumnFooter: (@Composable () -> Unit)? = null,
 ) {
     // Observe LiveData
     val messageList by mainViewModel.mutableFt8MessageList.observeAsState(arrayListOf())
@@ -111,10 +115,14 @@ fun DecodeScreen(
     val txActivated by mainViewModel.ft8TransmitSignal.mutableIsActivated.observeAsState(false)
     val txFunctionOrder by mainViewModel.ft8TransmitSignal.mutableFunctionOrder.observeAsState(6)
 
-    // Auto-open the sheet when our CQ is answered.
+    // Auto-open the sheet when our CQ is answered -- portrait only (fork): in
+    // landscape the docked QSO panel already shows the sequence and the exchange,
+    // so the sheet would only cover the decode list. "Tap to view" still opens it.
+    val landscapeScreen = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
     LaunchedEffect(txToCallsign?.callsign, txActivated) {
         val cs = txToCallsign?.callsign
-        if (txActivated && !cs.isNullOrEmpty() && cs != "CQ" && sheetCallsign != cs) {
+        if (!landscapeScreen && txActivated && !cs.isNullOrEmpty() && cs != "CQ" && sheetCallsign != cs) {
             mainViewModel.qsoSheetCallsign.postValue(cs)
             mainViewModel.qsoSheetMinimized.postValue(false)
         }
@@ -282,6 +290,25 @@ fun DecodeScreen(
         utcString
     }
 
+    // QSO bottom sheet. Slide-down minimizes when a QSO is active so the user can
+    // reopen via the ActiveQsoPanel; when no QSO is active, dismiss fully so future
+    // row taps start fresh.
+    val qsoSheet: @Composable () -> Unit = {
+        QsoSheet(
+            message = selectedMessage,
+            mainViewModel = mainViewModel,
+            visible = sheetVisible,
+            onDismiss = {
+                if (txActivated) {
+                    mainViewModel.qsoSheetMinimized.postValue(true)
+                } else {
+                    mainViewModel.qsoSheetCallsign.postValue(null)
+                    mainViewModel.qsoSheetMinimized.postValue(false)
+                }
+            },
+        )
+    }
+
     Box(modifier = modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -399,18 +426,29 @@ fun DecodeScreen(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
+            val hideListForQso = leftColumnFooter != null && txActivated &&
+                txToCallsign?.haveTargetCallsign() == true
             Column(
                 modifier = (
-                    if (landscapeSidePanel != null) Modifier.width(DecodeListPanelWidth) else Modifier.weight(1f)
+                    when {
+                        landscapeSidePanel == null -> Modifier.weight(1f)
+                        // QSO panel docked here (fork): widen a little so its header fits.
+                        leftColumnFooter != null && txActivated ->
+                            Modifier.widthIn(min = DecodeListPanelWidth).fillMaxWidth(LeftColumnQsoFraction)
+                        else -> Modifier.width(DecodeListPanelWidth)
+                    }
                     ).fillMaxHeight(),
             ) {
+            // The list area; in the landscape split view the QSO sheet overlays only
+            // this, so the waterfall on the right stays in view (fork). Hidden during a
+            // QSO there: the QSO panel takes the whole column instead of growing over it.
+            if (!hideListForQso) Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             // Message list or empty state
             if (collapsedMessages.isEmpty()) {
                 EmptyState(
                     selectedFilter = selectedFilter,
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
+                        .fillMaxSize()
                         // When the list area is short (landscape, especially with the QSO
                         // panel open) the waves graphic overflowed upward and drew over the
                         // top bar, hiding the landscape Call CQ / Hunt buttons.
@@ -420,8 +458,7 @@ fun DecodeScreen(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
+                        .fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(0.dp),
                 ) {
                     itemsIndexed(
@@ -478,6 +515,18 @@ fun DecodeScreen(
                     }
                 }
             }
+            if (landscapeSidePanel != null) qsoSheet()
+            }// list area
+            // Landscape split view: the QSO panel, under the list (fork); in a QSO it
+            // fills the column, and "tap to view" opens the sheet over it.
+            if (hideListForQso) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    leftColumnFooter?.invoke()
+                    qsoSheet()
+                }
+            } else {
+                leftColumnFooter?.invoke()
+            }
             }
             if (landscapeSidePanel != null) {
                 Box(
@@ -492,24 +541,14 @@ fun DecodeScreen(
             }
         }
 
-        // QSO bottom sheet (overlays on top). Slide-down minimizes when a
-        // QSO is active so the user can reopen via the ActiveQsoPanel; when
-        // no QSO is active, dismiss fully so future row taps start fresh.
-        QsoSheet(
-            message = selectedMessage,
-            mainViewModel = mainViewModel,
-            visible = sheetVisible,
-            onDismiss = {
-                if (txActivated) {
-                    mainViewModel.qsoSheetMinimized.postValue(true)
-                } else {
-                    mainViewModel.qsoSheetCallsign.postValue(null)
-                    mainViewModel.qsoSheetMinimized.postValue(false)
-                }
-            },
-        )
+        // QSO bottom sheet (overlays on top); in the landscape split view it lives in
+        // the left column instead (above).
+        if (landscapeSidePanel == null) qsoSheet()
     }
 }
+
+// Left column share of the landscape split while the QSO panel is docked in it (fork).
+private const val LeftColumnQsoFraction = 0.55f
 
 /**
  * Width of the decode list in the landscape split view: a compact row's 30-character message

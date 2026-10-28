@@ -182,16 +182,19 @@ private fun QsoSheetContent(
         )
         }// showStationInfo
 
-        // -- QSO sequence visualizer --
+        // -- QSO sequence visualizer -- (not during a QSO in landscape: the docked
+        // QSO panel already shows the exchange and TX steps; fork)
         val liveQsoIsThisCallsign =
             isActivated && toCallsign?.callsign?.equals(callsign, ignoreCase = true) == true
-        QsoSequenceVisualizer(
-            callsign = callsign,
-            message = message,
-            isLiveQso = liveQsoIsThisCallsign,
-            liveFunctionOrder = txFunctionOrder ?: 6,
-            isTransmitting = isTransmitting,
-        )
+        if (!(isActivated && landscape)) {
+            QsoSequenceVisualizer(
+                callsign = callsign,
+                message = message,
+                isLiveQso = liveQsoIsThisCallsign,
+                liveFunctionOrder = txFunctionOrder ?: 6,
+                isTransmitting = isTransmitting,
+            )
+        }
 
         // -- Current TX banner: always shows what's queued to transmit next --
         CurrentTxBanner(

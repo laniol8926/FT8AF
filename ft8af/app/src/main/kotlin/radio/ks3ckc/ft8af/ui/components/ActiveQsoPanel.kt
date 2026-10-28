@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -259,6 +260,8 @@ fun ActiveQsoPanel(
     // Landscape and docked (not floating over the Waterfall tab): put a waterfall
     // in the panel's otherwise empty right side.
     sideWaterfall: Boolean = false,
+    // Docked under the decode list in the landscape split view (fork).
+    inLeftColumn: Boolean = false,
 ) {
     val toCallsign by mainViewModel.ft8TransmitSignal.mutableToCallsign.observeAsState()
     val isActivated by mainViewModel.ft8TransmitSignal.mutableIsActivated.observeAsState(false)
@@ -407,15 +410,20 @@ fun ActiveQsoPanel(
         sent = sentReportOrNull(mainViewModel.ft8TransmitSignal.sentTargetReport),
     )
 
+    // Landscape split view, in a QSO: the panel owns the whole left column and the
+    // exchange list grows into it instead of capping at 160 dp (fork).
+    val fillColumn = inLeftColumn && hasTarget && isActivated
+    val fillModifier = if (fillColumn) Modifier.fillMaxHeight() else Modifier
     AnimatedVisibility(
         visible = expanded && (hasTarget || isActivated),
         enter = expandVertically(expandFrom = Alignment.Bottom),
         exit = shrinkVertically(shrinkTowards = Alignment.Bottom),
-        modifier = modifier,
+        modifier = modifier.then(fillModifier),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .then(fillModifier)
                 .background(BgSurface)
                 .drawBehind {
                     drawLine(
@@ -438,7 +446,7 @@ fun ActiveQsoPanel(
                 }
             },
           ) {
-          Column {
+          Column(modifier = fillModifier) {
             // Station header. When a sheet exists but the user has
             // minimized it, the header acts as the "reopen" affordance.
             StationHeader(
@@ -481,6 +489,7 @@ fun ActiveQsoPanel(
                 entries = qsoMessages,
                 transmittingMessage = transmittingMessage.orEmpty(),
                 isTransmitting = isTransmitting,
+                listModifier = if (fillColumn) Modifier.weight(1f) else Modifier.heightIn(max = 160.dp),
             )
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -535,14 +544,20 @@ private fun StationHeader(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.weight(1f, fill = false),
         ) {
-            Text(
-                text = "QSO",
-                color = TextFaint,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = GeistMonoFamily,
-                letterSpacing = 0.04.sp,
-            )
+            // The "QSO" tag goes in landscape (fork): the panel is obviously the QSO,
+            // and the narrower docked column needs the room so SWR/PWR don't wrap.
+            val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+            if (!landscape) {
+                Text(
+                    text = "QSO",
+                    color = TextFaint,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = GeistMonoFamily,
+                    letterSpacing = 0.04.sp,
+                )
+            }
             Text(
                 text = targetCallsign,
                 color = Accent,
@@ -594,7 +609,11 @@ private fun StationHeader(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            if (onClick != null) {
+            // Not in landscape (fork): the panel already is the QSO view there, and the
+            // room goes to SWR/PWR. Tapping the header still opens the sheet.
+            if (onClick != null && androidx.compose.ui.platform.LocalConfiguration.current.orientation !=
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
+            ) {
                 Text(
                     text = stringResource(R.string.qsopanel_tap_to_view),
                     color = Accent,
@@ -712,6 +731,9 @@ private fun MessageLog(
     entries: List<QsoLogEntry>,
     transmittingMessage: String,
     isTransmitting: Boolean,
+    // Height rule from the caller: capped normally, weight(1f) when the panel owns
+    // the whole left column (landscape QSO).
+    listModifier: Modifier = Modifier.heightIn(max = 160.dp),
 ) {
     val listState = rememberLazyListState()
 
@@ -729,9 +751,9 @@ private fun MessageLog(
             stringResource(R.string.qsopanel_waiting_messages)
         }
         Box(
-            modifier = Modifier
+            modifier = listModifier
                 .fillMaxWidth()
-                .height(40.dp),
+                .heightIn(min = 40.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -744,9 +766,8 @@ private fun MessageLog(
     } else {
         LazyColumn(
             state = listState,
-            modifier = Modifier
+            modifier = listModifier
                 .fillMaxWidth()
-                .heightIn(max = 160.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .background(BgApp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
