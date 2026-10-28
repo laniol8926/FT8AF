@@ -401,6 +401,10 @@ class ComposeMainActivity : AppCompatActivity() {
             override fun doOnAfterQueryConfig(keyName: String?, value: String?) {
                 mainViewModel.configIsLoaded = true
                 mainViewModel.mutableConfigLoaded.postValue(true)
+                // Saved receive-latency shift (fork): onto the RX timer before the
+                // first slot records, or that slot is measured unshifted and the
+                // estimator double-counts the delay.
+                mainViewModel.applySavedRxLatency()
                 fileLog("configLoaded: instructionSet=${GeneralVariables.instructionSet}, " +
                     "baudRate=${GeneralVariables.baudRate}, " +
                     "controlMode=${GeneralVariables.controlMode}, " +

@@ -197,6 +197,9 @@ public class MainViewModel extends ViewModel {
     // FT8SignalListener.setRxLatencyMs). Runs while GPS/NTP sets the clock.
     private final ClockSelfSync rxLatencySync = new ClockSelfSync();
     static final int RX_LATENCY_MAX_MS = 3000;
+    // Trigger jitter allowance when matching a slot's recorded shift (UtcTimer opens
+    // the slot within its tick window).
+    static final int RX_SHIFT_MATCH_MS = 300;
 
     /** Set (and persist) the receive-window shift; no-op if unchanged. */
     private void applyRxLatency(int ms, String why) {
@@ -206,6 +209,15 @@ public class MainViewModel extends ViewModel {
         ft8SignalListener.setRxLatencyMs(ms);
         databaseOpr.writeConfig("rxLatencyMs", String.valueOf(ms), null);
         fileLog("rxLatency: receive window shift " + old + " -> " + ms + " ms (" + why + ")");
+    }
+
+    /** Put the saved receive-latency shift on the RX timer (called once config loads). */
+    public void applySavedRxLatency() {
+        if (ft8SignalListener != null
+                && ft8SignalListener.getRxLatencyMs() != GeneralVariables.rxLatencyMs) {
+            ft8SignalListener.setRxLatencyMs(GeneralVariables.rxLatencyMs);
+            fileLog("rxLatency: restored saved shift " + GeneralVariables.rxLatencyMs + " ms");
+        }
     }
 
     // Robust, smoothed source for the DT figure the UI shows (clock-sync pill + Time Sync
@@ -817,8 +829,15 @@ public class MainViewModel extends ViewModel {
                             // audio latency: shift only the RX window by it. Same estimator
                             // (median, outlier rejection, confirmation), sign flipped: a
                             // late signal means record later.
-                            Integer neg = rxLatencySync.onSlot(utc, dtSamples,
-                                    -GeneralVariables.rxLatencyMs);
+                            // Only measure a slot recorded with the shift now in force:
+                            // its trigger time is boundary + shift. A slot recorded before
+                            // the saved shift was restored (first slot after launch) would
+                            // otherwise count the delay twice (890 -> 1810 -> 830 ms).
+                            long recordedShift = utc % GeneralVariables.currentMode().slotMillis;
+                            boolean sameShift = Math.abs(recordedShift - GeneralVariables.rxLatencyMs)
+                                    < RX_SHIFT_MATCH_MS;
+                            Integer neg = sameShift ? rxLatencySync.onSlot(utc, dtSamples,
+                                    -GeneralVariables.rxLatencyMs) : null;
                             if (neg != null) {
                                 applyRxLatency(Math.max(0, Math.min(RX_LATENCY_MAX_MS, -neg)),
                                         dtSamples.length + " decodes");
