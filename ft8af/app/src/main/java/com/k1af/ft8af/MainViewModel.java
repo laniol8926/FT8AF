@@ -1853,8 +1853,14 @@ public class MainViewModel extends ViewModel {
      */
     public boolean trySetTxFrequency(float hz) {
         if (ft8TransmitSignal != null && ft8TransmitSignal.isTransmitting()) {
-            ToastMessage.show(GeneralVariables.getStringFromResource(
-                    R.string.tx_freq_locked_while_transmitting));
+            // A real toast: ToastMessage only feeds the debug list, which the
+            // Compose UI doesn't show, so the operator saw nothing.
+            android.content.Context ctx = GeneralVariables.getMainContext();
+            if (ctx != null) {
+                new Handler(Looper.getMainLooper()).post(() -> android.widget.Toast.makeText(ctx,
+                        R.string.tx_freq_locked_while_transmitting,
+                        android.widget.Toast.LENGTH_SHORT).show());
+            }
             fileLog("TX freq change to " + Math.round(hz) + " Hz refused: transmitting");
             return false;
         }
