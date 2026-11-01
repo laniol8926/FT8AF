@@ -2433,6 +2433,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     ",max(q.synced_cloudlog) as synced_cloudlog\n" +
                     ",max(q.synced_qrz) as synced_qrz\n" +
                     ",max(q.synced_wrl) as synced_wrl\n" +
+                    // Reports for the logbook table view (fork); a grouped row shows one.
+                    ",max(q.rst_sent) as rst_sent\n" +
+                    ",max(q.rst_rcvd) as rst_rcvd\n" +
                     "from QSLTable q inner join QSLTable q2 ON q.id =q2.id \n" +
                     "where (q.[call] like ?)\n" +
                     filterStr +
@@ -2459,6 +2462,12 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     record.syncedQrz = idxQrz >= 0 && cursor.getInt(idxQrz) == 1;
                     int idxWrl = cursor.getColumnIndex("synced_wrl");
                     record.syncedWrl = idxWrl >= 0 && cursor.getInt(idxWrl) == 1;
+                    int idxRstS = cursor.getColumnIndex("rst_sent");
+                    int idxRstR = cursor.getColumnIndex("rst_rcvd");
+                    String rstS = idxRstS >= 0 ? cursor.getString(idxRstS) : null;
+                    String rstR = idxRstR >= 0 ? cursor.getString(idxRstR) : null;
+                    record.rstSent = rstS != null ? rstS : "";
+                    record.rstRcvd = rstR != null ? rstR : "";
                     record.setLastTime(cursor.getString(cursor.getColumnIndex("last_time")));
                     int idxTimeOn = cursor.getColumnIndex("last_time_on");
                     if (idxTimeOn >= 0) {

@@ -18,6 +18,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -1585,23 +1588,39 @@ private fun RecentTab(
                 )
             }
         } else {
+            // Landscape (fork): a spreadsheet-style table, one line per QSO under a
+            // header that stays put. Portrait keeps the cards.
+            val tableView = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+                android.content.res.Configuration.ORIENTATION_LANDSCAPE
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(if (tableView) 0.dp else 6.dp),
             ) {
+                if (tableView) {
+                    @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+                    stickyHeader { QsoTableHeader() }
+                }
                 items(
                     items = sortQsosByDateTimeDesc(filtered),
                     // Include id so an edit that changes other fields still maps to a stable key,
                     // and so two grouped rows with otherwise identical display fields don't collide.
                     key = { "${it.id}_${it.callsign}_${it.lastTime}_${it.band}" },
                 ) { record ->
-                    QsoRow(
-                        record = record,
-                        onEdit = { onEdit(record) },
-                        onDelete = { onDelete(record) },
-                    )
+                    if (tableView) {
+                        QsoTableRow(
+                            record = record,
+                            onEdit = { onEdit(record) },
+                            onDelete = { onDelete(record) },
+                        )
+                    } else {
+                        QsoRow(
+                            record = record,
+                            onEdit = { onEdit(record) },
+                            onDelete = { onDelete(record) },
+                        )
+                    }
                 }
 
                 // Bottom spacer for safe area
@@ -1852,6 +1871,179 @@ private fun QsoRow(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Landscape table view (fork): spreadsheet-style columns
+// ---------------------------------------------------------------------------
+
+/** Column weights of the table view, shared by the header and every row. */
+// Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status.
+// Headings are stacked on two lines so the narrow columns stay narrow.
+private val QsoTableWeights =
+    listOf(1.05f, 0.62f, 1.15f, 0.62f, 1.1f, 0.78f, 0.58f, 0.55f, 0.55f, 0.95f)
+private val QsoTableMenuWidth = 36.dp
+
+@Composable
+private fun QsoTableHeader() {
+    val titles = listOf(
+        stringResource(R.string.log_col_qso_date),
+        stringResource(R.string.log_col_qso_time),
+        stringResource(R.string.log_col_callsign),
+        stringResource(R.string.log_col_grid),
+        stringResource(R.string.log_col_state),
+        stringResource(R.string.log_col_frequency),
+        stringResource(R.string.log_col_mode),
+        stringResource(R.string.log_col_rst_sent),
+        stringResource(R.string.log_col_rst_rcvd),
+        stringResource(R.string.log_col_status),
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(BgSurface3)
+            .border(1.dp, Border)
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        titles.forEachIndexed { i, title ->
+            QsoTableCell(
+                text = title,
+                weight = QsoTableWeights[i],
+                color = TextMuted,
+                bold = true,
+                maxLines = 2,
+            )
+        }
+        Spacer(modifier = Modifier.width(QsoTableMenuWidth))
+    }
+}
+
+@Composable
+private fun QsoTableRow(
+    record: QSLCallsignRecord,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val status = when {
+        record.isLotW_QSL -> stringResource(R.string.log_status_confirmed) to StatusConfirmed
+        record.isQSL -> stringResource(R.string.log_status_worked) to Signal
+        else -> "—" to TextFaint
+    }
+    val time = formatQsoTime(record.timeOn ?: "")
+    val grid = record.grid ?: ""
+    // US state from the grid (as the cards show it); otherwise the DXCC entity.
+    val usState = UsStateLookup.stateFromGrid(LocalContext.current, grid)
+    val place = if (!usState.isNullOrBlank()) usState else (record.dxccStr ?: "")
+    val cells = listOf(
+        formatQsoDateIso(record.lastTime ?: "") to TextPrimary,
+        (if (time == "--:--") "" else time) to TextPrimary,
+        (record.callsign ?: "") to Accent,
+        grid to Signal,
+        place to TextMuted,
+        parseFreqMhz(record.band ?: "").removeSuffix("MHz").trim() to TextPrimary,
+        (record.mode ?: "") to TextPrimary,
+        record.rstSent to TextPrimary,
+        record.rstRcvd to TextPrimary,
+        status,
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(0.5.dp, Border)
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        cells.forEachIndexed { i, (text, color) ->
+            QsoTableCell(
+                text = text,
+                weight = QsoTableWeights[i],
+                color = color,
+                bold = i == 2,
+            )
+        }
+        Box(modifier = Modifier.width(QsoTableMenuWidth), contentAlignment = Alignment.Center) {
+            QsoActionsMenu(onEdit = onEdit, onDelete = onDelete)
+        }
+    }
+}
+
+@Composable
+private fun RowScope.QsoTableCell(
+    text: String,
+    weight: Float,
+    color: Color,
+    bold: Boolean,
+    maxLines: Int = 1,
+) {
+    Box(
+        modifier = Modifier
+            .weight(weight)
+            .fillMaxHeight()
+            .border(0.5.dp, Border)
+            .padding(horizontal = 6.dp, vertical = 7.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = text,
+            color = color,
+            fontSize = 12.sp,
+            fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
+            fontFamily = GeistMonoFamily,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** ⋮ menu with Edit / Delete, shared by the card and table rows. */
+@Composable
+private fun QsoActionsMenu(onEdit: () -> Unit, onDelete: () -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Box {
+        IconButton(
+            onClick = { menuOpen = true },
+            modifier = Modifier.size(32.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.MoreVert,
+                contentDescription = stringResource(R.string.log_cd_qso_actions),
+                tint = TextMuted,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.log_action_edit), color = TextPrimary) },
+                leadingIcon = {
+                    Icon(imageVector = Icons.Filled.Edit, contentDescription = null, tint = Accent)
+                },
+                onClick = {
+                    menuOpen = false
+                    onEdit()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.log_action_delete), color = StatusBad) },
+                leadingIcon = {
+                    Icon(imageVector = Icons.Filled.Delete, contentDescription = null, tint = StatusBad)
+                },
+                onClick = {
+                    menuOpen = false
+                    onDelete()
+                },
+            )
+        }
+    }
+}
+
+/** "20261028" -> "2026-10-28" for the table view; "" when malformed. */
+internal fun formatQsoDateIso(qsoDate: String): String {
+    if (qsoDate.length != 8 || qsoDate.any { !it.isDigit() }) return ""
+    return "${qsoDate.substring(0, 4)}-${qsoDate.substring(4, 6)}-${qsoDate.substring(6, 8)}"
 }
 
 // ---------------------------------------------------------------------------
