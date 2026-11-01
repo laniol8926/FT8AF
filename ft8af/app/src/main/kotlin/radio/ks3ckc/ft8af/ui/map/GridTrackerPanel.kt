@@ -43,6 +43,9 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
 
     DisposableEffect(lifecycleOwner) {
         tracker.initMap(GeneralVariables.getMyMaidenhead4Grid(), true)
+        // Label the QSO lines too, not only CQs (GridOsmMapView defaults QSX labels off;
+        // the full-screen tracker turns them on from its own settings bar).
+        tracker.setShowQSX(true)
 
         // Grids heard, then worked / confirmed from the log, as the activity seeds them.
         for (grid in GeneralVariables.callsignAndGrids.values) {
