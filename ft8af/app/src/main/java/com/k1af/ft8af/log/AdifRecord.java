@@ -50,6 +50,12 @@ public final class AdifRecord {
     public static final String APP_SYNCED_CLOUDLOG = "APP_FT8AF_SYNCED_CLOUDLOG";
     public static final String APP_SYNCED_WRL = "APP_FT8AF_SYNCED_WRL";
 
+    /**
+     * Fork: paper card received. FT8AF writes QSL_RCVD for LoTW (as it always has), so the
+     * card flag needs its own field to survive an export/re-import.
+     */
+    public static final String APP_QSL_RCVD_CARD = "APP_FT8AF_QSL_RCVD_CARD";
+
     /** Legacy, non-conformant name for {@link #APP_QSL_MANUAL}. Read-only: never emitted. */
     public static final String LEGACY_QSL_MANUAL = "QSL_MANUAL";
 
@@ -80,6 +86,8 @@ public final class AdifRecord {
     private boolean syncedQrz;
     private boolean syncedCloudlog;
     private boolean syncedWrl;
+    // lotw_sent, eqsl_sent, eqsl_rcvd, qsl_sent, qsl_rcvd (fork)
+    private boolean[] qslFlags;
     private String comment;
 
     public AdifRecord call(String v) { this.call = v; return this; }
@@ -131,6 +139,12 @@ public final class AdifRecord {
 
     /** Worked station's ADIF COUNTRY (DXCC entity name). */
     public AdifRecord country(String v) { this.country = v; return this; }
+
+    /**
+     * QSL sent/received flags in {@code DatabaseOpr.QSL_FLAG_COLUMNS} order (LoTW sent,
+     * eQSL sent, eQSL received, card sent, card received). Only the set ones are emitted.
+     */
+    public AdifRecord qslFlags(boolean[] flags) { this.qslFlags = flags; return this; }
 
     /** Which online logs already hold this QSO; only the true ones are emitted. */
     public AdifRecord synced(boolean qrz, boolean cloudlog, boolean wrl) {
@@ -197,6 +211,16 @@ public final class AdifRecord {
         if (syncedQrz) appendField(sb, "QRZCOM_QSO_UPLOAD_STATUS", "Y");
         if (syncedCloudlog) appendField(sb, APP_SYNCED_CLOUDLOG, "Y");
         if (syncedWrl) appendField(sb, APP_SYNCED_WRL, "Y");
+        if (qslFlags != null && qslFlags.length == 5) {
+            // LOTW_QSL_RCVD alongside the historical QSL_RCVD, so CQRLOG and other loggers
+            // that read QSL_RCVD as the paper card still see the LoTW confirmation.
+            if (lotwQsl && !swl) appendField(sb, "LOTW_QSL_RCVD", "Y");
+            if (qslFlags[0]) appendField(sb, "LOTW_QSL_SENT", "Y");
+            if (qslFlags[1]) appendField(sb, "EQSL_QSL_SENT", "Y");
+            if (qslFlags[2]) appendField(sb, "EQSL_QSL_RCVD", "Y");
+            if (qslFlags[3]) appendField(sb, "QSL_SENT", "Y");
+            if (qslFlags[4]) appendField(sb, APP_QSL_RCVD_CARD, "Y");
+        }
         appendIfNotEmpty(sb, "comment", comment);
         sb.append("<eor>\n");
         return sb.toString();

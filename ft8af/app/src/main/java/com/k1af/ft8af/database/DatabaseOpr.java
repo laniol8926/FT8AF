@@ -82,8 +82,14 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * v22 adds {@code QSLTable.state} (the worked station's ADIF STATE, from imports).
      * v23 adds {@code QSLTable.tx_pwr} (ADIF TX_PWR in watts).
      * v24 adds {@code QSLTable.country} (the worked station's ADIF COUNTRY, from imports; fork).
+     * v25 adds {@code QSLTable.lotw_sent, eqsl_sent, eqsl_rcvd, qsl_sent, qsl_rcvd} (QSL
+     * sent/received flags from a CQRLOG-style ADIF; LoTW received stays isLotW_QSL; fork).
      */
-    static final int SCHEMA_VERSION = 24;
+    static final int SCHEMA_VERSION = 25;
+
+    /** Fork v25 QSL flag columns, in the order {@link QSLRecord#qslFlags()} returns them. */
+    public static final String[] QSL_FLAG_COLUMNS =
+            {"lotw_sent", "eqsl_sent", "eqsl_rcvd", "qsl_sent", "qsl_rcvd"};
 
     public static synchronized DatabaseOpr getInstance(@Nullable Context context, @Nullable String databaseName) {
         if (instance == null) {
@@ -310,6 +316,10 @@ public class DatabaseOpr extends SQLiteOpenHelper {
             // State column for non-US contacts (fork).
             alterTable(sqLiteDatabase, "QSLTable", "country"
                     , "country TEXT");
+            // QSL sent/received per service, from imports (fork v25).
+            for (String c : QSL_FLAG_COLUMNS) {
+                alterTable(sqLiteDatabase, "QSLTable", c, c + " INTEGER DEFAULT 0");
+            }
 
         } else {
             sqLiteDatabase.execSQL("CREATE TABLE QSLTable (\n" +
@@ -342,7 +352,12 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     "sig_info TEXT,\n" +//POTA: worked station's park ref
                     "state TEXT,\n" +//Worked station's ADIF STATE (imports)
                     "tx_pwr TEXT,\n" +//ADIF TX_PWR, watts
-                    "country TEXT)");//Worked station's ADIF COUNTRY (imports)
+                    "country TEXT,\n" +//Worked station's ADIF COUNTRY (imports)
+                    "lotw_sent INTEGER DEFAULT 0,\n" +//QSL flags from imports (fork v25)
+                    "eqsl_sent INTEGER DEFAULT 0,\n" +
+                    "eqsl_rcvd INTEGER DEFAULT 0,\n" +
+                    "qsl_sent INTEGER DEFAULT 0,\n" +
+                    "qsl_rcvd INTEGER DEFAULT 0)");
         }
 
 
@@ -1405,11 +1420,16 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * synced_qrz = 0 would otherwise queue every row for QRZ).
      */
     private static void markImportedUploads(SQLiteDatabase db, QSLRecord record) {
-        if (!record.uploadedQrz && !record.uploadedCloudlog && !record.uploadedWrl) return;
         StringBuilder set = new StringBuilder();
         if (record.uploadedQrz) set.append("synced_qrz=1");
         if (record.uploadedCloudlog) set.append(set.length() > 0 ? "," : "").append("synced_cloudlog=1");
         if (record.uploadedWrl) set.append(set.length() > 0 ? "," : "").append("synced_wrl=1");
+        // QSL sent/received flags (v25): only ever set by an import, never cleared.
+        boolean[] qsl = record.qslFlags();
+        for (int i = 0; i < qsl.length; i++) {
+            if (qsl[i]) set.append(set.length() > 0 ? "," : "").append(QSL_FLAG_COLUMNS[i]).append("=1");
+        }
+        if (set.length() == 0) return;
         db.execSQL("UPDATE QSLTable SET " + set +
                         " WHERE (call=?) and (qso_date=?) and (time_on=?) and (mode=?)"
                 , new Object[]{record.getToCallsign(), record.getQso_date()
@@ -2501,6 +2521,10 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     ",max(q.rst_rcvd) as rst_rcvd\n" +
                     ",max(q.country) as country\n" +
                     ",max(q.state) as adif_state\n" +
+                    // QSL sent/received flags for the table's QSL column (fork v25).
+                    ",max(q.lotw_sent) as lotw_sent,max(q.eqsl_sent) as eqsl_sent" +
+                    ",max(q.eqsl_rcvd) as eqsl_rcvd,max(q.qsl_sent) as qsl_sent" +
+                    ",max(q.qsl_rcvd) as qsl_rcvd\n" +
                     "from QSLTable q inner join QSLTable q2 ON q.id =q2.id \n" +
                     "where (q.[call] like ?)\n" +
                     filterStr +
@@ -2540,6 +2564,11 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     int idxAdifState = cursor.getColumnIndex("adif_state");
                     String adifState = idxAdifState >= 0 ? cursor.getString(idxAdifState) : null;
                     record.adifState = adifState != null ? adifState.trim() : "";
+                    record.lotwSent = colInt(cursor, "lotw_sent") == 1;
+                    record.eqslSent = colInt(cursor, "eqsl_sent") == 1;
+                    record.eqslRcvd = colInt(cursor, "eqsl_rcvd") == 1;
+                    record.qslSent = colInt(cursor, "qsl_sent") == 1;
+                    record.qslRcvd = colInt(cursor, "qsl_rcvd") == 1;
                     record.setLastTime(cursor.getString(cursor.getColumnIndex("last_time")));
                     int idxTimeOn = cursor.getColumnIndex("last_time_on");
                     if (idxTimeOn >= 0) {

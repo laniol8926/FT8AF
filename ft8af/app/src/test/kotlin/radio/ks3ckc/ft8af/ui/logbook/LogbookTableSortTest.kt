@@ -87,4 +87,22 @@ class LogbookTableSortTest {
     fun place_nothingLogged_isNullForLookup() {
         assertThat(logbookPlace(null, "", null)).isNull()
     }
+
+    @Test
+    fun qslMarks_receivedBeatsSent() {
+        val r = rec("K9LZJ", "20150909")
+        r.isLotW_QSL = true
+        r.lotwSent = true
+        r.eqslSent = true
+        assertThat(qslMarks(r)).containsExactly("L" to '✓', "E" to '↑', "P" to '·').inOrder()
+    }
+
+    @Test
+    fun sortByQsl_ranksReceivedOverSent() {
+        val none = rec("A1A", "20260101")
+        val sent = rec("B1B", "20260101").apply { lotwSent = true; eqslSent = true }
+        val rcvd = rec("C1C", "20260101").apply { isLotW_QSL = true; qslRcvd = true }
+        val sorted = sortQsoTable(listOf(sent, rcvd, none), QSO_COL_QSL, ascending = false) { null }
+        assertThat(sorted.map { it.callsign }).containsExactly("C1C", "B1B", "A1A").inOrder()
+    }
 }

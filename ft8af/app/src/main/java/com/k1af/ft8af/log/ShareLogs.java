@@ -17,6 +17,7 @@ import androidx.core.content.FileProvider;
 import com.k1af.ft8af.GeneralVariables;
 import com.k1af.ft8af.R;
 import com.k1af.ft8af.callsign.CallsignInfo;
+import com.k1af.ft8af.database.DatabaseOpr;
 import com.k1af.ft8af.ui.ToastMessage;
 
 import java.io.File;
@@ -361,6 +362,11 @@ public class ShareLogs {
                     .synced(colInt(cursor, "synced_qrz") == 1,
                             colInt(cursor, "synced_cloudlog") == 1,
                             colInt(cursor, "synced_wrl") == 1);
+            boolean[] qsl = new boolean[DatabaseOpr.QSL_FLAG_COLUMNS.length];
+            for (int i = 0; i < qsl.length; i++) {
+                qsl[i] = colInt(cursor, DatabaseOpr.QSL_FLAG_COLUMNS[i]) == 1;
+            }
+            record.qslFlags(qsl);
         }
         return record;
     }

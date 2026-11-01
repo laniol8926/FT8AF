@@ -22,6 +22,60 @@ import java.util.HashMap;
 public class QSLRecordTest {
 
     @Test
+    public void adifImport_cqrlogQslFlags() {
+        // CQRLOG / QRZ style: LOTW_QSL_RCVD present, so QSL_RCVD is the paper card.
+        HashMap<String, String> map = new HashMap<>();
+        map.put("CALL", "K9LZJ");
+        map.put("COMMENT", "imported");
+        map.put("MODE", "FT8");
+        map.put("LOTW_QSL_SENT", "Y");
+        map.put("LOTW_QSL_RCVD", "Y");
+        map.put("EQSL_QSL_SENT", "Y");
+        map.put("EQSL_QSL_RCVD", "N");
+        map.put("QSL_SENT", "N");
+        map.put("QSL_RCVD", "Y");
+        QSLRecord r = new QSLRecord(map);
+        assertThat(r.isLotW_QSL).isTrue();
+        assertThat(r.qslFlags()).isEqualTo(new boolean[]{true, true, false, false, true});
+
+        // Paper card received but LoTW not: the LoTW confirmation must stay off.
+        map.put("LOTW_QSL_RCVD", "N");
+        QSLRecord paperOnly = new QSLRecord(map);
+        assertThat(paperOnly.isLotW_QSL).isFalse();
+        assertThat(paperOnly.qslRcvd).isTrue();
+    }
+
+    @Test
+    public void adifImport_lotwReportQslRcvdStaysLotw() {
+        // LoTW's own report has only QSL_RCVD: that is the LoTW confirmation, not a card.
+        HashMap<String, String> map = new HashMap<>();
+        map.put("CALL", "K9LZJ");
+        map.put("COMMENT", "imported");
+        map.put("MODE", "FT8");
+        map.put("QSL_RCVD", "Y");
+        QSLRecord r = new QSLRecord(map);
+        assertThat(r.isLotW_QSL).isTrue();
+        assertThat(r.qslRcvd).isFalse();
+    }
+
+    @Test
+    public void adifImport_ft8afExportCardFlagRoundTrips() {
+        // FT8AF's own export writes QSL_RCVD for LoTW and the card in an APP_ field.
+        HashMap<String, String> map = new HashMap<>();
+        map.put("CALL", "K9LZJ");
+        map.put("COMMENT", "imported");
+        map.put("MODE", "FT8");
+        map.put("QSL_RCVD", "Y");
+        map.put("LOTW_QSL_RCVD", "Y");
+        map.put(AdifRecord.APP_QSL_MANUAL, "N");
+        QSLRecord noCard = new QSLRecord(map);
+        assertThat(noCard.isLotW_QSL).isTrue();
+        assertThat(noCard.qslRcvd).isFalse();
+        map.put(AdifRecord.APP_QSL_RCVD_CARD, "Y");
+        assertThat(new QSLRecord(map).qslRcvd).isTrue();
+    }
+
+    @Test
     public void adifImport_readsOnlineLogUploadStatus() {
         HashMap<String, String> map = new HashMap<>();
         map.put("CALL", "K9LZJ");

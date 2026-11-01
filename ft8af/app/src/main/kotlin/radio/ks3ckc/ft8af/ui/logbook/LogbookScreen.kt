@@ -66,7 +66,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.window.Dialog
@@ -2013,11 +2016,11 @@ private fun QsoRow(
 private val LogHeaderStatusWidth = 320.dp
 
 /** Column weights of the table view, shared by the header and every row. */
-// Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status.
+// Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status, QSL.
 // Headings are stacked on two lines so the narrow columns stay narrow.
 // Status is wide enough for the CONFIRMED pill plus the QRZ tag side by side.
 private val QsoTableWeights =
-    listOf(0.95f, 0.62f, 1.0f, 0.72f, 0.8f, 0.78f, 0.85f, 0.55f, 0.55f, 1.25f)
+    listOf(0.9f, 0.62f, 1.0f, 0.66f, 0.75f, 0.72f, 0.85f, 0.55f, 0.55f, 1.25f, 0.62f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
@@ -2037,6 +2040,7 @@ private fun QsoTableHeader(
         stringResource(R.string.log_col_rst_sent),
         stringResource(R.string.log_col_rst_rcvd),
         stringResource(R.string.log_col_status),
+        "QSL",
     )
     Row(
         modifier = Modifier
@@ -2093,6 +2097,20 @@ internal const val QSO_COL_MODE = 6
 internal const val QSO_COL_RST_SENT = 7
 internal const val QSO_COL_RST_RCVD = 8
 internal const val QSO_COL_STATUS = 9
+internal const val QSO_COL_QSL = 10
+
+/**
+ * QSL column marks (fork): LoTW, eQSL, Paper, each "✓" received, "↑" sent, "·" neither.
+ * LoTW received is the existing isLotW_QSL confirmation.
+ */
+internal fun qslMarks(r: QSLCallsignRecord): List<Pair<String, Char>> {
+    fun mark(rcvd: Boolean, sent: Boolean) = if (rcvd) '✓' else if (sent) '↑' else '·'
+    return listOf(
+        "L" to mark(r.isLotW_QSL, r.lotwSent),
+        "E" to mark(r.eqslRcvd, r.eqslSent),
+        "P" to mark(r.qslRcvd, r.qslSent),
+    )
+}
 
 /**
  * Sort the table view by [column] (one of the QSO_COL_ constants). Date and time
@@ -2128,6 +2146,10 @@ internal fun sortQsoTable(
         QSO_COL_STATUS -> { r ->
             (if (r.isLotW_QSL) 2.0 else if (r.isQSL) 1.0 else 0.0) +
                 (if (r.syncedQrz || r.syncedCloudlog || r.syncedWrl) 0.5 else 0.0)
+        }
+        // Received counts double, sent single: L✓E✓P✓ sorts above L✓E↑P·.
+        QSO_COL_QSL -> { r ->
+            qslMarks(r).sumOf { (_, m) -> if (m == '✓') 2.0 else if (m == '↑') 1.0 else 0.0 }
         }
         else -> null
     }
@@ -2243,6 +2265,16 @@ private fun QsoTableRow(
                 )
             }
         }
+        Box(
+            modifier = Modifier
+                .weight(QsoTableWeights[cells.size + 1])
+                .fillMaxHeight()
+                .border(0.5.dp, Border)
+                .padding(horizontal = 4.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            QslMarksText(record)
+        }
         Box(modifier = Modifier.width(QsoTableMenuWidth), contentAlignment = Alignment.Center) {
             QsoActionsMenu(onEdit = onEdit, onDelete = onDelete)
         }
@@ -2335,6 +2367,30 @@ internal fun formatQsoDateIso(qsoDate: String): String {
 // Sync-to-service chips ("CL" for Cloudlog/Wavelog/Nextlog, "QRZ" for QRZ,
 // "WRL" for World Radio League)
 // ---------------------------------------------------------------------------
+
+/** "L✓ E↑ P·": received in the confirmed colour, sent in the upload colour, neither dim. */
+@Composable
+private fun QslMarksText(record: QSLCallsignRecord) {
+    val text = buildAnnotatedString {
+        qslMarks(record).forEachIndexed { i, (service, mark) ->
+            if (i > 0) append(" ")
+            val color = when (mark) {
+                '✓' -> StatusConfirmed
+                '↑' -> Signal
+                else -> TextFaint
+            }
+            withStyle(SpanStyle(color = color)) { append("$service$mark") }
+        }
+    }
+    Text(
+        text = text,
+        fontSize = 11.sp,
+        fontFamily = GeistMonoFamily,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        softWrap = false,
+    )
+}
 
 @Composable
 private fun SyncChips(

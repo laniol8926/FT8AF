@@ -168,6 +168,22 @@ public class AdifRecordTest {
     }
 
     @Test
+    public void qslFlags_emittedOnlyWhenSet() {
+        String out = new AdifRecord().call("W1AW").lotwQsl(true)
+                .qslFlags(new boolean[]{true, false, true, false, true}).build();
+        assertThat(out).contains("<QSL_RCVD:1>Y ");
+        assertThat(out).contains("<LOTW_QSL_RCVD:1>Y ");
+        assertThat(out).contains("<LOTW_QSL_SENT:1>Y ");
+        assertThat(out).doesNotContain("EQSL_QSL_SENT");
+        assertThat(out).contains("<EQSL_QSL_RCVD:1>Y ");
+        assertThat(out).doesNotContain("<QSL_SENT");
+        assertThat(out).contains("<" + AdifRecord.APP_QSL_RCVD_CARD + ":1>Y ");
+        // Without flags (live log append) nothing new is written.
+        assertThat(new AdifRecord().call("W1AW").lotwQsl(true).build())
+                .doesNotContain("LOTW_QSL_RCVD");
+    }
+
+    @Test
     public void syncedFlags_emittedOnlyWhenTrue() {
         String out = new AdifRecord().call("W1AW").synced(true, false, true).build();
         assertThat(out).contains("<QRZCOM_QSO_UPLOAD_STATUS:1>Y ");

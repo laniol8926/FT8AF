@@ -58,6 +58,17 @@ public class QSLRecord {
     public boolean uploadedQrz = false;
     public boolean uploadedCloudlog = false;
     public boolean uploadedWrl = false;
+    // QSL sent/received flags from the import (fork; LoTW received is isLotW_QSL).
+    public boolean lotwSent = false;
+    public boolean eqslSent = false;
+    public boolean eqslRcvd = false;
+    public boolean qslSent = false;
+    public boolean qslRcvd = false;
+
+    /** The QSL flags in {@code DatabaseOpr.QSL_FLAG_COLUMNS} order. */
+    public boolean[] qslFlags() {
+        return new boolean[]{lotwSent, eqslSent, eqslRcvd, qslSent, qslRcvd};
+    }
     // ADIF TX_PWR in watts, e.g. "4.5". In-app QSOs take the operator identity's power
     // (which follows the QMX's measured output); imports keep the logged value. Null if none.
     private String txPwr;
@@ -202,6 +213,19 @@ public class QSLRecord {
         }
         if (map.containsKey("LOTW_QSL_RCVD")) {//QSO confirmation; present in Log32.
             isLotW_QSL = Objects.requireNonNull(map.get("LOTW_QSL_RCVD")).equalsIgnoreCase("Y");
+        }
+        // Fork: QSL sent/received per service (CQRLOG, QRZ and most loggers export these).
+        lotwSent = isY(map.get("LOTW_QSL_SENT"));
+        eqslSent = isY(map.get("EQSL_QSL_SENT"));
+        eqslRcvd = isY(map.get("EQSL_QSL_RCVD"));
+        qslSent = isY(map.get("QSL_SENT"));
+        // QSL_RCVD is the paper card when the record also carries LOTW_QSL_RCVD (above it
+        // stands in for LoTW, as in LoTW's own report). FT8AF's own export keeps writing
+        // QSL_RCVD for LoTW, so its card flag travels in APP_FT8AF_QSL_RCVD_CARD instead.
+        if (map.containsKey(AdifRecord.APP_QSL_MANUAL) || map.containsKey(AdifRecord.LEGACY_QSL_MANUAL)) {
+            qslRcvd = isY(map.get(AdifRecord.APP_QSL_RCVD_CARD));
+        } else if (map.containsKey("LOTW_QSL_RCVD")) {
+            qslRcvd = isY(map.get("QSL_RCVD"));
         }
         // Manual QSO confirmation. We now export this as APP_FT8AF_QSL_MANUAL (ADIF has
         // no QSL_MANUAL field), but files written by older FT8AF builds — and by other
@@ -473,6 +497,10 @@ public class QSLRecord {
 
     private static String trimmed(String s) {
         return s == null ? "" : s.trim();
+    }
+
+    private static boolean isY(String s) {
+        return "Y".equalsIgnoreCase(trimmed(s));
     }
 
     /** The worked station's ADIF COUNTRY as logged, or null. */

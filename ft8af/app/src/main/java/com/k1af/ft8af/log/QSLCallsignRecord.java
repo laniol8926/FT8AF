@@ -29,6 +29,12 @@ public class QSLCallsignRecord {
     public String rstSent = "";//Report we sent (fork: logbook table view)
     public String rstRcvd = "";//Report we received (fork: logbook table view)
     public String adifState = "";//Logged ADIF STATE (imports), "" if none (fork: logbook table view)
+    // QSL sent/received (fork: logbook table QSL column). LoTW received is isLotW_QSL.
+    public boolean lotwSent = false;
+    public boolean eqslSent = false;
+    public boolean eqslRcvd = false;
+    public boolean qslSent = false;
+    public boolean qslRcvd = false;
 
     public String getCallsign() {
         return callsign;
