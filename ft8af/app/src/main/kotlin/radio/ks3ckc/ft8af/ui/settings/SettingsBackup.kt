@@ -42,7 +42,7 @@ object SettingsBackup {
      * custom band dials and the theme. Saved in the backup's optional "prefs" section.
      * Older builds read only "config", so the format version doesn't change.
      */
-    val BACKED_UP_PREFS: List<String> = listOf("ft8af_custom_bands", "ft8af_theme")
+    val BACKED_UP_PREFS: List<String> = listOf("ft8af_custom_bands", "ft8af_theme", "ft8af_map")
 
     /** Metadata + config restored from a backup file. */
     data class ParsedBackup(

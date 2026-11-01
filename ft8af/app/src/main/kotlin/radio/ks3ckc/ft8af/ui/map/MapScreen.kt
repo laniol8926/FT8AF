@@ -261,6 +261,9 @@ fun MapScreen(
     var workedLayer by rememberSaveable { mutableStateOf(false) }
     // Map-options menu (projection + gray line) anchored to the header gear.
     var mapMenuOpen by remember { mutableStateOf(false) }
+    // Fork: the map card shows the grid tracker instead (remembered across launches).
+    val mapContext = LocalContext.current
+    var trackerMap by remember { mutableStateOf(loadTrackerMap(mapContext)) }
 
     // Gray-line (day/night terminator) overlay. On by default — it's a passive,
     // translucent shade that HF operators use to spot enhanced-propagation paths.
@@ -530,7 +533,28 @@ fun MapScreen(
             } else {
                 null
             },
+            trackerOn = trackerMap,
+            onTrackerToggle = {
+                trackerMap = !trackerMap
+                saveTrackerMap(mapContext, trackerMap)
+            },
         )
+
+        // Fork: the FT8TW-style grid tracker in the same card, in place of the map below.
+        if (trackerMap) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, end = 14.dp, bottom = 14.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(BgSurface)
+                    .border(1.dp, Color(0x1F94A3B8), RoundedCornerShape(18.dp)),
+            ) {
+                GridTrackerPanel(mainViewModel, Modifier.fillMaxSize())
+            }
+            return@Column
+        }
 
         if (!compactHeader) {
             layerChips(
@@ -747,6 +771,9 @@ private fun MapHeader(
     // Shown instead of the "Map" title and "N decoded · N worked" line, which the landscape
     // Decode split view's map panel leaves out (it carries the layer chips here instead).
     leading: (@Composable () -> Unit)? = null,
+    // Fork: the Tracker button swaps the card between this map and the grid tracker.
+    trackerOn: Boolean = false,
+    onTrackerToggle: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -779,8 +806,8 @@ private fun MapHeader(
             }
         }
         val context = LocalContext.current
-        // Fork: opens the FT8CN/FT8TW-style grid tracker (osmdroid map, QSO lines),
-        // which the app has always shipped but the Compose UI never opened.
+        // Fork: opens the FT8CN/FT8TW-style grid tracker full screen (its own activity,
+        // with the message list); the Tracker button shows the same map in this card.
         val openGridTracker = {
             context.startActivity(
                 android.content.Intent(context, com.k1af.ft8af.grid_tracker.GridTrackerMainActivity::class.java),
@@ -791,13 +818,18 @@ private fun MapHeader(
             modifier = Modifier
                 .height(if (leading != null) MapCompactButtonHeight else 44.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(BgSurface2)
-                .border(1.dp, BorderSubtle, RoundedCornerShape(14.dp))
-                .clickable(onClick = openGridTracker)
+                .background(if (trackerOn) AccentSoft else BgSurface2)
+                .border(1.dp, if (trackerOn) Accent else BorderSubtle, RoundedCornerShape(14.dp))
+                .clickable(onClick = onTrackerToggle)
                 .padding(horizontal = 12.dp),
             contentAlignment = Alignment.Center,
         ) {
-            Text(text = "Tracker", color = TextMuted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = "Tracker",
+                color = if (trackerOn) Accent else TextMuted,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
         Spacer(modifier = Modifier.width(8.dp))
         Box {
@@ -836,7 +868,7 @@ private fun MapHeader(
                     onClick = { onGrayLineToggle(!grayLineEnabled) },
                 )
                 DropdownMenuItem(
-                    text = { Text("Grid tracker map (FT8TW style)") },
+                    text = { Text("Grid tracker full screen") },
                     onClick = {
                         onMenuDismiss()
                         openGridTracker()
