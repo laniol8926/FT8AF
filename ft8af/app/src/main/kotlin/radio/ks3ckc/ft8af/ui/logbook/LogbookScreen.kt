@@ -1968,9 +1968,18 @@ private fun QsoTableRow(
                 .fillMaxHeight()
                 .border(0.5.dp, Border)
                 .padding(horizontal = 4.dp),
-            contentAlignment = Alignment.Center,
+            contentAlignment = Alignment.CenterStart,
         ) {
-            if (status != null) StatusPill(status = status, compact = true)
+            // Status pill plus the upload tags (QRZ / CL / WRL), as on the cards.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (status != null) StatusPill(status = status, compact = true)
+                SyncChips(
+                    cloudlog = record.syncedCloudlog,
+                    qrz = record.syncedQrz,
+                    wrl = record.syncedWrl,
+                    cloudlogLabel = cloudlogFamilyLabel(GeneralVariables.cloudlogServerAddress),
+                )
+            }
         }
         Box(modifier = Modifier.width(QsoTableMenuWidth), contentAlignment = Alignment.Center) {
             QsoActionsMenu(onEdit = onEdit, onDelete = onDelete)
