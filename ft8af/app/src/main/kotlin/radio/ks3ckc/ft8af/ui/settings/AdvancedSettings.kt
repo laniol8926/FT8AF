@@ -37,6 +37,7 @@ import com.k1af.ft8af.GeneralVariables
 import com.k1af.ft8af.MainViewModel
 import com.k1af.ft8af.R
 import com.k1af.ft8af.database.OnAfterQueryConfig
+import com.k1af.ft8af.database.OperationBand
 import com.k1af.ft8af.ft8listener.DecodeDepth
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -211,6 +212,8 @@ fun AdvancedSettings(
                         includeSensitive = exportIncludeSensitive,
                         appVersion = GeneralVariables.VERSION,
                         createdAt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date()),
+                        prefs = readBackedUpPrefs(context),
+                        followCallsigns = databaseOpr.getFollowCallsignsSync(),
                     )
                     context.contentResolver.openOutputStream(uri)?.use {
                         it.write(json.toByteArray(Charsets.UTF_8))
@@ -288,7 +291,15 @@ fun AdvancedSettings(
                 val toApply = backup.config
                 scope.launch {
                     val result = withContext(Dispatchers.IO) {
-                        runCatching { databaseOpr.writeConfigSync(toApply) }
+                        runCatching {
+                            databaseOpr.writeConfigSync(toApply)
+                            // Fork: custom bands, theme and followed callsigns too.
+                            writeBackedUpPrefs(context, backup.prefs)
+                            if (backup.prefs.containsKey("ft8af_custom_bands")) {
+                                OperationBand.getInstance(context).getBandsFromFile()
+                            }
+                            databaseOpr.addFollowCallsignsSync(backup.followCallsigns)
+                        }
                     }
                     result.fold(
                         onSuccess = {
@@ -696,6 +707,26 @@ fun AdvancedSettings(
                 }
             }
         }
+    }
+}
+
+/** String entries of the prefs files the settings backup carries (fork). */
+private fun readBackedUpPrefs(context: android.content.Context): Map<String, Map<String, String>> =
+    SettingsBackup.BACKED_UP_PREFS.associateWith { file ->
+        context.getSharedPreferences(file, android.content.Context.MODE_PRIVATE).all
+            .mapNotNull { (k, v) -> (v as? String)?.let { k to it } }
+            .toMap()
+    }.filterValues { it.isNotEmpty() }
+
+/** Write restored prefs entries back, replacing each restored file's string entries (fork). */
+private fun writeBackedUpPrefs(
+    context: android.content.Context,
+    prefs: Map<String, Map<String, String>>,
+) {
+    for ((file, entries) in prefs) {
+        val editor = context.getSharedPreferences(file, android.content.Context.MODE_PRIVATE).edit()
+        entries.forEach { (k, v) -> editor.putString(k, v) }
+        editor.commit()
     }
 }
 

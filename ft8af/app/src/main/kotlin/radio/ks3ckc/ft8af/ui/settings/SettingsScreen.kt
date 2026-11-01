@@ -337,6 +337,8 @@ private fun SettingsLanding(
                     SectionDivider()
                     SettingsRow(
                         label = stringResource(R.string.settings_cat_advanced),
+                        // Fork: point at the settings backup, which is easy to miss in here.
+                        description = "Backup & restore settings, decode tuning",
                         showChevron = true,
                         onClick = { onOpenCategory(SettingsCategory.ADVANCED) },
                     )

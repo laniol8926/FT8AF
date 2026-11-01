@@ -164,4 +164,41 @@ class SettingsBackupTest {
         val name = SettingsBackup.defaultFileName("2026-07-03", "")
         assertThat(name).contains("unknown")
     }
+
+    @Test
+    fun `custom bands, theme and followed callsigns round-trip`() {
+        val json = SettingsBackup.buildBackupJson(
+            config = sampleConfig,
+            includeSensitive = false,
+            appVersion = "1.0",
+            createdAt = "2026-11-01 12:00",
+            prefs = mapOf(
+                "ft8af_custom_bands" to mapOf("custom" to "14090000:1:QMX"),
+                "ft8af_theme" to mapOf("theme" to "dark"),
+            ),
+            followCallsigns = listOf("W5ORC", "K9LZJ"),
+        )
+        val parsed = SettingsBackup.parseBackupJson(json)
+        assertThat(parsed.prefs["ft8af_custom_bands"]).containsExactly("custom", "14090000:1:QMX")
+        assertThat(parsed.prefs["ft8af_theme"]).containsExactly("theme", "dark")
+        assertThat(parsed.followCallsigns).containsExactly("K9LZJ", "W5ORC")
+    }
+
+    @Test
+    fun `older backup without fork sections still parses`() {
+        val json = SettingsBackup.buildBackupJson(sampleConfig, false, "1.0", "2026-11-01")
+        val parsed = SettingsBackup.parseBackupJson(json)
+        assertThat(parsed.prefs).isEmpty()
+        assertThat(parsed.followCallsigns).isEmpty()
+        assertThat(parsed.config).containsKey("callsign")
+    }
+
+    @Test
+    fun `unknown prefs files in a backup are ignored`() {
+        val json = SettingsBackup.buildBackupJson(
+            sampleConfig, false, "1.0", "2026-11-01",
+            prefs = mapOf("some_other_prefs" to mapOf("k" to "v")),
+        )
+        assertThat(SettingsBackup.parseBackupJson(json).prefs).isEmpty()
+    }
 }

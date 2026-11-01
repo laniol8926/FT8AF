@@ -35,12 +35,23 @@ object SettingsBackup {
         "icomPassword",
     )
 
+    /**
+     * SharedPreferences files that hold settings outside the `config` table (fork):
+     * custom band dials and the theme. Saved in the backup's optional "prefs" section.
+     * Older builds read only "config", so the format version doesn't change.
+     */
+    val BACKED_UP_PREFS: List<String> = listOf("ft8af_custom_bands", "ft8af_theme")
+
     /** Metadata + config restored from a backup file. */
     data class ParsedBackup(
         val formatVersion: Int,
         val appVersion: String,
         val createdAt: String,
         val config: Map<String, String>,
+        /** Prefs file name -> its string entries (fork; empty in older backups). */
+        val prefs: Map<String, Map<String, String>> = emptyMap(),
+        /** Followed callsigns (fork; empty in older backups). */
+        val followCallsigns: List<String> = emptyList(),
     )
 
     /**
@@ -63,6 +74,8 @@ object SettingsBackup {
         includeSensitive: Boolean,
         appVersion: String,
         createdAt: String,
+        prefs: Map<String, Map<String, String>> = emptyMap(),
+        followCallsigns: List<String> = emptyList(),
     ): String {
         val filtered = filterConfig(config, includeSensitive)
         val configJson = JSONObject()
@@ -76,6 +89,18 @@ object SettingsBackup {
         root.put("createdAt", createdAt)
         root.put("includesSensitive", includeSensitive)
         root.put("config", configJson)
+        if (prefs.isNotEmpty()) {
+            val prefsJson = JSONObject()
+            for (file in prefs.keys.sorted()) {
+                val entries = JSONObject()
+                prefs.getValue(file).toSortedMap().forEach { (k, v) -> entries.put(k, v) }
+                prefsJson.put(file, entries)
+            }
+            root.put("prefs", prefsJson)
+        }
+        if (followCallsigns.isNotEmpty()) {
+            root.put("followCallsigns", org.json.JSONArray(followCallsigns.sorted()))
+        }
         return root.toString(2)
     }
 
@@ -120,11 +145,33 @@ object SettingsBackup {
         if (config.isEmpty()) {
             throw IllegalArgumentException("Backup contains no settings to restore.")
         }
+        // Optional fork sections; only known prefs files are restored.
+        val prefs = LinkedHashMap<String, Map<String, String>>()
+        root.optJSONObject("prefs")?.let { prefsJson ->
+            for (file in BACKED_UP_PREFS) {
+                val entries = prefsJson.optJSONObject(file) ?: continue
+                val map = LinkedHashMap<String, String>()
+                val ek = entries.keys()
+                while (ek.hasNext()) {
+                    val k = ek.next()
+                    map[k] = entries.optString(k, "")
+                }
+                prefs[file] = map
+            }
+        }
+        val follows = ArrayList<String>()
+        root.optJSONArray("followCallsigns")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                arr.optString(i, "").trim().takeIf { it.isNotEmpty() }?.let(follows::add)
+            }
+        }
         return ParsedBackup(
             formatVersion = formatVersion,
             appVersion = root.optString("appVersion", ""),
             createdAt = root.optString("createdAt", ""),
             config = config,
+            prefs = prefs,
+            followCallsigns = follows,
         )
     }
 

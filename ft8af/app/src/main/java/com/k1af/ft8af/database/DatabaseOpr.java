@@ -1070,6 +1070,31 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         }
     }
 
+    /** Followed callsigns, for the settings backup (fork). Call off the main thread. */
+    public java.util.ArrayList<String> getFollowCallsignsSync() {
+        java.util.ArrayList<String> list = new java.util.ArrayList<>();
+        try (Cursor cursor = db.rawQuery("select callsign from followCallsigns order by callsign", null)) {
+            while (cursor.moveToNext()) {
+                if (!cursor.isNull(0)) list.add(cursor.getString(0));
+            }
+        }
+        return list;
+    }
+
+    /** Adds followed callsigns from a settings backup, keeping any already followed (fork). */
+    public void addFollowCallsignsSync(java.util.List<String> callsigns) {
+        db.beginTransaction();
+        try {
+            for (String c : callsigns) {
+                db.execSQL("INSERT OR IGNORE INTO followCallsigns (callsign)values(?)", new String[]{c});
+                if (!GeneralVariables.followCallsign.contains(c)) GeneralVariables.followCallsign.add(c);
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     /**
      * Query all successfully contacted callsigns, filtered by QSO frequency
      */
