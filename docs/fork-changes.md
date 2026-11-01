@@ -116,13 +116,25 @@ cutout. (Found from new `Layout:` lines in `debug.log`.)
   at the top instead of two rows docked at the bottom. On the Logbook it sits
   in the header beside "Logbook  55082 QSOs · All bands" (one line).
 - **Logbook table.** The Recent tab is a spreadsheet: QSO Date, QSO Time,
-  Callsign, Grid, State, Freq MHz, Mode, RST Sent, RST Rcvd, Status, ⋮
+  Callsign, Grid, State, Freq MHz, Mode, RST Sent, RST Rcvd, Status, QSL, ⋮
   (Edit/Delete), two-line headings that stay put, grid lines. **Tap a heading
-  to sort** by it (again to reverse; highlighted with ▲/▼). Status shows the
-  CONFIRMED / WORKED pill and the QRZ / CL / WRL upload tags. State is the US
+  to sort** by it (again to reverse; highlighted with ▲/▼). Status shows a
+  short **CONF** (LoTW-confirmed) / WORKED pill and the QRZ / CL / WRL upload
+  tags (QRZ = in the QRZ logbook, not confirmed there). State is the US
   state (grid, else the logged STATE) or, for non-US, the logged country; the
   search field is a slim 36 dp. (`QsoTableRow`, `sortQsoTable`,
   `logbookPlace`)
+- **QSL column.** `L✓ E↑ P· Q✓`: LoTW, eQSL, paper card, QRZ.com; ✓ received
+  (green), ↑ sent (blue), · neither; Q has no "sent" (the QRZ tag shows the
+  upload). Schema v25/v26 add `lotw_sent, eqsl_sent, eqsl_rcvd, qsl_sent,
+  qsl_rcvd, qrz_qsl`; LoTW received stays `isLotW_QSL`. Filled by import:
+  a CQRLOG export gives LoTW/eQSL/paper, a QRZ.com export gives Q
+  (`APP_QRZLOG_STATUS=C`). Re-imports only set flags, so both files can be
+  imported in either order. `QSL_RCVD` is the paper card when the record also
+  has `LOTW_QSL_RCVD`; alone (LoTW's own report) it still means LoTW. The
+  export writes all of them back (`LOTW_QSL_SENT/RCVD`, `EQSL_QSL_SENT/RCVD`,
+  `QSL_SENT`, `APP_FT8AF_QSL_RCVD_CARD`, `APP_FT8AF_QRZ_CONFIRMED`).
+  (`qslMarks`, `QSLRecord.qslFlags`)
 - **Band on/off switches in the band picker.** "All bands & custom
   frequency" has a SHOW / HIDE BANDS list with a switch per band (same setting
   as Settings → Enabled Bands, which is hard to reach in landscape).
@@ -203,6 +215,20 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   matches on call, date, band, mode and HH:MM, and never adds QSOs. Upload
   isn't possible this way: LoTW needs each QSO signed with the TQSL
   certificate. (`radio.ks3ckc.ft8af.lotw.LotwClient`)
+- **STATE / COUNTRY on QSOs made in the app.** At logging, COUNTRY comes
+  from the callsign database. STATE is QRZ's state when the station is at
+  home (QRZ grid = worked grid, 4 chars) and the QSO isn't portable (no
+  POTA/park ref, no /P /M /MM /R); otherwise the worked grid's state (US
+  grids). The partner is looked up on QRZ (XML login) in the background when
+  TX starts, so the answer is cached at logging time. Both go to the log,
+  `ft8af_log.adi`, exports and uploads. (`DatabaseOpr.fillPlace`,
+  `pickLoggedState`, `QrzXmlClient.cached/prefetch`)
+- **Import no longer duplicates the app's QSOs.** The "already logged?"
+  check matches call, date, band and mode case-insensitively and TIME_ON to
+  the minute: CQRLOG/QRZ write `1357` / `30M`, the app `135745` / `30m`, and
+  an exact match had re-added the same QSO. The three pairs this caused on
+  the test phones were merged on 2026-11-01 (pre-merge copies in
+  `Documents\FT8AF-db-backups`). (`DatabaseOpr.checkIsQSL`)
 - **Settings backup covers more.** Advanced → Backup & Restore (upstream
   #357) now also saves custom band dials, the theme and followed callsigns.
   Tick "Include sensitive data" to carry the passwords and API keys.
