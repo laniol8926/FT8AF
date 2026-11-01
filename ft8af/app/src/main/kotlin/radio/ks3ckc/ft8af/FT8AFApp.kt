@@ -927,6 +927,26 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 selectBandIndex(mainViewModel, context, idx)
                 showFrequencyPicker = false
             },
+            // Same rules and storage as Settings → Enabled Bands (fork).
+            onSetBandEnabled = { wave, enabled ->
+                val updated = com.k1af.ft8af.database.OperationBand.toggleExcludedBand(
+                    com.k1af.ft8af.database.OperationBand.getAllWaveLengths(),
+                    GeneralVariables.excludedBands, wave, enabled,
+                )
+                if (updated == null) {
+                    android.widget.Toast.makeText(
+                        context, R.string.settings_enabled_bands_keep_one,
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                    false
+                } else {
+                    GeneralVariables.excludedBands = java.util.HashSet(updated)
+                    mainViewModel.databaseOpr.writeConfig(
+                        "excludedBands", GeneralVariables.excludedBandsToCsv(), null,
+                    )
+                    true
+                }
+            },
         )
 
         // Band & Mode sheet (option 3b) — mode toggle + curated band list, opened from the

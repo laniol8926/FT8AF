@@ -79,6 +79,7 @@
     <string name="freq_select_title">SELECT FREQUENCY</string>
     <string name="freq_show_alternates">SHOW ALTERNATES</string>
     <string name="freq_hide_alternates">HIDE ALTERNATES</string>
+    <string name="freq_show_hide_bands">SHOW / HIDE BANDS</string>
     <string name="freq_alt_prefix">"ALT "</string>
 
     <!-- ===== Operator card ===== -->

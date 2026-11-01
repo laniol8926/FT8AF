@@ -174,14 +174,59 @@ fun FrequencyPickerSheet(
     currentBandIndex: Int,
     onDismiss: () -> Unit,
     onSelect: (Int) -> Unit,
+    // Fork: switch a band on/off from here too (same setting as Settings → Enabled
+    // Bands). Returns false when refused (the last enabled band). Null hides it.
+    onSetBandEnabled: ((waveLength: String, enabled: Boolean) -> Boolean)? = null,
 ) {
     FT8AFBottomSheet(visible = visible, onDismiss = onDismiss) {
-        val groups = remember(GeneralVariables.excludedBands.toSet(), GeneralVariables.operatingMode) { buildBandGroups() }
+        // Local mirror so a toggle recomposes the tiles at once.
+        var excluded by remember { mutableStateOf(GeneralVariables.excludedBands.toSet()) }
+        val groups = remember(excluded, GeneralVariables.operatingMode) { buildBandGroups() }
         FrequencyPickerContent(
             groups = groups,
             currentBandIndex = currentBandIndex,
             onSelect = onSelect,
+            bandSwitches = onSetBandEnabled?.let { setEnabled ->
+                {
+                    BandSwitches(excluded = excluded) { wave, enabled ->
+                        if (setEnabled(wave, enabled)) {
+                            excluded = GeneralVariables.excludedBands.toSet()
+                        }
+                    }
+                }
+            },
         )
+    }
+}
+
+/** Every band with an on/off switch; the expandable part of the picker (fork). */
+@Composable
+private fun BandSwitches(
+    excluded: Set<String>,
+    onToggle: (waveLength: String, enabled: Boolean) -> Unit,
+) {
+    Column {
+        for (wave in OperationBand.getAllWaveLengths()) {
+            val enabled = !excluded.contains(wave)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onToggle(wave, !enabled) }
+                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = wave,
+                    color = if (enabled) TextPrimary else TextMuted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = GeistMonoFamily,
+                    modifier = Modifier.weight(1f),
+                )
+                Toggle(checked = enabled, onCheckedChange = { onToggle(wave, it) })
+            }
+        }
     }
 }
 
@@ -198,8 +243,10 @@ internal fun FrequencyPickerContent(
     groups: List<BandGroup>,
     currentBandIndex: Int,
     onSelect: (Int) -> Unit,
+    bandSwitches: (@Composable () -> Unit)? = null,
 ) {
     var showAlternates by remember { mutableStateOf(false) }
+    var showBandSwitches by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -257,6 +304,35 @@ internal fun FrequencyPickerContent(
                 currentBandIndex = currentBandIndex,
                 onChipClick = onSelect,
             )
+        }
+
+        // Show / hide bands (fork): the band on/off switches, right where the bands
+        // are picked. Same setting as Settings → Enabled Bands.
+        if (bandSwitches != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { showBandSwitches = !showBandSwitches }
+                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = stringResource(R.string.freq_show_hide_bands),
+                    color = TextMuted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = GeistMonoFamily,
+                    letterSpacing = 0.08.sp,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (showBandSwitches) "△" else "▽",
+                    color = TextFaint,
+                    fontSize = 11.sp,
+                )
+            }
+            if (showBandSwitches) bandSwitches()
         }
     }
 }
