@@ -387,11 +387,38 @@ fun LogbookScreen(
                 .background(BgApp),
         ) {
             // Top bar
+            val qsoCount = if (stats.totalQsos > 0) stats.totalQsos else records.size
             TopBar(
                 title = stringResource(R.string.log_title),
-                subtitle = {
-                    val count = if (stats.totalQsos > 0) stats.totalQsos else records.size
-                    TopBarSubtitle(text = stringResource(R.string.log_subtitle_qsos_all_bands, count))
+                // Landscape (fork): "55082 QSOs · All bands" beside the title, one line.
+                subtitle = if (headerStatus != null) null else {
+                    {
+                        TopBarSubtitle(text = stringResource(R.string.log_subtitle_qsos_all_bands, qsoCount))
+                    }
+                },
+                titleContent = if (headerStatus != null) {
+                    {
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(
+                                text = stringResource(R.string.log_title),
+                                color = TextPrimary,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = stringResource(R.string.log_subtitle_qsos_all_bands, qsoCount),
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(bottom = 3.dp),
+                            )
+                        }
+                    }
+                } else {
+                    null
                 },
                 tight = headerStatus != null,
                 actions = {
@@ -1983,7 +2010,7 @@ private fun QsoRow(
 // ---------------------------------------------------------------------------
 
 // Width of the operating status row in the landscape Logbook header (fork).
-private val LogHeaderStatusWidth = 360.dp
+private val LogHeaderStatusWidth = 320.dp
 
 /** Column weights of the table view, shared by the header and every row. */
 // Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status.
@@ -2035,6 +2062,25 @@ private fun QsoTableHeader(
     }
 }
 
+/**
+ * The State column's value when the log has one (fork): a non-US logged [country] is
+ * shown as is; for the US (or no logged country) the grid-derived [gridState], else the
+ * logged ADIF [adifState]. Null means nothing logged -- the caller looks the country up.
+ */
+internal fun logbookPlace(gridState: String?, adifState: String?, country: String?): String? {
+    val c = country?.trim().orEmpty()
+    val isUs = c.isEmpty() || isUnitedStates(c)
+    if (!isUs) return c
+    gridState?.takeIf { it.isNotBlank() }?.let { return it }
+    adifState?.takeIf { it.isNotBlank() }?.let { return it }
+    return if (c.isNotEmpty()) c else null
+}
+
+private fun isUnitedStates(country: String): Boolean {
+    val u = country.uppercase()
+    return u == "UNITED STATES" || u == "UNITED STATES OF AMERICA" || u == "USA"
+}
+
 // Column indices of the table view (fork), in display order.
 internal const val QSO_COL_DATE = 0
 internal const val QSO_COL_TIME = 1
@@ -2068,7 +2114,8 @@ internal fun sortQsoTable(
         QSO_COL_CALL -> { r -> (r.callsign ?: "").uppercase() }
         QSO_COL_GRID -> { r -> (r.grid ?: "").uppercase() }
         QSO_COL_STATE -> { r ->
-            (stateOf(r.grid ?: "")?.takeIf { it.isNotBlank() } ?: (r.dxccStr ?: "")).uppercase()
+            (logbookPlace(stateOf(r.grid ?: ""), r.adifState, r.where)
+                ?: (r.dxccStr ?: "")).uppercase()
         }
         QSO_COL_MODE -> { r -> (r.mode ?: "").uppercase() }
         else -> { _ -> "" }
@@ -2124,9 +2171,28 @@ private fun QsoTableRow(
     }
     val time = formatQsoTime(record.timeOn ?: "")
     val grid = record.grid ?: ""
-    // US state from the grid (as the cards show it); otherwise the DXCC entity.
-    val usState = UsStateLookup.stateFromGrid(LocalContext.current, grid)
-    val place = if (!usState.isNullOrBlank()) usState else (record.dxccStr ?: "")
+    // US state from the grid (as the cards show it); otherwise the country, looked
+    // up from the callsign database off the main thread and kept on the record (the
+    // Compose logbook never filled it in, so non-US rows were blank).
+    val gridState = UsStateLookup.stateFromGrid(LocalContext.current, grid)
+    // Logged values first (ADIF COUNTRY / STATE from imports), then the grid.
+    val usState = logbookPlace(gridState, record.adifState, record.where)
+    val country by androidx.compose.runtime.produceState(
+        initialValue = record.where ?: "",
+        record.callsign,
+        usState,
+    ) {
+        if (value.isEmpty() && usState.isNullOrBlank()) {
+            val call = record.callsign ?: ""
+            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    GeneralVariables.callsignDatabase?.getCallInfo(call)?.CountryNameEn
+                }.getOrNull() ?: ""
+            }
+            if (value.isNotEmpty()) record.where = value
+        }
+    }
+    val place = if (!usState.isNullOrBlank()) usState else country
     val cells = listOf(
         formatQsoDateIso(record.lastTime ?: "") to TextPrimary,
         (if (time == "--:--") "" else time) to TextPrimary,

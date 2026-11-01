@@ -81,8 +81,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * v21 adds {@code QSLTable.synced_wrl} (World Radio League upload state, issue #800).
      * v22 adds {@code QSLTable.state} (the worked station's ADIF STATE, from imports).
      * v23 adds {@code QSLTable.tx_pwr} (ADIF TX_PWR in watts).
+     * v24 adds {@code QSLTable.country} (the worked station's ADIF COUNTRY, from imports; fork).
      */
-    static final int SCHEMA_VERSION = 23;
+    static final int SCHEMA_VERSION = 24;
 
     public static synchronized DatabaseOpr getInstance(@Nullable Context context, @Nullable String databaseName) {
         if (instance == null) {
@@ -305,6 +306,10 @@ public class DatabaseOpr extends SQLiteOpenHelper {
             // the logged value for imports.
             alterTable(sqLiteDatabase, "QSLTable", "tx_pwr"
                     , "tx_pwr TEXT");
+            // Worked station's ADIF COUNTRY as logged (imports): the logbook table's
+            // State column for non-US contacts (fork).
+            alterTable(sqLiteDatabase, "QSLTable", "country"
+                    , "country TEXT");
 
         } else {
             sqLiteDatabase.execSQL("CREATE TABLE QSLTable (\n" +
@@ -336,7 +341,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     "sig TEXT,\n" +//POTA: worked station's program
                     "sig_info TEXT,\n" +//POTA: worked station's park ref
                     "state TEXT,\n" +//Worked station's ADIF STATE (imports)
-                    "tx_pwr TEXT)");//ADIF TX_PWR, watts
+                    "tx_pwr TEXT,\n" +//ADIF TX_PWR, watts
+                    "country TEXT)");//Worked station's ADIF COUNTRY (imports)
         }
 
 
@@ -1622,8 +1628,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         if (!checkIsQSL(record)) {//If log data doesn't exist, add it
             querySQL = "INSERT INTO QSLTable(call, isQSL,isLotW_import,isLotW_QSL,gridsquare, mode, rst_sent, rst_rcvd, qso_date, " +
                     "time_on, qso_date_off, time_off, band, freq, station_callsign, my_gridsquare," +
-                    "comment,my_sig,my_sig_info,sig,sig_info,state,tx_pwr)" +
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                    "comment,my_sig,my_sig_info,sig,sig_info,state,tx_pwr,country)" +
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
             db.execSQL(querySQL, new String[]{record.getToCallsign()
                     , String.valueOf(record.isQSL ? 1 : 0)
@@ -1648,7 +1654,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     , record.getSig()
                     , record.getSigInfo()
                     , record.getState()
-                    , record.getTxPwr()});
+                    , record.getTxPwr()
+                    , record.getCountry()});
             // If this QSO was logged during an active POTA activation, refresh its
             // qso_count. This is a dupe-aware recount, not a blind increment: POTA
             // doesn't credit a repeat contact with the same station on the same band.
@@ -1707,6 +1714,16 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                                 " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)" +
                                 " and (state IS NULL OR state='')"
                         , new Object[]{record.getState(), record.getToCallsign()
+                                , record.getQso_date()
+                                , record.getTime_on()
+                                , record.getMode()});
+            }
+            // And the logged COUNTRY on rows saved before the country column existed (fork).
+            if (record.getCountry() != null) {
+                db.execSQL("UPDATE  QSLTable  SET country=? " +
+                                " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)" +
+                                " and (country IS NULL OR country='')"
+                        , new Object[]{record.getCountry(), record.getToCallsign()
                                 , record.getQso_date()
                                 , record.getTime_on()
                                 , record.getMode()});
@@ -2436,6 +2453,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     // Reports for the logbook table view (fork); a grouped row shows one.
                     ",max(q.rst_sent) as rst_sent\n" +
                     ",max(q.rst_rcvd) as rst_rcvd\n" +
+                    ",max(q.country) as country\n" +
+                    ",max(q.state) as adif_state\n" +
                     "from QSLTable q inner join QSLTable q2 ON q.id =q2.id \n" +
                     "where (q.[call] like ?)\n" +
                     filterStr +
@@ -2468,6 +2487,13 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     String rstR = idxRstR >= 0 ? cursor.getString(idxRstR) : null;
                     record.rstSent = rstS != null ? rstS : "";
                     record.rstRcvd = rstR != null ? rstR : "";
+                    // Logged COUNTRY / STATE (ADIF imports): the table's State column.
+                    int idxCountry = cursor.getColumnIndex("country");
+                    String country = idxCountry >= 0 ? cursor.getString(idxCountry) : null;
+                    if (country != null && !country.trim().isEmpty()) record.where = country.trim();
+                    int idxAdifState = cursor.getColumnIndex("adif_state");
+                    String adifState = idxAdifState >= 0 ? cursor.getString(idxAdifState) : null;
+                    record.adifState = adifState != null ? adifState.trim() : "";
                     record.setLastTime(cursor.getString(cursor.getColumnIndex("last_time")));
                     int idxTimeOn = cursor.getColumnIndex("last_time_on");
                     if (idxTimeOn >= 0) {

@@ -70,4 +70,21 @@ class LogbookTableSortTest {
         assertThat(calls(sortQsoTable(log, QSO_COL_STATUS, false, noState)))
             .containsExactly("AA6MU", "N5PNZ", "KW8CW").inOrder()
     }
+
+    @Test
+    fun place_nonUsCountryShownAsLogged() {
+        assertThat(logbookPlace(null, "", "Germany")).isEqualTo("Germany")
+    }
+
+    @Test
+    fun place_usUsesGridStateThenLoggedState() {
+        assertThat(logbookPlace("VA", "MD", "United States")).isEqualTo("VA")
+        assertThat(logbookPlace(null, "DE", "United States")).isEqualTo("DE")
+        assertThat(logbookPlace("TX", "", null)).isEqualTo("TX")
+    }
+
+    @Test
+    fun place_nothingLogged_isNullForLookup() {
+        assertThat(logbookPlace(null, "", null)).isNull()
+    }
 }

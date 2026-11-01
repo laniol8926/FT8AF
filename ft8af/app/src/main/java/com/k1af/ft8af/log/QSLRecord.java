@@ -51,6 +51,8 @@ public class QSLRecord {
     // The worked station's ADIF STATE (US state / other countries' subdivision), as logged.
     // Null when the log row has none; QSOs made in-app have none (FT8 only carries a grid).
     private String state;
+    // The worked station's ADIF COUNTRY (DXCC entity name), as logged. Null if none (fork).
+    private String country;
     // ADIF TX_PWR in watts, e.g. "4.5". In-app QSOs take the operator identity's power
     // (which follows the QMX's measured output); imports keep the logged value. Null if none.
     private String txPwr;
@@ -263,6 +265,10 @@ public class QSLRecord {
         if (map.containsKey("MY_SIG_INFO")) mySigInfo = map.get("MY_SIG_INFO");
         if (map.containsKey("SIG")) sig = map.get("SIG");
         if (map.containsKey("SIG_INFO")) sigInfo = map.get("SIG_INFO");
+        if (map.containsKey("COUNTRY")) {//Worked station's DXCC entity name (QRZ, LoTW, most loggers)
+            String c = map.get("COUNTRY");
+            country = c == null || c.trim().isEmpty() ? null : c.trim();
+        }
         if (map.containsKey("STATE")) {//Worked station's state/subdivision (LoTW, QRZ, most loggers)
             String s = map.get("STATE");
             state = s == null || s.trim().isEmpty() ? null : s.trim().toUpperCase();
@@ -454,6 +460,11 @@ public class QSLRecord {
 
     public String getSigInfo() {
         return sigInfo;
+    }
+
+    /** The worked station's ADIF COUNTRY as logged, or null. */
+    public String getCountry() {
+        return country;
     }
 
     /** The worked station's ADIF STATE as logged (upper-cased), or null. */

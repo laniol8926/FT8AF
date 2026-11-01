@@ -28,6 +28,7 @@ public class QSLCallsignRecord {
     public boolean syncedWrl = false;//Whether at least one underlying row was accepted by World Radio League
     public String rstSent = "";//Report we sent (fork: logbook table view)
     public String rstRcvd = "";//Report we received (fork: logbook table view)
+    public String adifState = "";//Logged ADIF STATE (imports), "" if none (fork: logbook table view)
 
     public String getCallsign() {
         return callsign;
