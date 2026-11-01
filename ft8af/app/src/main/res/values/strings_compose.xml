@@ -377,8 +377,6 @@
     <string name="log_col_rst_sent">RST\nSent</string>
     <string name="log_col_rst_rcvd">RST\nRcvd</string>
     <string name="log_col_status">Status</string>
-    <string name="log_status_confirmed">Confirmed</string>
-    <string name="log_status_worked">Worked</string>
     <string name="log_action_delete">Delete</string>
     <string name="log_award_dxcc_mixed_desc">Work and confirm 100 DXCC entities on any band/mode</string>
     <string name="log_award_was">WAS</string>

@@ -1925,10 +1925,11 @@ private fun QsoTableRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    // The same status pill the cards show (CONFIRMED via LoTW, WORKED when marked).
     val status = when {
-        record.isLotW_QSL -> stringResource(R.string.log_status_confirmed) to StatusConfirmed
-        record.isQSL -> stringResource(R.string.log_status_worked) to Signal
-        else -> "—" to TextFaint
+        record.isLotW_QSL -> QsoStatus.CONFIRMED
+        record.isQSL -> QsoStatus.WORKED
+        else -> null
     }
     val time = formatQsoTime(record.timeOn ?: "")
     val grid = record.grid ?: ""
@@ -1945,7 +1946,6 @@ private fun QsoTableRow(
         (record.mode ?: "") to TextPrimary,
         record.rstSent to TextPrimary,
         record.rstRcvd to TextPrimary,
-        status,
     )
     Row(
         modifier = Modifier
@@ -1961,6 +1961,16 @@ private fun QsoTableRow(
                 color = color,
                 bold = i == 2,
             )
+        }
+        Box(
+            modifier = Modifier
+                .weight(QsoTableWeights[cells.size])
+                .fillMaxHeight()
+                .border(0.5.dp, Border)
+                .padding(horizontal = 4.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (status != null) StatusPill(status = status, compact = true)
         }
         Box(modifier = Modifier.width(QsoTableMenuWidth), contentAlignment = Alignment.Center) {
             QsoActionsMenu(onEdit = onEdit, onDelete = onDelete)
