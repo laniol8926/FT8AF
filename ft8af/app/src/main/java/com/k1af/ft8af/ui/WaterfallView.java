@@ -143,6 +143,7 @@ public class WaterfallView extends View {
         freq_width = (float) w / spectrumWidth;
         Log.d(TAG, String.format("Bitmap created: %dx%d, blockHeight=%d, freq_width=%.2f, spectrumWidth=%d",
                 w, h, blockHeight, freq_width, spectrumWidth));
+        Bitmap previous = lastBitMap;
         lastBitMap = Bitmap.createBitmap(w, h, ARGB_8888);
         // Fresh bitmap wiped the stamped labels and the UTC gridline, so allow the current
         // slot to re-stamp both instead of waiting for the next slot boundary.
@@ -152,7 +153,16 @@ public class WaterfallView extends View {
         Paint blackPaint = new Paint();
         blackPaint.setColor(0xFF000000);
         _canvas.drawRect(0, 0, w, h, blackPaint);//Paint background black first to prevent text overlap
-        restoreHandedOver(w, h);
+        if (previous != null && !previous.isRecycled()) {
+            // Resized in place (fork): e.g. the landscape left column narrows when TX
+            // stops, widening this view. Keep the picture, scaled to the new size -- the
+            // width spans the same frequencies, so traces stay aligned.
+            _canvas.drawBitmap(previous, null, new android.graphics.Rect(0, 0, w, h), null);
+            bitmapLandscape = getResources().getConfiguration().orientation
+                    == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        } else {
+            restoreHandedOver(w, h);
+        }
 
         //linePaint = new Paint();
         linePaint.setColor(0xff990000);

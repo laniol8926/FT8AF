@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import android.widget.Toast
@@ -547,7 +548,25 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
         qsoPanelInLeftColumnState.value = qsoPanelInLeftColumn
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(BgApp)) {
+    // Diagnostics (fork): a whole-screen jump means the root size or the safe-drawing
+    // insets changed; log every change so the next jump shows up in debug.log.
+    val diagDensity = androidx.compose.ui.platform.LocalDensity.current
+    val diagDirection = androidx.compose.ui.platform.LocalLayoutDirection.current
+    val diagInsets = WindowInsets.safeDrawing
+    val insetKey = "${diagInsets.getLeft(diagDensity, diagDirection)}," +
+        "${diagInsets.getTop(diagDensity)},${diagInsets.getRight(diagDensity, diagDirection)}," +
+        "${diagInsets.getBottom(diagDensity)}"
+    LaunchedEffect(insetKey) {
+        com.k1af.ft8af.GeneralVariables.fileLog("Layout: safeDrawing insets l,t,r,b=$insetKey px")
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgApp)
+            .onSizeChanged {
+                com.k1af.ft8af.GeneralVariables.fileLog("Layout: root size ${it.width}x${it.height}")
+            },
+    ) {
         // Keep the content clear of the display cutout (and the status bar, should it
         // ever be visible) — the Box behind still paints BgApp into the padded band so a
         // notched phone shows app background beside the camera, not a black strip.
