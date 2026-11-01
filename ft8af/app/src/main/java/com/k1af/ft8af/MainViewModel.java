@@ -1436,7 +1436,10 @@ public class MainViewModel extends ViewModel {
      */
     private void getCallsignAndGrid(ArrayList<Ft8Message> messages) {
         for (Ft8Message msg : messages) {
-            if (GeneralVariables.checkFun1(msg.extraInfo)) {//check if it's a grid
+            // Any message carrying a grid (a CQ, or a reply to anyone's CQ), never an empty
+            // one: checkFun1 also passes a grid-less message (fork).
+            if (GeneralVariables.checkFun1(msg.extraInfo)
+                    && msg.maidenGrid != null && msg.maidenGrid.length() >= 4) {
                 //if not in the memory table, or inconsistent, write to database
                 if (!GeneralVariables.getCallsignHasGrid(msg.getCallsignFrom(), msg.maidenGrid)) {
                     databaseOpr.addCallsignQTH(msg.getCallsignFrom(), msg.maidenGrid);//write to database
