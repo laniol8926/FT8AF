@@ -1,7 +1,7 @@
 # Changes on the laniol8926/FT8AF fork (`dev`)
 
 This is what the fork's `dev` branch adds on top of `patrickrb/FT8AF` `dev`,
-as of 2026-10-28. Upstream `dev` (70 commits) was merged in on 2026-10-27.
+as of 2026-11-01. Upstream `dev` (70 commits) was merged in on 2026-10-27.
 These changes enhance the app; they don't replace upstream behaviour. Where a
 control moved, the original is still in place. Layout changes are landscape
 only; portrait is as upstream.
@@ -43,6 +43,7 @@ only.
 | A QSO is logged when our RR73/73 goes out, not when the sequencer advances to it | upstream PR #975 (open) |
 | No "No signals decoded" flash at the clear-every-cycle boundary | upstream PR #976 (open) |
 | **Stop After** counts a partner re-sending the message we answer (he didn't copy us), so "3" means three tries; only real progress resets it | `FT8TransmitSignal.isPartnerRepeat` |
+| Giving up at the Stop After limit follows Auto-CQ too: with nobody queued or watched to work, TX goes off instead of calling CQ; it never re-picks the station it gave up on | `giveUpTarget` |
 | **TX watchdog** refreshes when the QSO progresses or a station is tapped (it switched TX off mid-QSO); 1–4 minute options added; a timeout is logged | `doOnSecTimer`, `TransmissionSettings` |
 | **Auto-CQ after QSO decides what follows a logged QSO**, however it started: off → TX off (WSJT-X "Disable Tx after sending 73"), on → CQ. The QSO panel ✕ follows the same rule | `shouldStopAfterQso`, `userCancelQso` |
 | After TX stopped itself, a repeat from the station just logged (his R+report or RR73) is answered (RR73 / 73, at most twice) without logging the QSO again; a station ended by Max 73 Sends is left alone | `answerRepeatAfterLog`, `isSameQsoAsLogged` |
@@ -93,10 +94,38 @@ On the Decode screen in landscape, while TX is on (calling CQ or in a QSO):
   (station, report, SWR, PWR, PAUSE, LOG, ✕ — no "QSO" tag or "tap to
   view"), the exchange list using the whole height, the TX buttons;
 - the QSO sheet doesn't open by itself, overlays only the left column when
-  opened, and leaves out the station info and QSO sequence during a QSO.
+  opened, and leaves out the station info and QSO sequence during a QSO;
+- the panel keeps **one running log for the whole TX run**: our CQ overs,
+  then whoever answers and the exchange, never cleared mid-run;
+- pressing Call CQ leaves the decode list up until the first over keys (or a
+  station answers), so there is no empty "Calling CQ / Waiting" panel.
 
 On other tabs in landscape the docked QSO panel carries its own waterfall on
-its right side. The decode list returns when TX is off.
+its right side. The decode list returns when TX is off. The waterfall keeps
+its picture when its column is resized (TX on/off changes the split).
+
+**The screen jump is fixed.** Android flashes the hidden status bar back about
+4 s after each over; padding the layout for it dropped the whole screen 70 px
+and slid it back. In landscape the layout now pads only for the display
+cutout. (Found from new `Layout:` lines in `debug.log`.)
+
+## Other landscape tabs (fork)
+
+- **Logbook, POTA, Settings, More:** the status line ("RX / TX in 9s") with a
+  stacked **Radio / linked** chip and the slot bar (no DT pill) share one row
+  at the top instead of two rows docked at the bottom. On the Logbook it sits
+  in the header beside "Logbook  55082 QSOs · All bands" (one line).
+- **Logbook table.** The Recent tab is a spreadsheet: QSO Date, QSO Time,
+  Callsign, Grid, State, Freq MHz, Mode, RST Sent, RST Rcvd, Status, ⋮
+  (Edit/Delete), two-line headings that stay put, grid lines. **Tap a heading
+  to sort** by it (again to reverse; highlighted with ▲/▼). Status shows the
+  CONFIRMED / WORKED pill and the QRZ / CL / WRL upload tags. State is the US
+  state (grid, else the logged STATE) or, for non-US, the logged country; the
+  search field is a slim 36 dp. (`QsoTableRow`, `sortQsoTable`,
+  `logbookPlace`)
+- **Band on/off switches in the band picker.** "All bands & custom
+  frequency" has a SHOW / HIDE BANDS list with a switch per band (same setting
+  as Settings → Enabled Bands, which is hard to reach in landscape).
 
 ## Diagnostics added to `debug.log`
 
@@ -138,7 +167,10 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   Western Australia "WA". This fixes states the grid table can't resolve,
   such as Delaware and Rhode Island.
   (`GeneralVariables.workedStateFor`, `QSLRecord`, `DatabaseOpr`)
-- Not done yet: ADIF export doesn't write `STATE`.
+- **ADIF COUNTRY import.** New `country` column (schema v24); ADIF import
+  reads `COUNTRY` and re-importing fills it on existing rows. Used by the
+  logbook table's State column for non-US contacts.
+- Not done yet: ADIF export doesn't write `STATE` or `COUNTRY`.
 - **TX power in the log.** In-app QSOs record the operator identity power as
   ADIF `TX_PWR` (new `tx_pwr` column, schema v23). It's written to the ADIF
   log file and exports, the QRZ, Cloudlog and Wavelog uploads, and both UDP
@@ -185,10 +217,13 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
 
 ## Open items
 
-- A periodic vertical shift of the landscape display (seen 2026-10-28). To
-  catch it: a screenshot burst over adb plus logcat when it happens.
 - Whether the white partner line should be landscape-only too.
-- ADIF export doesn't write `STATE`; email share has no attachment.
+- In landscape the bottom row of Settings → Radio & Audio can sit behind
+  other content (Enabled Bands was hard to reach).
+- ADIF export doesn't write `STATE` / `COUNTRY`; email share has no attachment.
+- A non-debug build with a higher version code (e.g. upstream
+  0.150.0-dev.1498) can't be replaced by our debug build without
+  uninstalling it first, which clears the app's data.
 - Other `ToastMessage` notices (e.g. late start) still go only to the debug
   list, which the Compose UI doesn't show.
 - The voice-command mic button covers the QSO sheet's close button.
