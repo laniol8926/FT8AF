@@ -1989,7 +1989,7 @@ private val LogHeaderStatusWidth = 360.dp
 // Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status.
 // Headings are stacked on two lines so the narrow columns stay narrow.
 private val QsoTableWeights =
-    listOf(1.05f, 0.62f, 1.15f, 0.62f, 1.1f, 0.78f, 0.58f, 0.55f, 0.55f, 0.95f)
+    listOf(1.05f, 0.62f, 1.15f, 0.72f, 0.8f, 0.78f, 0.95f, 0.55f, 0.55f, 0.95f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
