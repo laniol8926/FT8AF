@@ -2183,11 +2183,25 @@ public class DatabaseOpr extends SQLiteOpenHelper {
             String querySQL = "select grid from CallsignQTH cq \n" +
                     "WHERE callsign =?";
             Cursor cursor = db.rawQuery(querySQL, new String[]{strings[0]});
+            boolean found = false;
             if (cursor.moveToFirst()) {
                 GeneralVariables.addCallsignAndGrid(strings[0]
                         , cursor.getString(cursor.getColumnIndex("grid")));
+                found = true;
             }
             cursor.close();
+            // Fork: not heard with a grid yet, so fall back to the newest grid in the log
+            // (an imported log knows tens of thousands of calls). Places stations by grid,
+            // not country centroid, e.g. for the grid tracker's QSO lines.
+            if (!found) {
+                String call = strings[0].replace("<", "").replace(">", "");
+                Cursor logged = db.rawQuery("select gridsquare from QSLTable where call=?"
+                        + " and length(gridsquare)>=4 order by id desc limit 1", new String[]{call});
+                if (logged.moveToFirst()) {
+                    GeneralVariables.addCallsignAndGrid(call, logged.getString(0));
+                }
+                logged.close();
+            }
 
             return null;
         }
