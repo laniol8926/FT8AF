@@ -1369,6 +1369,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 .sig(colStr(cursor, "sig"))
                 .sigInfo(colStr(cursor, "sig_info"))
                 .txPwr(colStr(cursor, "tx_pwr"))
+                .state(colStr(cursor, "state"))
+                .country(colStr(cursor, "country"))
                 .comment(colStr(cursor, "comment"));
     }
 

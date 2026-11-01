@@ -112,6 +112,11 @@ private fun ExportLogSheetContent(
         }.getOrDefault(0)
     }
 
+    // A part-typed date ("2026101") would still filter, as a string prefix, and match the
+    // wrong QSOs, so both buttons wait until each date is blank or a real YYYYMMDD.
+    val dateError = exportDateError(dateStart, dateEnd)
+    val canExport = phase != ExportPhase.WORKING && dateError == null && recordCount > 0
+
     // If the sheet is dismissed mid-export, cancel the background work.
     DisposableEffect(visible) {
         onDispose {
@@ -165,6 +170,16 @@ private fun ExportLogSheetContent(
                 modifier = Modifier.weight(1f),
             )
         }
+        val notice = dateError ?: if (recordCount == 0) "No QSOs match, nothing to export" else null
+        if (notice != null) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = notice,
+                color = StatusBad,
+                fontSize = 11.sp,
+                fontFamily = GeistMonoFamily,
+            )
+        }
 
         Spacer(modifier = Modifier.height(20.dp))
 
@@ -191,7 +206,7 @@ private fun ExportLogSheetContent(
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SecondaryActionButton(
                 label = stringResource(R.string.action_save),
-                enabled = phase != ExportPhase.WORKING,
+                enabled = canExport,
                 modifier = Modifier.weight(1f),
                 onClick = {
                     startSave(
@@ -212,7 +227,7 @@ private fun ExportLogSheetContent(
             )
             PrimaryActionButton(
                 label = stringResource(R.string.export_share),
-                enabled = phase != ExportPhase.WORKING,
+                enabled = canExport,
                 modifier = Modifier.weight(1f),
                 onClick = {
                     startShare(
@@ -395,7 +410,7 @@ private fun startShare(
     onStateChange: (ExportPhase, String?, Int?, Int?) -> Unit,
     onDone: () -> Unit,
 ) {
-    val adi = makeTempAdi(context) ?: return
+    val adi = makeTempAdi(context, dateStart, dateEnd) ?: return
     onStateChange(ExportPhase.WORKING, context.getString(R.string.export_preparing), 0, 1)
 
     Thread {
@@ -424,7 +439,7 @@ private fun startSave(
     onStateChange: (ExportPhase, String?, Int?, Int?) -> Unit,
     onDone: () -> Unit,
 ) {
-    val adi = makeTempAdi(context) ?: return
+    val adi = makeTempAdi(context, dateStart, dateEnd) ?: return
     onStateChange(ExportPhase.WORKING, context.getString(R.string.export_preparing), 0, 1)
 
     val displayName = "ft8af-log-" +
@@ -460,8 +475,27 @@ private fun startSave(
     }.start()
 }
 
-private fun makeTempAdi(context: Context): File? {
-    val adi = GeneralVariables.writeToTempFile(context, "FT8AF-", ".adi", "")
+/**
+ * Why the entered dates can't be used yet, or null when each is blank or a real
+ * YYYYMMDD and the range isn't reversed.
+ */
+internal fun exportDateError(dateStart: String, dateEnd: String): String? {
+    fun valid(d: String) = d.isEmpty() || runCatching {
+        SimpleDateFormat("yyyyMMdd", Locale.US).apply { isLenient = false }.parse(d)
+    }.isSuccess && d.length == 8
+    return when {
+        !valid(dateStart) -> "From date must be YYYYMMDD"
+        !valid(dateEnd) -> "To date must be YYYYMMDD"
+        dateStart.isNotEmpty() && dateEnd.isNotEmpty() && dateStart > dateEnd ->
+            "From date is after To date"
+        else -> null
+    }
+}
+
+// The date range goes in the file name, so the attachment shows which export it is.
+private fun makeTempAdi(context: Context, dateStart: String?, dateEnd: String?): File? {
+    val range = if (dateStart == null && dateEnd == null) "all" else "${dateStart ?: "start"}-${dateEnd ?: "end"}"
+    val adi = GeneralVariables.writeToTempFile(context, "FT8AF-$range-", ".adi", "")
     if (adi == null) {
         ToastMessage.show(context.getString(R.string.export_temp_file_failed))
     }

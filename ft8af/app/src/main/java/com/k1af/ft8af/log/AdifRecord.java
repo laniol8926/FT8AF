@@ -67,6 +67,8 @@ public final class AdifRecord {
     private String sig;
     private String sigInfo;
     private String txPwr;
+    private String state;
+    private String country;
     private String comment;
 
     public AdifRecord call(String v) { this.call = v; return this; }
@@ -112,6 +114,12 @@ public final class AdifRecord {
 
     public AdifRecord sigInfo(String v) { this.sigInfo = v; return this; }
     public AdifRecord txPwr(String v) { this.txPwr = v; return this; }
+
+    /** Worked station's ADIF STATE (fork: kept from imports). */
+    public AdifRecord state(String v) { this.state = v; return this; }
+
+    /** Worked station's ADIF COUNTRY (DXCC entity name). */
+    public AdifRecord country(String v) { this.country = v; return this; }
 
     public AdifRecord comment(String v) { this.comment = v; return this; }
 
@@ -165,6 +173,8 @@ public final class AdifRecord {
         appendIfNotEmpty(sb, "SIG", sig);
         appendIfNotEmpty(sb, "SIG_INFO", sigInfo);
         appendIfNotEmpty(sb, "TX_PWR", txPwr);
+        appendIfNotEmpty(sb, "STATE", state);
+        appendIfNotEmpty(sb, "COUNTRY", country);
         appendIfNotEmpty(sb, "comment", comment);
         sb.append("<eor>\n");
         return sb.toString();

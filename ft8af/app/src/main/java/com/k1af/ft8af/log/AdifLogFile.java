@@ -108,6 +108,8 @@ public final class AdifLogFile {
                 .sig(record.getSig())
                 .sigInfo(record.getSigInfo())
                 .txPwr(record.getTxPwr())
+                .state(record.getState())
+                .country(record.getCountry())
                 .comment(record.getComment());
     }
 

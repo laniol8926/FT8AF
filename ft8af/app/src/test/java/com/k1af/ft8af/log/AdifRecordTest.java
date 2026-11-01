@@ -157,6 +157,17 @@ public class AdifRecordTest {
     }
 
     @Test
+    public void stateAndCountry_emittedWhenSet_omittedWhenBlank() {
+        String out = new AdifRecord().call("W1AW").state("CT").country("United States").build();
+        assertThat(out).contains("<STATE:2>CT ");
+        assertThat(out).contains("<COUNTRY:13>United States ");
+
+        String blank = new AdifRecord().call("W1AW").state("").country(null).build();
+        assertThat(blank).doesNotContain("STATE");
+        assertThat(blank).doesNotContain("COUNTRY");
+    }
+
+    @Test
     public void everyDeclaredLengthMatchesUtf8Bytes() {
         // Include a non-ASCII comment: "Ω" is 2 UTF-8 bytes but 1 char. The declared length
         // must be the byte count, or the following field misaligns.

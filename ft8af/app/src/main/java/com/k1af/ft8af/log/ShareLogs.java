@@ -16,6 +16,7 @@ import androidx.core.content.FileProvider;
 
 import com.k1af.ft8af.GeneralVariables;
 import com.k1af.ft8af.R;
+import com.k1af.ft8af.callsign.CallsignInfo;
 import com.k1af.ft8af.ui.ToastMessage;
 
 import java.io.File;
@@ -26,6 +27,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 
 public class ShareLogs {
     private static final String TAG = "ShareLogs";
@@ -121,8 +123,10 @@ public class ShareLogs {
         FileOutputStream fileOutputStream = null;
         int position = 0;
         try {
-            fileOutputStream = new FileOutputStream(adiFile, true);
+            // Overwrite, never append: the file must hold only this export's records.
+            fileOutputStream = new FileOutputStream(adiFile, false);
             fileOutputStream.write(AdifRecord.HEADER.getBytes(StandardCharsets.UTF_8));
+            HashMap<String, String> countryCache = new HashMap<>();
             cursor.moveToPosition(-1);
             while (cursor.moveToNext()) {
                 position++;
@@ -135,7 +139,13 @@ public class ShareLogs {
                 }
                 // Build the record through the shared AdifRecord emitter so the bulk export and
                 // the incremental ft8af_log.adi append (AdifLogFile) can never drift.
-                fileOutputStream.write(recordFromCursor(cursor, isSWL).toBytes());
+                AdifRecord record = recordFromCursor(cursor, isSWL);
+                String country = col(cursor, "country");
+                if (country == null || country.isEmpty()) {
+                    // QSOs made in the app carry no COUNTRY; take it from the callsign DB.
+                    record.country(lookupCountry(col(cursor, "call"), countryCache));
+                }
+                fileOutputStream.write(record.toBytes());
             }
 
 
@@ -162,6 +172,24 @@ public class ShareLogs {
                     , position));
         }
         Log.d(TAG, String.format("Wrote %d records", position));
+        GeneralVariables.fileLog(String.format(java.util.Locale.US,
+                "Export: dates %s..%s key='%s' filter=%d -> %d of %d records to %s",
+                dateStart, dateEnd, queryKey, queryFilter, position, count, adiFile.getName()));
+    }
+
+    /** DXCC country name for a callsign from the callsign DB, cached per call; null if unknown. */
+    private static String lookupCountry(String call, HashMap<String, String> cache) {
+        if (call == null || call.isEmpty() || GeneralVariables.callsignDatabase == null) return null;
+        if (cache.containsKey(call)) return cache.get(call);
+        String name = null;
+        try {
+            CallsignInfo info = GeneralVariables.callsignDatabase.getCallInfo(call);
+            if (info != null) name = info.CountryNameEn;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Country lookup failed for " + call + ": " + e.getMessage());
+        }
+        cache.put(call, name);
+        return name;
     }
 
     /**
@@ -223,6 +251,8 @@ public class ShareLogs {
                             , "radio.ks3ckc.ft8af.fileprovider", file);
                     sharingIntent.setType("application/octet-stream");
                     sharingIntent.putExtra(Intent.EXTRA_STREAM, fileUri);
+                    sharingIntent.putExtra(Intent.EXTRA_SUBJECT, String.format(java.util.Locale.US,
+                            "FT8AF log %s (%d QSOs)", file.getName(), count));
                     sharingIntent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     context.startActivity(Intent.createChooser(sharingIntent, title));
                 }
@@ -320,6 +350,9 @@ public class ShareLogs {
                 .mySigInfo(col(cursor, "my_sig_info"))
                 .sig(col(cursor, "sig"))
                 .sigInfo(col(cursor, "sig_info"))
+                .txPwr(col(cursor, "tx_pwr"))
+                .state(col(cursor, "state"))
+                .country(col(cursor, "country"))
                 // comment is always emitted (null renders as an empty field), as before.
                 .comment(col(cursor, "comment"));
         if (!isSWL) {
