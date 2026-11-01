@@ -656,6 +656,14 @@ public class MainViewModel extends ViewModel {
             }
         });
         mutableIsDecoding.postValue(false);//decode state
+        // Fork: put every logged call's grid in the callsign/grid table, so stations are
+        // placed by grid (map lines, distances) rather than by country. Cheap once filled.
+        new Thread(() -> {
+            if (databaseOpr != null) {
+                int added = databaseOpr.fillCallsignQTHFromLog();
+                if (added > 0) GeneralVariables.fileLog("CallsignQTH: " + added + " grids added from the log");
+            }
+        }, "callsign-grid-fill").start();
         //create recording object
         hamRecorder = new HamRecorder(null);
         hamRecorder.startRecord();

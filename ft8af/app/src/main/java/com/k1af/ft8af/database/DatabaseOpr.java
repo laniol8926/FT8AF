@@ -1421,6 +1421,39 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * there, so a sync never re-uploads it (fork: a 54k-QSO QRZ export imported with
      * synced_qrz = 0 would otherwise queue every row for QRZ).
      */
+    /**
+     * Fork: a logged QSO's grid goes into the callsign/grid table (CallsignQTH) when the
+     * call has none yet, so its station is placed by grid from then on. A grid heard on
+     * air is fresher and is never overwritten.
+     */
+    private static void rememberLoggedGrid(SQLiteDatabase db, QSLRecord record) {
+        String grid = record.getToMaidenGrid();
+        String call = record.getToCallsign();
+        if (grid == null || grid.length() < 4 || call == null || call.isEmpty()) return;
+        db.execSQL("INSERT OR IGNORE INTO CallsignQTH (callsign,grid,updateTime) VALUES (Upper(?),?,0)",
+                new Object[]{call, grid});
+        GeneralVariables.callsignAndGrids.putIfAbsent(call.toUpperCase(java.util.Locale.US), grid);
+    }
+
+    /**
+     * Fork: fill CallsignQTH from the whole log (each call's newest logged grid), keeping
+     * grids already there. Blocking; call off the main thread. Returns rows added.
+     */
+    public int fillCallsignQTHFromLog() {
+        try {
+            db.execSQL("INSERT OR IGNORE INTO CallsignQTH (callsign,grid,updateTime) " +
+                    "SELECT Upper(q.call), q.gridsquare, 0 FROM QSLTable q JOIN " +
+                    "(SELECT call, max(id) AS mid FROM QSLTable WHERE length(gridsquare)>=4 " +
+                    "GROUP BY call) m ON q.id = m.mid");
+            try (Cursor c = db.rawQuery("SELECT changes()", null)) {
+                return c.moveToFirst() ? c.getInt(0) : 0;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "fillCallsignQTHFromLog: " + e.getMessage());
+            return 0;
+        }
+    }
+
     private static void markImportedUploads(SQLiteDatabase db, QSLRecord record) {
         StringBuilder set = new StringBuilder();
         if (record.uploadedQrz) set.append("synced_qrz=1");
@@ -1723,6 +1756,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     , record.getTxPwr()
                     , record.getCountry()});
             markImportedUploads(db, record);
+            rememberLoggedGrid(db, record);
             // If this QSO was logged during an active POTA activation, refresh its
             // qso_count. This is a dupe-aware recount, not a blind increment: POTA
             // doesn't credit a repeat contact with the same station on the same band.
@@ -1751,6 +1785,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
 
         } else {
             markImportedUploads(db, record);
+            rememberLoggedGrid(db, record);
             if (record.isQSL) {
                 db.execSQL("UPDATE  QSLTable  SET isQSL=? " +
                                 " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)"
