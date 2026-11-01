@@ -426,8 +426,17 @@ fun DecodeScreen(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-            // Whenever TX is on -- in a QSO or calling CQ -- the panel owns the column.
-            val hideListForQso = leftColumnFooter != null && txActivated
+            // While TX is on the panel owns the column -- but only once there is something
+            // to show: our first over has keyed (CQ or a reply) or a station answered.
+            // Until then the decode list stays (no empty "Calling CQ / Waiting for
+            // messages" panel when CQ is first pressed).
+            val keyedNow by mainViewModel.ft8TransmitSignal.mutableIsTransmitting.observeAsState(false)
+            var keyedThisRun by remember { mutableStateOf(false) }
+            LaunchedEffect(txActivated, keyedNow) {
+                if (!txActivated) keyedThisRun = false else if (keyedNow) keyedThisRun = true
+            }
+            val hideListForQso = leftColumnFooter != null && txActivated &&
+                (keyedThisRun || txToCallsign?.haveTargetCallsign() == true)
             Column(
                 modifier = (
                     when {
@@ -525,7 +534,8 @@ fun DecodeScreen(
                     leftColumnFooter?.invoke()
                     qsoSheet()
                 }
-            } else {
+            } else if (!txActivated) {
+                // TX off: the panel collapses itself; kept composed as before.
                 leftColumnFooter?.invoke()
             }
             }
