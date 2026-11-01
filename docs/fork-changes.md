@@ -170,7 +170,31 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
 - **ADIF COUNTRY import.** New `country` column (schema v24); ADIF import
   reads `COUNTRY` and re-importing fills it on existing rows. Used by the
   logbook table's State column for non-US contacts.
-- Not done yet: ADIF export doesn't write `STATE` or `COUNTRY`.
+- **ADIF export writes `STATE` and `COUNTRY`** (and the bulk export now
+  `TX_PWR`). In-app QSOs have no logged country, so the export takes it from
+  the callsign database. (`AdifRecord`, `ShareLogs`, `AdifLogFile`)
+- **Export/share date range is checked.** Save and Share wait until each date
+  is blank or a real YYYYMMDD and the range isn't reversed; a part-typed date
+  used to filter as a string prefix and match the wrong QSOs. When nothing
+  matches, the sheet says so instead of sharing a header-only file. The file
+  name and email subject carry the range and count
+  (`FT8AF-20261101-20261101-….adi`), and each export goes to `debug.log`.
+  (`ExportLogSheet.exportDateError`)
+- **Upload state survives import/export.** Import marks a QSO as already in
+  QRZ when the ADIF has `QRZCOM_QSO_UPLOAD_STATUS=Y` or `APP_QRZLOG_LOGID`
+  (every row of a QRZ.com export), and as in Cloudlog/WRL from
+  `APP_FT8AF_SYNCED_CLOUDLOG/WRL`. Export writes those flags back. Before,
+  a 54k-QSO QRZ import was queued in full for the next QRZ sync. A QRZ
+  "duplicate" refusal now marks the row synced, as Cloudlog's already did.
+- **LoTW confirmations download.** Settings → Logging → LoTW confirmations
+  takes the lotw.arrl.org login and downloads `lotwreport.adi` (incremental
+  from the last QSL date, or all), marking matching QSOs LoTW-confirmed. It
+  matches on call, date, band, mode and HH:MM, and never adds QSOs. Upload
+  isn't possible this way: LoTW needs each QSO signed with the TQSL
+  certificate. (`radio.ks3ckc.ft8af.lotw.LotwClient`)
+- **Settings backup covers more.** Advanced → Backup & Restore (upstream
+  #357) now also saves custom band dials, the theme and followed callsigns.
+  Tick "Include sensitive data" to carry the passwords and API keys.
 - **TX power in the log.** In-app QSOs record the operator identity power as
   ADIF `TX_PWR` (new `tx_pwr` column, schema v23). It's written to the ADIF
   log file and exports, the QRZ, Cloudlog and Wavelog uploads, and both UDP
