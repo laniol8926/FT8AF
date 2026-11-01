@@ -778,6 +778,28 @@ private fun MapHeader(
                 )
             }
         }
+        val context = LocalContext.current
+        // Fork: opens the FT8CN/FT8TW-style grid tracker (osmdroid map, QSO lines),
+        // which the app has always shipped but the Compose UI never opened.
+        val openGridTracker = {
+            context.startActivity(
+                android.content.Intent(context, com.k1af.ft8af.grid_tracker.GridTrackerMainActivity::class.java),
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .height(if (leading != null) MapCompactButtonHeight else 44.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(BgSurface2)
+                .border(1.dp, BorderSubtle, RoundedCornerShape(14.dp))
+                .clickable(onClick = openGridTracker)
+                .padding(horizontal = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(text = "Tracker", color = TextMuted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(modifier = Modifier.width(8.dp))
         Box {
             val menuCd = stringResource(R.string.map_menu_cd)
             Box(
@@ -813,7 +835,15 @@ private fun MapHeader(
                     },
                     onClick = { onGrayLineToggle(!grayLineEnabled) },
                 )
+                DropdownMenuItem(
+                    text = { Text("Grid tracker map (FT8TW style)") },
+                    onClick = {
+                        onMenuDismiss()
+                        openGridTracker()
+                    },
+                )
             }
+        }
         }
     }
 }
