@@ -282,7 +282,8 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   markers and QSO lines need work: they overlap each other and crowd the
   small panel (two CQ boxes stacked over the US), show "dBm"/"ms" detail and
   a country from the prefix lookup (KG4KTB in EM73 shown as "Guantanamo
-  Bay"). To decide: callsign-only labels, CQs only, tap-to-open, or none.
+  Bay"). Decided (2026-11-01): clean them up by removing info from the boxes;
+  which lines to keep is to be settled when work resumes.
   (`GridOsmMapView` info windows, `GridTrackerPanel`)
 - In landscape the bottom row of Settings → Radio & Audio can sit behind
   other content (Enabled Bands was hard to reach).
