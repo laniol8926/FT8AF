@@ -528,6 +528,12 @@ public class ThirdPartyService {
      * <p>Deliberately does not echo the whole response: it contains the submitted ADIF,
      * and this string is written to {@code debug.log}.
      */
+    /** QRZ's "Unable to add QSO to database: duplicate" refusal, as {@link #describeQrzFailure} words it. */
+    static boolean isQrzDuplicateRejection(String failure) {
+        return failure != null && failure.startsWith("RESULT=FAIL")
+                && failure.toLowerCase(Locale.US).contains("duplicate");
+    }
+
     static String describeQrzFailure(String response) {
         String result = parseQrzResult(response);
         StringBuilder sb = new StringBuilder("RESULT=")
@@ -861,11 +867,14 @@ public class ThirdPartyService {
                 }
                 if (qrz && !alreadyQrz) {
                     String adif = buildAdifFromCursor(cursor, ServiceType.QRZ);
-                    StringBuilder why = qrzError == null ? new StringBuilder() : null;
+                    StringBuilder why = new StringBuilder();
                     if (uploadAdifToQrz(adif, why)) {
                         qrzOk++;
                         if (rowId >= 0) markRowSynced(db, rowId, "synced_qrz");
-                    } else if (why != null && why.length() > 0) {
+                    } else if (isQrzDuplicateRejection(why.toString())) {
+                        // QRZ already has it: mark it so the next sync doesn't resend it.
+                        if (rowId >= 0) markRowSynced(db, rowId, "synced_qrz");
+                    } else if (qrzError == null && why.length() > 0) {
                         qrzError = why.toString();
                     }
                 }

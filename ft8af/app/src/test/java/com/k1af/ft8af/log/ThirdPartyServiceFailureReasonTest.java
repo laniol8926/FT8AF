@@ -68,6 +68,9 @@ public class ThirdPartyServiceFailureReasonTest {
                 "RESULT=FAIL&REASON=Unable to add QSO to database: duplicate&EXTENDED=");
 
         assertThat(out).isEqualTo("RESULT=FAIL: Unable to add QSO to database: duplicate");
+        assertThat(ThirdPartyService.isQrzDuplicateRejection(out)).isTrue();
+        assertThat(ThirdPartyService.isQrzDuplicateRejection("RESULT=FAIL: invalid api key"))
+                .isFalse();
     }
 
     @Test

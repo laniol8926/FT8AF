@@ -42,6 +42,14 @@ public final class AdifRecord {
      */
     public static final String APP_QSL_MANUAL = "APP_FT8AF_QSL_MANUAL";
 
+    /**
+     * Fork: upload state carried through an export/re-import (e.g. after a reinstall), so
+     * the restored rows aren't uploaded again. QRZ uses the standard
+     * QRZCOM_QSO_UPLOAD_STATUS; Cloudlog and WRL have no ADIF field, hence APP_ ones.
+     */
+    public static final String APP_SYNCED_CLOUDLOG = "APP_FT8AF_SYNCED_CLOUDLOG";
+    public static final String APP_SYNCED_WRL = "APP_FT8AF_SYNCED_WRL";
+
     /** Legacy, non-conformant name for {@link #APP_QSL_MANUAL}. Read-only: never emitted. */
     public static final String LEGACY_QSL_MANUAL = "QSL_MANUAL";
 
@@ -69,6 +77,9 @@ public final class AdifRecord {
     private String txPwr;
     private String state;
     private String country;
+    private boolean syncedQrz;
+    private boolean syncedCloudlog;
+    private boolean syncedWrl;
     private String comment;
 
     public AdifRecord call(String v) { this.call = v; return this; }
@@ -120,6 +131,14 @@ public final class AdifRecord {
 
     /** Worked station's ADIF COUNTRY (DXCC entity name). */
     public AdifRecord country(String v) { this.country = v; return this; }
+
+    /** Which online logs already hold this QSO; only the true ones are emitted. */
+    public AdifRecord synced(boolean qrz, boolean cloudlog, boolean wrl) {
+        this.syncedQrz = qrz;
+        this.syncedCloudlog = cloudlog;
+        this.syncedWrl = wrl;
+        return this;
+    }
 
     public AdifRecord comment(String v) { this.comment = v; return this; }
 
@@ -175,6 +194,9 @@ public final class AdifRecord {
         appendIfNotEmpty(sb, "TX_PWR", txPwr);
         appendIfNotEmpty(sb, "STATE", state);
         appendIfNotEmpty(sb, "COUNTRY", country);
+        if (syncedQrz) appendField(sb, "QRZCOM_QSO_UPLOAD_STATUS", "Y");
+        if (syncedCloudlog) appendField(sb, APP_SYNCED_CLOUDLOG, "Y");
+        if (syncedWrl) appendField(sb, APP_SYNCED_WRL, "Y");
         appendIfNotEmpty(sb, "comment", comment);
         sb.append("<eor>\n");
         return sb.toString();

@@ -168,6 +168,15 @@ public class AdifRecordTest {
     }
 
     @Test
+    public void syncedFlags_emittedOnlyWhenTrue() {
+        String out = new AdifRecord().call("W1AW").synced(true, false, true).build();
+        assertThat(out).contains("<QRZCOM_QSO_UPLOAD_STATUS:1>Y ");
+        assertThat(out).doesNotContain(AdifRecord.APP_SYNCED_CLOUDLOG);
+        assertThat(out).contains("<" + AdifRecord.APP_SYNCED_WRL + ":1>Y ");
+        assertThat(new AdifRecord().call("W1AW").build()).doesNotContain("UPLOAD_STATUS");
+    }
+
+    @Test
     public void everyDeclaredLengthMatchesUtf8Bytes() {
         // Include a non-ASCII comment: "Ω" is 2 UTF-8 bytes but 1 char. The declared length
         // must be the byte count, or the following field misaligns.

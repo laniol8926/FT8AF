@@ -22,6 +22,29 @@ import java.util.HashMap;
 public class QSLRecordTest {
 
     @Test
+    public void adifImport_readsOnlineLogUploadStatus() {
+        HashMap<String, String> map = new HashMap<>();
+        map.put("CALL", "K9LZJ");
+        map.put("COMMENT", "imported");
+        map.put("MODE", "FT8");
+        QSLRecord none = new QSLRecord(map);
+        assertThat(none.uploadedQrz).isFalse();
+        assertThat(none.uploadedCloudlog).isFalse();
+        assertThat(none.uploadedWrl).isFalse();
+
+        map.put("QRZCOM_QSO_UPLOAD_STATUS", "Y");
+        map.put(AdifRecord.APP_SYNCED_WRL, "y");
+        QSLRecord r = new QSLRecord(map);
+        assertThat(r.uploadedQrz).isTrue();
+        assertThat(r.uploadedCloudlog).isFalse();
+        assertThat(r.uploadedWrl).isTrue();
+
+        map.remove("QRZCOM_QSO_UPLOAD_STATUS");
+        map.put("APP_QRZLOG_LOGID", "207606380");
+        assertThat(new QSLRecord(map).uploadedQrz).isTrue();
+    }
+
+    @Test
     public void adifImport_readsTheLoggedState() {
         HashMap<String, String> map = new HashMap<>();
         map.put("CALL", "W5ORC");

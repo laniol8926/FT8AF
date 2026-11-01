@@ -357,7 +357,10 @@ public class ShareLogs {
                 .comment(col(cursor, "comment"));
         if (!isSWL) {
             record.lotwQsl(colInt(cursor, "isLotW_QSL") == 1)
-                    .manualQsl(colInt(cursor, "isQSL") == 1);
+                    .manualQsl(colInt(cursor, "isQSL") == 1)
+                    .synced(colInt(cursor, "synced_qrz") == 1,
+                            colInt(cursor, "synced_cloudlog") == 1,
+                            colInt(cursor, "synced_wrl") == 1);
         }
         return record;
     }

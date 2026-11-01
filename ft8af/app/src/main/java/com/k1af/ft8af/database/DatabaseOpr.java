@@ -1374,6 +1374,23 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 .comment(colStr(cursor, "comment"));
     }
 
+    /**
+     * An imported QSO the log says is already in QRZ / Cloudlog / WRL is marked synced
+     * there, so a sync never re-uploads it (fork: a 54k-QSO QRZ export imported with
+     * synced_qrz = 0 would otherwise queue every row for QRZ).
+     */
+    private static void markImportedUploads(SQLiteDatabase db, QSLRecord record) {
+        if (!record.uploadedQrz && !record.uploadedCloudlog && !record.uploadedWrl) return;
+        StringBuilder set = new StringBuilder();
+        if (record.uploadedQrz) set.append("synced_qrz=1");
+        if (record.uploadedCloudlog) set.append(set.length() > 0 ? "," : "").append("synced_cloudlog=1");
+        if (record.uploadedWrl) set.append(set.length() > 0 ? "," : "").append("synced_wrl=1");
+        db.execSQL("UPDATE QSLTable SET " + set +
+                        " WHERE (call=?) and (qso_date=?) and (time_on=?) and (mode=?)"
+                , new Object[]{record.getToCallsign(), record.getQso_date()
+                        , record.getTime_on(), record.getMode()});
+    }
+
     /** Cursor string read that tolerates the column being absent from this query. */
     private static String colStr(Cursor cursor, String column) {
         int idx = cursor.getColumnIndex(column);
@@ -1658,6 +1675,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     , record.getState()
                     , record.getTxPwr()
                     , record.getCountry()});
+            markImportedUploads(db, record);
             // If this QSO was logged during an active POTA activation, refresh its
             // qso_count. This is a dupe-aware recount, not a blind increment: POTA
             // doesn't credit a repeat contact with the same station on the same band.
@@ -1685,6 +1703,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
             }
 
         } else {
+            markImportedUploads(db, record);
             if (record.isQSL) {
                 db.execSQL("UPDATE  QSLTable  SET isQSL=? " +
                                 " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)"

@@ -53,6 +53,11 @@ public class QSLRecord {
     private String state;
     // The worked station's ADIF COUNTRY (DXCC entity name), as logged. Null if none (fork).
     private String country;
+    // Import says this QSO is already in that online log (fork): QRZCOM_QSO_UPLOAD_STATUS=Y
+    // or a QRZ logbook id, and FT8AF's own APP_FT8AF_SYNCED_* export flags.
+    public boolean uploadedQrz = false;
+    public boolean uploadedCloudlog = false;
+    public boolean uploadedWrl = false;
     // ADIF TX_PWR in watts, e.g. "4.5". In-app QSOs take the operator identity's power
     // (which follows the QMX's measured output); imports keep the logged value. Null if none.
     private String txPwr;
@@ -273,6 +278,10 @@ public class QSLRecord {
             String s = map.get("STATE");
             state = s == null || s.trim().isEmpty() ? null : s.trim().toUpperCase();
         }
+        uploadedQrz = "Y".equalsIgnoreCase(trimmed(map.get("QRZCOM_QSO_UPLOAD_STATUS")))
+                || !trimmed(map.get("APP_QRZLOG_LOGID")).isEmpty();
+        uploadedCloudlog = "Y".equalsIgnoreCase(trimmed(map.get(AdifRecord.APP_SYNCED_CLOUDLOG)));
+        uploadedWrl = "Y".equalsIgnoreCase(trimmed(map.get(AdifRecord.APP_SYNCED_WRL)));
         if (map.containsKey("TX_PWR")) {//Transmit power in watts, as logged
             String p = map.get("TX_PWR");
             txPwr = p == null || p.trim().isEmpty() ? null : p.trim();
@@ -460,6 +469,10 @@ public class QSLRecord {
 
     public String getSigInfo() {
         return sigInfo;
+    }
+
+    private static String trimmed(String s) {
+        return s == null ? "" : s.trim();
     }
 
     /** The worked station's ADIF COUNTRY as logged, or null. */
