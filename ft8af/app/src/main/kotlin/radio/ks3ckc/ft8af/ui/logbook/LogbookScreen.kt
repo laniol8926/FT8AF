@@ -2018,9 +2018,9 @@ private val LogHeaderStatusWidth = 320.dp
 /** Column weights of the table view, shared by the header and every row. */
 // Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status, QSL.
 // Headings are stacked on two lines so the narrow columns stay narrow.
-// Status is wide enough for the CONFIRMED pill plus the QRZ tag side by side.
+// Status is wide enough for the CONF pill plus the QRZ tag side by side.
 private val QsoTableWeights =
-    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.7f, 0.5f, 0.5f, 1.25f, 0.95f)
+    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.8f, 0.55f, 0.55f, 0.95f, 1.05f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
@@ -2257,7 +2257,14 @@ private fun QsoTableRow(
         ) {
             // Status pill plus the upload tags (QRZ / CL / WRL), as on the cards.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (status != null) StatusPill(status = status, compact = true)
+                // "CONF", not "CONFIRMED": the short pill leaves room for the QRZ tag.
+                if (status != null) {
+                    StatusPill(
+                        status = status,
+                        compact = true,
+                        label = if (status == QsoStatus.CONFIRMED) "CONF" else null,
+                    )
+                }
                 SyncChips(
                     cloudlog = record.syncedCloudlog,
                     qrz = record.syncedQrz,
