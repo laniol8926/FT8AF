@@ -94,7 +94,7 @@ class LogbookTableSortTest {
         r.isLotW_QSL = true
         r.lotwSent = true
         r.eqslSent = true
-        assertThat(qslMarks(r)).containsExactly("L" to '✓', "E" to '↑', "P" to '·').inOrder()
+        assertThat(qslMarks(r)).containsExactly("L" to '✓', "E" to '↑', "P" to '·', "Q" to '·').inOrder()
     }
 
     @Test

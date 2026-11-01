@@ -35,6 +35,7 @@ public class QSLCallsignRecord {
     public boolean eqslRcvd = false;
     public boolean qslSent = false;
     public boolean qslRcvd = false;
+    public boolean qrzQsl = false;//Confirmed on QRZ.com
 
     public String getCallsign() {
         return callsign;

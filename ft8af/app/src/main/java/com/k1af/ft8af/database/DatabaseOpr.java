@@ -84,12 +84,13 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * v24 adds {@code QSLTable.country} (the worked station's ADIF COUNTRY, from imports; fork).
      * v25 adds {@code QSLTable.lotw_sent, eqsl_sent, eqsl_rcvd, qsl_sent, qsl_rcvd} (QSL
      * sent/received flags from a CQRLOG-style ADIF; LoTW received stays isLotW_QSL; fork).
+     * v26 adds {@code QSLTable.qrz_qsl} (confirmed on QRZ.com: APP_QRZLOG_STATUS=C; fork).
      */
-    static final int SCHEMA_VERSION = 25;
+    static final int SCHEMA_VERSION = 26;
 
-    /** Fork v25 QSL flag columns, in the order {@link QSLRecord#qslFlags()} returns them. */
+    /** Fork QSL flag columns (v25, qrz_qsl v26), in the order {@link QSLRecord#qslFlags()} returns them. */
     public static final String[] QSL_FLAG_COLUMNS =
-            {"lotw_sent", "eqsl_sent", "eqsl_rcvd", "qsl_sent", "qsl_rcvd"};
+            {"lotw_sent", "eqsl_sent", "eqsl_rcvd", "qsl_sent", "qsl_rcvd", "qrz_qsl"};
 
     public static synchronized DatabaseOpr getInstance(@Nullable Context context, @Nullable String databaseName) {
         if (instance == null) {
@@ -357,7 +358,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     "eqsl_sent INTEGER DEFAULT 0,\n" +
                     "eqsl_rcvd INTEGER DEFAULT 0,\n" +
                     "qsl_sent INTEGER DEFAULT 0,\n" +
-                    "qsl_rcvd INTEGER DEFAULT 0)");
+                    "qsl_rcvd INTEGER DEFAULT 0,\n" +
+                    "qrz_qsl INTEGER DEFAULT 0)");//Confirmed on QRZ.com (fork v26)
         }
 
 
@@ -2524,7 +2526,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     // QSL sent/received flags for the table's QSL column (fork v25).
                     ",max(q.lotw_sent) as lotw_sent,max(q.eqsl_sent) as eqsl_sent" +
                     ",max(q.eqsl_rcvd) as eqsl_rcvd,max(q.qsl_sent) as qsl_sent" +
-                    ",max(q.qsl_rcvd) as qsl_rcvd\n" +
+                    ",max(q.qsl_rcvd) as qsl_rcvd,max(q.qrz_qsl) as qrz_qsl\n" +
                     "from QSLTable q inner join QSLTable q2 ON q.id =q2.id \n" +
                     "where (q.[call] like ?)\n" +
                     filterStr +
@@ -2569,6 +2571,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     record.eqslRcvd = colInt(cursor, "eqsl_rcvd") == 1;
                     record.qslSent = colInt(cursor, "qsl_sent") == 1;
                     record.qslRcvd = colInt(cursor, "qsl_rcvd") == 1;
+                    record.qrzQsl = colInt(cursor, "qrz_qsl") == 1;
                     record.setLastTime(cursor.getString(cursor.getColumnIndex("last_time")));
                     int idxTimeOn = cursor.getColumnIndex("last_time_on");
                     if (idxTimeOn >= 0) {

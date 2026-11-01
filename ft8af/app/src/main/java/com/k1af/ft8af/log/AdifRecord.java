@@ -56,6 +56,9 @@ public final class AdifRecord {
      */
     public static final String APP_QSL_RCVD_CARD = "APP_FT8AF_QSL_RCVD_CARD";
 
+    /** Fork: confirmed on QRZ.com (read from a QRZ export's APP_QRZLOG_STATUS=C). */
+    public static final String APP_QRZ_CONFIRMED = "APP_FT8AF_QRZ_CONFIRMED";
+
     /** Legacy, non-conformant name for {@link #APP_QSL_MANUAL}. Read-only: never emitted. */
     public static final String LEGACY_QSL_MANUAL = "QSL_MANUAL";
 
@@ -211,7 +214,7 @@ public final class AdifRecord {
         if (syncedQrz) appendField(sb, "QRZCOM_QSO_UPLOAD_STATUS", "Y");
         if (syncedCloudlog) appendField(sb, APP_SYNCED_CLOUDLOG, "Y");
         if (syncedWrl) appendField(sb, APP_SYNCED_WRL, "Y");
-        if (qslFlags != null && qslFlags.length == 5) {
+        if (qslFlags != null && qslFlags.length == 6) {
             // LOTW_QSL_RCVD alongside the historical QSL_RCVD, so CQRLOG and other loggers
             // that read QSL_RCVD as the paper card still see the LoTW confirmation.
             if (lotwQsl && !swl) appendField(sb, "LOTW_QSL_RCVD", "Y");
@@ -220,6 +223,7 @@ public final class AdifRecord {
             if (qslFlags[2]) appendField(sb, "EQSL_QSL_RCVD", "Y");
             if (qslFlags[3]) appendField(sb, "QSL_SENT", "Y");
             if (qslFlags[4]) appendField(sb, APP_QSL_RCVD_CARD, "Y");
+            if (qslFlags[5]) appendField(sb, APP_QRZ_CONFIRMED, "Y");
         }
         appendIfNotEmpty(sb, "comment", comment);
         sb.append("<eor>\n");

@@ -36,13 +36,16 @@ public class QSLRecordTest {
         map.put("QSL_RCVD", "Y");
         QSLRecord r = new QSLRecord(map);
         assertThat(r.isLotW_QSL).isTrue();
-        assertThat(r.qslFlags()).isEqualTo(new boolean[]{true, true, false, false, true});
+        assertThat(r.qslFlags()).isEqualTo(new boolean[]{true, true, false, false, true, false});
 
         // Paper card received but LoTW not: the LoTW confirmation must stay off.
         map.put("LOTW_QSL_RCVD", "N");
         QSLRecord paperOnly = new QSLRecord(map);
         assertThat(paperOnly.isLotW_QSL).isFalse();
         assertThat(paperOnly.qslRcvd).isTrue();
+        assertThat(paperOnly.qrzQsl).isFalse();
+        map.put("APP_QRZLOG_STATUS", "C");
+        assertThat(new QSLRecord(map).qrzQsl).isTrue();
     }
 
     @Test

@@ -2020,7 +2020,7 @@ private val LogHeaderStatusWidth = 320.dp
 // Headings are stacked on two lines so the narrow columns stay narrow.
 // Status is wide enough for the CONFIRMED pill plus the QRZ tag side by side.
 private val QsoTableWeights =
-    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.7f, 0.55f, 0.55f, 1.25f, 0.82f)
+    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.7f, 0.5f, 0.5f, 1.25f, 0.95f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
@@ -2109,6 +2109,8 @@ internal fun qslMarks(r: QSLCallsignRecord): List<Pair<String, Char>> {
         "L" to mark(r.isLotW_QSL, r.lotwSent),
         "E" to mark(r.eqslRcvd, r.eqslSent),
         "P" to mark(r.qslRcvd, r.qslSent),
+        // QRZ.com confirmation (no "sent": the QRZ tag in Status shows the upload).
+        "Q" to mark(r.qrzQsl, false),
     )
 }
 

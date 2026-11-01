@@ -64,10 +64,12 @@ public class QSLRecord {
     public boolean eqslRcvd = false;
     public boolean qslSent = false;
     public boolean qslRcvd = false;
+    // Confirmed on QRZ.com: a QRZ export's APP_QRZLOG_STATUS=C, or FT8AF's own export flag.
+    public boolean qrzQsl = false;
 
     /** The QSL flags in {@code DatabaseOpr.QSL_FLAG_COLUMNS} order. */
     public boolean[] qslFlags() {
-        return new boolean[]{lotwSent, eqslSent, eqslRcvd, qslSent, qslRcvd};
+        return new boolean[]{lotwSent, eqslSent, eqslRcvd, qslSent, qslRcvd, qrzQsl};
     }
     // ADIF TX_PWR in watts, e.g. "4.5". In-app QSOs take the operator identity's power
     // (which follows the QMX's measured output); imports keep the logged value. Null if none.
@@ -219,6 +221,8 @@ public class QSLRecord {
         eqslSent = isY(map.get("EQSL_QSL_SENT"));
         eqslRcvd = isY(map.get("EQSL_QSL_RCVD"));
         qslSent = isY(map.get("QSL_SENT"));
+        qrzQsl = "C".equalsIgnoreCase(trimmed(map.get("APP_QRZLOG_STATUS")))
+                || isY(map.get(AdifRecord.APP_QRZ_CONFIRMED));
         // QSL_RCVD is the paper card when the record also carries LOTW_QSL_RCVD (above it
         // stands in for LoTW, as in LoTW's own report). FT8AF's own export keeps writing
         // QSL_RCVD for LoTW, so its card flag travels in APP_FT8AF_QSL_RCVD_CARD instead.
