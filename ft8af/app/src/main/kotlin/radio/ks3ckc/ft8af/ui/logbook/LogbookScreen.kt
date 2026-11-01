@@ -2020,7 +2020,7 @@ private val LogHeaderStatusWidth = 320.dp
 // Headings are stacked on two lines so the narrow columns stay narrow.
 // Status is wide enough for the CONFIRMED pill plus the QRZ tag side by side.
 private val QsoTableWeights =
-    listOf(0.9f, 0.62f, 1.0f, 0.66f, 0.75f, 0.72f, 0.85f, 0.55f, 0.55f, 1.25f, 0.62f)
+    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.7f, 0.55f, 0.55f, 1.25f, 0.82f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
@@ -2384,7 +2384,7 @@ private fun QslMarksText(record: QSLCallsignRecord) {
     }
     Text(
         text = text,
-        fontSize = 11.sp,
+        fontSize = 10.5.sp,
         fontFamily = GeistMonoFamily,
         fontWeight = FontWeight.SemiBold,
         maxLines = 1,
