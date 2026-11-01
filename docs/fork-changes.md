@@ -152,6 +152,17 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   frequency ruler labels use the full text colour. The offset frequency moved
   from the top bar to the bottom strip next to LIVE. In the landscape panel
   the waterfall shows without the spectrum strip.
+- **Grid tracker in the map panel.** The map header's **Tracker** button swaps
+  the map card (Map tab and the landscape Decode panel) for the FT8CN/FT8TW
+  grid tracker: offline night map, this slot's QSO lines and CQ markers,
+  labelled, redrawn each slot. No grid shading (a big log covered the map).
+  The choice is remembered. The full-screen tracker stays in the map's ⚙ menu.
+  (`GridTrackerPanel`)
+- **Callsign/grid table.** `CallsignQTH` (call → grid) is filled from the log
+  at startup (each call's newest grid, ~18.5k calls) and by every saved or
+  imported QSO, without overwriting a grid heard on air. On-air grids (CQs
+  and replies to anyone) keep updating it. Stations are then placed by grid
+  instead of their country's centre, so the tracker draws far more QSO lines.
 
 ## Logbook and NEW STATE
 
@@ -241,10 +252,14 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
 
 ## Open items
 
-- Whether the white partner line should be landscape-only too.
+- **Grid tracker pop-up boxes** (map panel Tracker). The info bubbles on CQ
+  markers and QSO lines need work: they overlap each other and crowd the
+  small panel (two CQ boxes stacked over the US), show "dBm"/"ms" detail and
+  a country from the prefix lookup (KG4KTB in EM73 shown as "Guantanamo
+  Bay"). To decide: callsign-only labels, CQs only, tap-to-open, or none.
+  (`GridOsmMapView` info windows, `GridTrackerPanel`)
 - In landscape the bottom row of Settings → Radio & Audio can sit behind
   other content (Enabled Bands was hard to reach).
-- ADIF export doesn't write `STATE` / `COUNTRY`; email share has no attachment.
 - A non-debug build with a higher version code (e.g. upstream
   0.150.0-dev.1498) can't be replaced by our debug build without
   uninstalling it first, which clears the app's data.
