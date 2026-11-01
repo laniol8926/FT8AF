@@ -2015,8 +2015,9 @@ private val LogHeaderStatusWidth = 320.dp
 /** Column weights of the table view, shared by the header and every row. */
 // Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status.
 // Headings are stacked on two lines so the narrow columns stay narrow.
+// Status is wide enough for the CONFIRMED pill plus the QRZ tag side by side.
 private val QsoTableWeights =
-    listOf(1.05f, 0.62f, 1.15f, 0.72f, 0.8f, 0.78f, 0.95f, 0.55f, 0.55f, 0.95f)
+    listOf(0.95f, 0.62f, 1.0f, 0.72f, 0.8f, 0.78f, 0.85f, 0.55f, 0.55f, 1.25f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
@@ -2238,6 +2239,7 @@ private fun QsoTableRow(
                     qrz = record.syncedQrz,
                     wrl = record.syncedWrl,
                     cloudlogLabel = cloudlogFamilyLabel(GeneralVariables.cloudlogServerAddress),
+                    tight = true,
                 )
             }
         }
@@ -2335,15 +2337,22 @@ internal fun formatQsoDateIso(qsoDate: String): String {
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun SyncChips(cloudlog: Boolean, qrz: Boolean, wrl: Boolean, cloudlogLabel: String) {
+private fun SyncChips(
+    cloudlog: Boolean,
+    qrz: Boolean,
+    wrl: Boolean,
+    cloudlogLabel: String,
+    // Landscape table: no "↑" and less spacing, so the tags fit beside the status pill.
+    tight: Boolean = false,
+) {
     val labels = syncChipLabels(cloudlog, qrz, wrl, cloudlogLabel)
     if (labels.isEmpty()) return
     Row(
-        modifier = Modifier.padding(start = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.padding(start = if (tight) 4.dp else 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (tight) 3.dp else 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        labels.forEach { SyncChip(label = it) }
+        labels.forEach { SyncChip(label = it, arrow = !tight) }
     }
 }
 
@@ -2373,7 +2382,7 @@ private fun cloudlogFamilyLabel(serverAddress: String?): String {
 }
 
 @Composable
-private fun SyncChip(label: String) {
+private fun SyncChip(label: String, arrow: Boolean = true) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
@@ -2383,7 +2392,7 @@ private fun SyncChip(label: String) {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "↑ $label",
+            text = if (arrow) "↑ $label" else label,
             color = Signal,
             fontSize = 9.sp,
             fontWeight = FontWeight.SemiBold,
