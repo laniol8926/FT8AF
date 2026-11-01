@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.ui.layout.onSizeChanged
@@ -571,10 +572,18 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
         // ever be visible) — the Box behind still paints BgApp into the padded band so a
         // notched phone shows app background beside the camera, not a black strip.
         // Which sides, and why: see AppInsets.kt.
+        // Landscape (fork): pad for the display cutout only. The system bars are hidden
+        // immersively but Android flashes the status bar back a few seconds after each
+        // over; padding for it (safeDrawing) dropped the whole screen 70 px and slid it
+        // back up every TX/RX change. The cutout never comes and goes.
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .windowInsetsPadding(appContentInsets(WindowInsets.safeDrawing)),
+                .windowInsetsPadding(
+                    appContentInsets(
+                        if (isLandscape) WindowInsets.displayCutout else WindowInsets.safeDrawing,
+                    ),
+                ),
         ) {
             // SWR lockout banner — red warning at top when SWR halt triggered
             if (swrLocked) {
