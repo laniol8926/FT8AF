@@ -52,13 +52,20 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
 
         val decodingObserver = Observer<Boolean> { decoding ->
             if (decoding == true) {
+                tracker.hideInfoWindows()
                 tracker.clearLines()
                 tracker.clearMarkers()
             }
         }
         val messagesObserver = Observer<ArrayList<Ft8Message>> {
             val current = mainViewModel.currentMessages ?: return@Observer
-            for (msg in ArrayList(current)) {
+            // The waterfall label list can still carry the previous slot's decodes into
+            // this one (a deep pass merges onto it); draw only the newest slot, so last
+            // slot's CQ bubbles don't reappear after the clear.
+            val slotMs = GeneralVariables.currentMode().slotMillis.toLong().coerceAtLeast(1L)
+            val messages = ArrayList(current)
+            val newestSlot = messages.maxOfOrNull { it.utcTime / slotMs } ?: return@Observer
+            for (msg in messages.filter { it.utcTime / slotMs == newestSlot }) {
                 // No upgradeGridInfo: it shades each decoded grid and never clears it.
                 tracker.drawLine(msg, mainViewModel.databaseOpr)
                 if (msg.checkIsCQ()) {
