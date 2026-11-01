@@ -228,6 +228,9 @@ internal data class TxLogDecision(
  * @param message         the current transmit-message text (empty until populated)
  * @param hasTarget       whether a real target callsign is set (CQ has no mini-log)
  */
+// Cap on our own TX rows in the landscape running log (fork); RX rows have their own cap.
+private const val MAX_CONTINUOUS_TX_ROWS = 60
+
 internal fun decideTxLog(
     wasTransmitting: Boolean,
     isTransmitting: Boolean,
@@ -319,9 +322,21 @@ fun ActiveQsoPanel(
     // real QSO ends from tab-switch flickers (LiveData re-subscription emits
     // null for 1–2 frames). LaunchedEffect cancels the pending delay when the
     // key changes, so flickers never clear synthTxTarget. (#250 follow-up)
+    // Landscape split view (fork): one running log for the whole TX run -- our CQ
+    // overs, then whoever answers and the exchange, never cleared mid-run (it read as
+    // a separate "calling CQ" panel replaced by a QSO panel). A new run starts it fresh.
+    val continuousLog = inLeftColumn
+    LaunchedEffect(isActivated, continuousLog) {
+        if (continuousLog && isActivated) {
+            synthTxLog.clear()
+            rxLog.clear()
+            wasTransmitting = false
+            pendingTxLog = false
+        }
+    }
     LaunchedEffect(displayCallsign) {
         if (displayCallsign != null) {
-            if (displayCallsign != synthTxTarget) {
+            if (displayCallsign != synthTxTarget && !continuousLog) {
                 synthTxLog.clear()
                 rxLog.clear()
                 wasTransmitting = false
@@ -345,11 +360,13 @@ fun ActiveQsoPanel(
             isTransmitting = isTransmitting,
             pending = pendingTxLog,
             message = msg,
-            hasTarget = displayCallsign != null,
+            // Continuous log: CQ overs count too.
+            hasTarget = displayCallsign != null || (continuousLog && isActivated),
         )
         wasTransmitting = decision.wasTransmittingAfter
         pendingTxLog = decision.pendingAfter
         if (decision.shouldLog) {
+            if (synthTxLog.size >= MAX_CONTINUOUS_TX_ROWS) synthTxLog.removeAt(0)
             synthTxLog.add(
                 QsoLogEntry(
                     direction = QsoLogEntry.Direction.TX,
@@ -395,7 +412,7 @@ fun ActiveQsoPanel(
     // reading them here registers the dependency and any change recomposes. A remember
     // keyed on sizes would miss a merge that trims as it appends.
     val qsoMessages: List<QsoLogEntry> =
-        if (logTarget == null) emptyList()
+        if (logTarget == null && !continuousLog) emptyList()
         else (rxLog + synthTxLog).sortedBy { it.utcTime }
 
     // Banner SNR (#953): the heard value is the same decode the QSO sheet's Signal
