@@ -708,6 +708,8 @@ public class FT8TransmitSignal {
             this.toMaidenheadGrid = "";
         }
         mutableToCallsign.postValue(transmitCallsign.copy());// set the call target (includes report, sequence, frequency, callsign)
+        // Fork: look the partner up on QRZ now, so its state is cached when the QSO is logged.
+        if (transmitCallsign != null) radio.ks3ckc.ft8af.qrz.QrzXmlClient.prefetch(transmitCallsign.callsign);
         toCallsign = transmitCallsign;// set the call target
         //mutableToCallsign.postValue(toCallsign);// set the call target
 

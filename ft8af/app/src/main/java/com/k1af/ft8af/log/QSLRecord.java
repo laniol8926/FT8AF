@@ -471,6 +471,24 @@ public class QSLRecord {
         this.time_on = time_on;
     }
 
+    // Fork: the import's duplicate check copies the stored row's key onto the record, and
+    // logging fills STATE / COUNTRY for in-app QSOs.
+    public void setToCallsign(String toCallsign) {
+        this.toCallsign = toCallsign;
+    }
+
+    public void setMode(String mode) {
+        if (mode != null) this.mode = mode;
+    }
+
+    public void setState(String state) {
+        this.state = state;
+    }
+
+    public void setCountry(String country) {
+        this.country = country;
+    }
+
     public String getMySig() {
         return mySig;
     }

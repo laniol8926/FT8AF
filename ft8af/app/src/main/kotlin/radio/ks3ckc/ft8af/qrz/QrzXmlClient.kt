@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.k1af.ft8af.GeneralVariables
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -50,7 +51,32 @@ object QrzXmlClient {
     @Volatile var lastError: String? = null
         private set
 
-    data class QrzLookup(val imageUrl: String?)
+    /** Fork: also the registered state, grid and country, for the logged STATE. */
+    data class QrzLookup(
+        val imageUrl: String?,
+        val state: String? = null,
+        val grid: String? = null,
+        val country: String? = null,
+    )
+
+    /** Fork: the cached lookup for [callsign], or null; never touches the network. */
+    @JvmStatic
+    fun cached(callsign: String?): QrzLookup? {
+        val key = callsign?.trim()?.uppercase().orEmpty()
+        return if (key.isEmpty()) null else cache.get(key)
+    }
+
+    /**
+     * Fork: look [callsign] up in the background so it's cached by the time the QSO is
+     * logged (the QSO partner, when TX starts). No-op without QRZ XML credentials.
+     */
+    @JvmStatic
+    fun prefetch(callsign: String?) {
+        val key = callsign?.trim()?.uppercase().orEmpty()
+        if (key.isEmpty() || key == "CQ" || cache.get(key) != null) return
+        if (GeneralVariables.qrzXmlUsername.isNullOrEmpty() || GeneralVariables.qrzXmlPassword.isNullOrEmpty()) return
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { runCatching { lookup(key) } }
+    }
 
     /**
      * Test the configured credentials. Returns a human-readable status
@@ -83,7 +109,9 @@ object QrzXmlClient {
         val key = callsign.trim().uppercase()
         if (key.isEmpty()) return@withContext null
 
-        cache.get(key)?.let { return@withContext it }
+        // A photo-less entry (kept for its state, fork) is fetched again, in case the
+        // station has uploaded a photo since.
+        cache.get(key)?.takeIf { it.imageUrl != null }?.let { return@withContext it }
 
         val user = GeneralVariables.qrzXmlUsername.orEmpty()
         val pass = GeneralVariables.qrzXmlPassword.orEmpty()
@@ -114,18 +142,24 @@ object QrzXmlClient {
         }
 
         val image = parseTag(xml, "image")
+        // Fork: state / grid / country are cached even without a photo (the logged
+        // STATE uses them); a photo-less lookup still returns null to the avatar.
+        val result = QrzLookup(
+            imageUrl = image?.takeIf { it.isNotEmpty() },
+            state = parseTag(xml, "state")?.trim()?.uppercase()?.takeIf { it.isNotEmpty() },
+            grid = parseTag(xml, "grid")?.trim()?.takeIf { it.isNotEmpty() },
+            country = parseTag(xml, "country")?.trim()?.takeIf { it.isNotEmpty() },
+        )
+        cache.put(key, result)
         if (image.isNullOrEmpty()) {
             // No <image> tag — log a snippet so we can see what QRZ returned
             // (this is the most common failure mode if the callsign has no
             // profile photo or our parser is missing the tag).
             log("lookup($key) no image; response head: ${xml.take(600).replace("\n", " ")}")
-            // Don't cache — try again later in case the callsign uploads a photo.
             return@withContext null
         }
 
         log("lookup($key) -> $image")
-        val result = QrzLookup(imageUrl = image)
-        cache.put(key, result)
         result
     }
 

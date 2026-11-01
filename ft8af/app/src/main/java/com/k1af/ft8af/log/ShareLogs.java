@@ -144,7 +144,14 @@ public class ShareLogs {
                 String country = col(cursor, "country");
                 if (country == null || country.isEmpty()) {
                     // QSOs made in the app carry no COUNTRY; take it from the callsign DB.
-                    record.country(lookupCountry(col(cursor, "call"), countryCache));
+                    country = lookupCountry(col(cursor, "call"), countryCache);
+                    record.country(country);
+                }
+                String state = col(cursor, "state");
+                if ((state == null || state.isEmpty()) && (country == null
+                        || country.toUpperCase(java.util.Locale.US).startsWith("UNITED STATES"))) {
+                    // Nor STATE: take it from a US grid, as the logbook's State column does.
+                    record.state(GeneralVariables.stateForGrid(col(cursor, "gridsquare")));
                 }
                 fileOutputStream.write(record.toBytes());
             }

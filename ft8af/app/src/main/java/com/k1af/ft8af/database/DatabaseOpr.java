@@ -1422,6 +1422,48 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * synced_qrz = 0 would otherwise queue every row for QRZ).
      */
     /**
+     * Fork: give a new QSO the COUNTRY and STATE an import would carry, when it has none
+     * (QSOs made in the app). Country from the callsign database; state from the grid,
+     * US grids only. Both then go to the log, ft8af_log.adi, exports and uploads.
+     */
+    private static void fillPlace(QSLRecord record) {
+        String country = record.getCountry();
+        if (country == null || country.isEmpty()) {
+            try {
+                if (GeneralVariables.callsignDatabase != null && record.getToCallsign() != null) {
+                    com.k1af.ft8af.callsign.CallsignInfo info =
+                            GeneralVariables.callsignDatabase.getCallInfo(record.getToCallsign());
+                    if (info != null && info.CountryNameEn != null && !info.CountryNameEn.isEmpty()) {
+                        country = info.CountryNameEn;
+                        record.setCountry(country);
+                    }
+                }
+            } catch (RuntimeException e) {
+                Log.w(TAG, "fillPlace country: " + e.getMessage());
+            }
+        }
+        String state = record.getState();
+        boolean usOrUnknown = country == null || country.isEmpty()
+                || country.toUpperCase(java.util.Locale.US).startsWith("UNITED STATES");
+        if ((state == null || state.isEmpty()) && usOrUnknown) {
+            // QRZ's state when the station is at home (QRZ grid = worked grid), else the
+            // worked grid's state: a POTA or portable station's home state is wrong.
+            String grid = record.getToMaidenGrid();
+            radio.ks3ckc.ft8af.qrz.QrzXmlClient.QrzLookup qrz =
+                    radio.ks3ckc.ft8af.qrz.QrzXmlClient.cached(record.getToCallsign());
+            boolean portable = (record.getSig() != null && !record.getSig().isEmpty())
+                    || (record.getSigInfo() != null && !record.getSigInfo().isEmpty())
+                    || radio.ks3ckc.ft8af.qrz.LoggedState.isPortableCall(record.getToCallsign());
+            String picked = radio.ks3ckc.ft8af.qrz.LoggedState.pickLoggedState(
+                    GeneralVariables.stateForGrid(grid),
+                    qrz == null ? null : qrz.getState(),
+                    qrz == null ? null : qrz.getGrid(),
+                    grid, portable);
+            if (picked != null) record.setState(picked);
+        }
+    }
+
+    /**
      * Fork: a logged QSO's grid goes into the callsign/grid table (CallsignQTH) when the
      * call has none yet, so its station is placed by grid from then on. A grid heard on
      * air is fresher and is never overwritten.
@@ -1621,22 +1663,34 @@ public class DatabaseOpr extends SQLiteOpenHelper {
     public boolean checkIsQSL(QSLRecord record) {
         QSLRecord newRecord = record;
         newRecord.id = -1;
-        //Check if the log record already exists
-        String querySQL = "select * from QSLTable WHERE (call=?)" +
-                "and (qso_date=?) and(time_on=?)" +
-                "and(mode=?)";
+        //Check if the log record already exists.
+        // Fork: match the minute of TIME_ON, case-insensitively, and the band. Loggers
+        // differ on seconds (FT8AF logs 135745, CQRLOG/QRZ export 1357) and on band case
+        // (30m / 30M), and an exact match re-added the same QSO as a second row.
+        String time = record.getTime_on() == null ? "" : record.getTime_on();
+        String band = record.getBandLength() == null ? "" : record.getBandLength();
+        String querySQL = "select * from QSLTable WHERE (upper(call)=upper(?))" +
+                "and (qso_date=?) and (substr(time_on,1,4)=substr(?,1,4))" +
+                "and (upper(mode)=upper(?))" +
+                "and (?='' or lower(band)=lower(?))";
 
         Cursor cursor = db.rawQuery(querySQL, new String[]{
                 record.getToCallsign()
                 , record.getQso_date()
-                , record.getTime_on()
-                , record.getMode()});
+                , time
+                , record.getMode()
+                , band, band});
         try {
             if (cursor.getCount() > 0) {
                 cursor.moveToFirst();
                 newRecord.isLotW_QSL = cursor.getInt(cursor.getColumnIndex("isLotW_QSL")) == 1
                         || record.isLotW_QSL;
                 newRecord.id = cursor.getLong(cursor.getColumnIndex("id"));
+                // The re-import updates that follow match on (call, qso_date, time_on,
+                // mode) exactly, so take the stored row's values for them.
+                newRecord.setTime_on(cursor.getString(cursor.getColumnIndex("time_on")));
+                newRecord.setToCallsign(cursor.getString(cursor.getColumnIndex("call")));
+                newRecord.setMode(cursor.getString(cursor.getColumnIndex("mode")));
             }
         } finally {
             cursor.close();
@@ -1725,6 +1779,7 @@ public class DatabaseOpr extends SQLiteOpenHelper {
 
 
         if (!checkIsQSL(record)) {//If log data doesn't exist, add it
+            fillPlace(record);
             querySQL = "INSERT INTO QSLTable(call, isQSL,isLotW_import,isLotW_QSL,gridsquare, mode, rst_sent, rst_rcvd, qso_date, " +
                     "time_on, qso_date_off, time_off, band, freq, station_callsign, my_gridsquare," +
                     "comment,my_sig,my_sig_info,sig,sig_info,state,tx_pwr,country)" +

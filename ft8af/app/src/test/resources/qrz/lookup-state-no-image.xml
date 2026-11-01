@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<QRZDatabase version="1.34">
+    <Callsign>
+        <call>K9LZJ</call>
+        <state>in</state>
+        <grid>EM79bs</grid>
+        <country>United States</country>
+    </Callsign>
+    <Session>
+        <Key>SESSION-OK-1234567890ABCDEF</Key>
+    </Session>
+</QRZDatabase>

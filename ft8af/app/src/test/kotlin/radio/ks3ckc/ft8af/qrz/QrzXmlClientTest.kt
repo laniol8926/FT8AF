@@ -107,6 +107,18 @@ class QrzXmlClientTest {
     }
 
     @Test
+    fun lookup_noImage_stillCachesStateForLogging() = runBlocking<Unit> {
+        server.enqueue(MockResponse().setBody(fixture("qrz/auth-ok.xml")))
+        server.enqueue(MockResponse().setBody(fixture("qrz/lookup-state-no-image.xml")))
+
+        assertThat(QrzXmlClient.lookup("K9LZJ")).isNull() // no photo for the avatar
+        val cached = QrzXmlClient.cached("k9lzj")
+        assertThat(cached?.state).isEqualTo("IN")
+        assertThat(cached?.grid).isEqualTo("EM79bs")
+        assertThat(cached?.country).isEqualTo("United States")
+    }
+
+    @Test
     fun lookup_cachesPositiveResultOnSecondCall() = runBlocking<Unit> {
         server.enqueue(MockResponse().setBody(fixture("qrz/auth-ok.xml")))
         server.enqueue(MockResponse().setBody(fixture("qrz/lookup-with-image.xml")))
