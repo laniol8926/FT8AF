@@ -178,7 +178,12 @@ private data class AwardProgress(
 // ---------------------------------------------------------------------------
 
 @Composable
-fun LogbookScreen(mainViewModel: MainViewModel) {
+fun LogbookScreen(
+    mainViewModel: MainViewModel,
+    // Landscape (fork): the operating status row, shown in the header next to the
+    // title instead of a row of its own.
+    headerStatus: (@Composable () -> Unit)? = null,
+) {
     var activeTab by remember { mutableStateOf(LogbookTab.STATS) }
     var exportSheetVisible by remember { mutableStateOf(false) }
 
@@ -388,7 +393,16 @@ fun LogbookScreen(mainViewModel: MainViewModel) {
                     val count = if (stats.totalQsos > 0) stats.totalQsos else records.size
                     TopBarSubtitle(text = stringResource(R.string.log_subtitle_qsos_all_bands, count))
                 },
+                tight = headerStatus != null,
                 actions = {
+                    if (headerStatus != null) {
+                        Box(
+                            modifier = Modifier
+                                .width(LogHeaderStatusWidth)
+                                .padding(end = 8.dp),
+                            contentAlignment = Alignment.CenterStart,
+                        ) { headerStatus() }
+                    }
                     IconButton(
                         onClick = {
                             if (syncDialogState?.inProgress == true) return@IconButton
@@ -1592,6 +1606,20 @@ private fun RecentTab(
             // header that stays put. Portrait keeps the cards.
             val tableView = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
                 android.content.res.Configuration.ORIENTATION_LANDSCAPE
+            // Table sort (fork): tap a heading to sort by it, again to reverse. Default
+            // is the date/time column, newest first -- the cards' order.
+            var sortColumn by rememberSaveable { mutableStateOf(QSO_COL_DATE) }
+            var sortAscending by rememberSaveable { mutableStateOf(false) }
+            val context = LocalContext.current
+            val shown = remember(filtered, tableView, sortColumn, sortAscending) {
+                if (tableView) {
+                    sortQsoTable(filtered, sortColumn, sortAscending) { grid ->
+                        UsStateLookup.stateFromGrid(context, grid)
+                    }
+                } else {
+                    sortQsosByDateTimeDesc(filtered)
+                }
+            }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1600,10 +1628,24 @@ private fun RecentTab(
             ) {
                 if (tableView) {
                     @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-                    stickyHeader { QsoTableHeader() }
+                    stickyHeader {
+                        QsoTableHeader(
+                            sortColumn = sortColumn,
+                            ascending = sortAscending,
+                            onSort = { col ->
+                                if (col == sortColumn) {
+                                    sortAscending = !sortAscending
+                                } else {
+                                    sortColumn = col
+                                    // Dates start newest-first; text columns A→Z.
+                                    sortAscending = col != QSO_COL_DATE && col != QSO_COL_TIME
+                                }
+                            },
+                        )
+                    }
                 }
                 items(
-                    items = sortQsosByDateTimeDesc(filtered),
+                    items = shown,
                     // Include id so an edit that changes other fields still maps to a stable key,
                     // and so two grouped rows with otherwise identical display fields don't collide.
                     key = { "${it.id}_${it.callsign}_${it.lastTime}_${it.band}" },
@@ -1940,6 +1982,9 @@ private fun QsoRow(
 // Landscape table view (fork): spreadsheet-style columns
 // ---------------------------------------------------------------------------
 
+// Width of the operating status row in the landscape Logbook header (fork).
+private val LogHeaderStatusWidth = 360.dp
+
 /** Column weights of the table view, shared by the header and every row. */
 // Date, Time, Callsign, Grid, State, Frequency, Mode, RST Sent, RST Rcvd, Status.
 // Headings are stacked on two lines so the narrow columns stay narrow.
@@ -1948,7 +1993,11 @@ private val QsoTableWeights =
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
-private fun QsoTableHeader() {
+private fun QsoTableHeader(
+    sortColumn: Int,
+    ascending: Boolean,
+    onSort: (column: Int) -> Unit,
+) {
     val titles = listOf(
         stringResource(R.string.log_col_qso_date),
         stringResource(R.string.log_col_qso_time),
@@ -1970,16 +2019,95 @@ private fun QsoTableHeader() {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         titles.forEachIndexed { i, title ->
+            val sorted = i == sortColumn
+            // The sorted column is highlighted and carries the direction arrow.
             QsoTableCell(
-                text = title,
+                text = if (sorted) "$title ${if (ascending) "▲" else "▼"}" else title,
                 weight = QsoTableWeights[i],
-                color = TextMuted,
+                color = if (sorted) Accent else TextMuted,
                 bold = true,
                 maxLines = 2,
+                background = if (sorted) AccentSoft else Color.Transparent,
+                onClick = { onSort(i) },
             )
         }
         Spacer(modifier = Modifier.width(QsoTableMenuWidth))
     }
+}
+
+// Column indices of the table view (fork), in display order.
+internal const val QSO_COL_DATE = 0
+internal const val QSO_COL_TIME = 1
+internal const val QSO_COL_CALL = 2
+internal const val QSO_COL_GRID = 3
+internal const val QSO_COL_STATE = 4
+internal const val QSO_COL_FREQ = 5
+internal const val QSO_COL_MODE = 6
+internal const val QSO_COL_RST_SENT = 7
+internal const val QSO_COL_RST_RCVD = 8
+internal const val QSO_COL_STATUS = 9
+
+/**
+ * Sort the table view by [column] (one of the QSO_COL_ constants). Date and time
+ * sort together (date+time); frequency and reports numerically (blanks last);
+ * status CONFIRMED > WORKED > none, then uploads. Ties fall back to newest first.
+ * [stateOf] maps a grid to its US state (the State column's value).
+ */
+internal fun sortQsoTable(
+    records: List<QSLCallsignRecord>,
+    column: Int,
+    ascending: Boolean,
+    stateOf: (String) -> String?,
+): List<QSLCallsignRecord> {
+    val newestFirst = sortQsosByDateTimeDesc(records)
+    if (column == QSO_COL_DATE || column == QSO_COL_TIME) {
+        return if (ascending) newestFirst.reversed() else newestFirst
+    }
+    fun num(s: String?): Double? = s?.trim()?.replace("+", "")?.toDoubleOrNull()
+    val textKey: (QSLCallsignRecord) -> String = when (column) {
+        QSO_COL_CALL -> { r -> (r.callsign ?: "").uppercase() }
+        QSO_COL_GRID -> { r -> (r.grid ?: "").uppercase() }
+        QSO_COL_STATE -> { r ->
+            (stateOf(r.grid ?: "")?.takeIf { it.isNotBlank() } ?: (r.dxccStr ?: "")).uppercase()
+        }
+        QSO_COL_MODE -> { r -> (r.mode ?: "").uppercase() }
+        else -> { _ -> "" }
+    }
+    val numKey: ((QSLCallsignRecord) -> Double?)? = when (column) {
+        QSO_COL_FREQ -> { r -> num(parseFreqMhz(r.band ?: "").removeSuffix("MHz")) }
+        QSO_COL_RST_SENT -> { r -> num(r.rstSent) }
+        QSO_COL_RST_RCVD -> { r -> num(r.rstRcvd) }
+        QSO_COL_STATUS -> { r ->
+            (if (r.isLotW_QSL) 2.0 else if (r.isQSL) 1.0 else 0.0) +
+                (if (r.syncedQrz || r.syncedCloudlog || r.syncedWrl) 0.5 else 0.0)
+        }
+        else -> null
+    }
+    // sortedWith is stable, so equal keys keep newest-first order.
+    val cmp: Comparator<QSLCallsignRecord> = if (numKey != null) {
+        Comparator { a, b ->
+            val x = numKey(a)
+            val y = numKey(b)
+            when {
+                x == null && y == null -> 0
+                x == null -> 1 // blanks last either way
+                y == null -> -1
+                else -> if (ascending) x.compareTo(y) else y.compareTo(x)
+            }
+        }
+    } else {
+        Comparator { a, b ->
+            val x = textKey(a)
+            val y = textKey(b)
+            when {
+                x.isEmpty() && y.isEmpty() -> 0
+                x.isEmpty() -> 1
+                y.isEmpty() -> -1
+                else -> if (ascending) x.compareTo(y) else y.compareTo(x)
+            }
+        }
+    }
+    return newestFirst.sortedWith(cmp)
 }
 
 @Composable
@@ -2060,12 +2188,16 @@ private fun RowScope.QsoTableCell(
     color: Color,
     bold: Boolean,
     maxLines: Int = 1,
+    background: Color = Color.Transparent,
+    onClick: (() -> Unit)? = null,
 ) {
     Box(
         modifier = Modifier
             .weight(weight)
             .fillMaxHeight()
+            .background(background)
             .border(0.5.dp, Border)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 6.dp, vertical = 7.dp),
         contentAlignment = Alignment.CenterStart,
     ) {

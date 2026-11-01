@@ -540,6 +540,30 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     val screenTab = if (actionsOnDecodeTitle) FT8AFTab.DECODE else activeTab
     // Landscape tabs without the Decode title row: status + slot bar go to the top (fork).
     val statusOnTop = isLandscape && controlsDrawerEnabled && !actionsOnDecodeTitle
+    // That row: status line + CAT chip, then the slot bar (no DT pill -- the Decode
+    // screen shows it). Placed above the content, or in the Logbook header.
+    val topStatusRow: @Composable (Modifier) -> Unit = { rowModifier ->
+        Row(modifier = rowModifier, verticalAlignment = Alignment.CenterVertically) {
+            OperateStatusRow(
+                isTransmitting = isTransmitting,
+                isTuning = isTuning,
+                slotMillis = slotMillis,
+                txSlot = txSlot,
+                showCatChip = showCatChip,
+                catState = catState,
+                onReconnectCat = onReconnectCatAction,
+                // Compact form, as on the Decode title row: "RX / TX in 9s" and the
+                // CAT chip stacked ("Radio / linked").
+                fillWidth = false,
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            SlotTimerBar(
+                slotMillis = slotMillis,
+                offsetSec = null,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
     // Landscape split view (fork): the QSO panel docks under the decode list (left
     // column) and the right panel runs the full height, so the waterfall there spans
     // top to bottom. Elsewhere in landscape the panel docks full width and carries
@@ -628,31 +652,13 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             // Landscape tabs without the Decode title row (Logbook, POTA, Settings…), fork:
             // the status line + CAT chip and the slot bar share ONE row at the top instead
             // of two rows docked at the bottom, so lists get the screen's height.
-            if (statusOnTop) {
-                Row(
-                    modifier = Modifier
+            // On the Logbook it goes into the screen's own header, next to the title.
+            if (statusOnTop && screenTab != FT8AFTab.LOG) {
+                topStatusRow(
+                    Modifier
                         .fillMaxWidth()
                         .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OperateStatusRow(
-                        isTransmitting = isTransmitting,
-                        isTuning = isTuning,
-                        slotMillis = slotMillis,
-                        txSlot = txSlot,
-                        showCatChip = showCatChip,
-                        catState = catState,
-                        onReconnectCat = onReconnectCatAction,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    // No DT pill here: it's for the Decode screen, where it shows too.
-                    SlotTimerBar(
-                        slotMillis = ModeProfile.fromId(operatingMode).slotMillis.toLong(),
-                        offsetSec = null,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+                )
             }
 
             // Main content area (takes remaining space).
@@ -768,7 +774,14 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                     FT8AFTab.MAP -> MapScreen(mainViewModel)
                     FT8AFTab.WATERFALL -> WaterfallScreen(mainViewModel)
                     FT8AFTab.POTA -> PotaScreen(mainViewModel)
-                    FT8AFTab.LOG -> LogbookScreen(mainViewModel)
+                    FT8AFTab.LOG -> LogbookScreen(
+                        mainViewModel,
+                        headerStatus = if (statusOnTop) {
+                            { topStatusRow(Modifier.fillMaxWidth()) }
+                        } else {
+                            null
+                        },
+                    )
                     FT8AFTab.SETTINGS -> SettingsScreen(mainViewModel)
                 }
 
