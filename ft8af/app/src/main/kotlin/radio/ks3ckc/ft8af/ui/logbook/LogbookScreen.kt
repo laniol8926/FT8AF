@@ -2020,7 +2020,7 @@ private val LogHeaderStatusWidth = 320.dp
 // Headings are stacked on two lines so the narrow columns stay narrow.
 // Status is wide enough for the CONF pill plus the QRZ tag side by side.
 private val QsoTableWeights =
-    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.8f, 0.55f, 0.55f, 0.95f, 1.05f)
+    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.75f, 0.55f, 0.55f, 1.07f, 0.98f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
