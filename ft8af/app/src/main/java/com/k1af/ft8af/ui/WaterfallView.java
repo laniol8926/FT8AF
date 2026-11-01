@@ -258,7 +258,10 @@ public class WaterfallView extends View {
 
         // QSO partner's frequency: one white line, same frequency convention as the
         // TX markers (they bracket the TX frequency, this marks the partner's).
-        if (partnerFrequency > 0 && freq_width > 0) {
+        // Landscape only (fork); portrait is as upstream.
+        boolean landscapeView = getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        if (landscapeView && partnerFrequency > 0 && freq_width > 0) {
             float px = SpectrumTouchMath.freqHzToPixelX(
                     partnerFrequency, getWidth(), spectrumWidth);
             canvas.drawLine(px, 0, px, getHeight(), partnerMarkerPaint);
@@ -449,15 +452,20 @@ public class WaterfallView extends View {
     }
 
     /**
-     * Waterfall label for a decode. Landscape (fork): a CQ keeps its whole message so
-     * every CQ is readable; anything else shows only the sending callsign, which is
-     * what locates a station on the waterfall. Portrait shows the full message.
+     * Waterfall label for a decode. Landscape (fork): a CQ shows "CQ [DX/POTA…] CALL"
+     * without the grid (less clutter); anything else shows only the sending callsign,
+     * which is what locates a station on the waterfall. Portrait shows the full message.
      */
     static String waterfallLabel(Ft8Message msg, boolean landscape) {
         String full = msg.getMessageText(true);
-        if (!landscape || msg.checkIsCQ()) return full;
+        if (!landscape) return full;
         String from = msg.getCallsignFrom();
-        return (from == null || from.trim().isEmpty()) ? full : from;
+        if (from == null || from.trim().isEmpty()) return full;
+        if (msg.checkIsCQ()) {
+            String to = msg.getCallsignTo();// "CQ", "CQ DX", "CQ POTA", ...
+            return ((to == null || to.trim().isEmpty()) ? "CQ" : to.trim()) + " " + from;
+        }
+        return from;
     }
 
     public void setTouch_x(int touch_x) {
