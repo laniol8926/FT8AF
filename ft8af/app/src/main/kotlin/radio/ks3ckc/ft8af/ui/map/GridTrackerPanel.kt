@@ -47,20 +47,8 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
         // the full-screen tracker turns them on from its own settings bar).
         tracker.setShowQSX(true)
 
-        // Grids heard, then worked / confirmed from the log, as the activity seeds them.
-        for (grid in GeneralVariables.callsignAndGrids.values) {
-            tracker.upgradeGridMode(grid, GridOsmMapView.GridMode.QSX)
-        }
-        mainViewModel.databaseOpr.getQsoGridQuery { grids ->
-            mapView.post {
-                for ((grid, confirmed) in grids) {
-                    tracker.upgradeGridMode(
-                        grid,
-                        if (confirmed) GridOsmMapView.GridMode.QSL else GridOsmMapView.GridMode.QSO,
-                    )
-                }
-            }
-        }
+        // No grid shading (unlike the full-screen tracker): with a big log the worked /
+        // confirmed / known grids cover the map. Only this cycle's lines and CQs show.
 
         val decodingObserver = Observer<Boolean> { decoding ->
             if (decoding == true) {
@@ -71,22 +59,16 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
         val messagesObserver = Observer<ArrayList<Ft8Message>> {
             val current = mainViewModel.currentMessages ?: return@Observer
             for (msg in ArrayList(current)) {
-                val grid = msg.getMaidenheadGrid(mainViewModel.databaseOpr)
-                tracker.upgradeGridInfo(
-                    grid, msg.messageText,
-                    String.format(java.util.Locale.US, "%d dBm , %.1f ms", msg.snr, msg.time_sec),
-                )
+                // No upgradeGridInfo: it shades each decoded grid and never clears it.
                 tracker.drawLine(msg, mainViewModel.databaseOpr)
-                if (msg.checkIsCQ()) tracker.addGridMarker(grid, msg)
+                if (msg.checkIsCQ()) {
+                    tracker.addGridMarker(msg.getMaidenheadGrid(mainViewModel.databaseOpr), msg)
+                }
             }
             tracker.showInfoWindows()
         }
-        val newGridObserver = Observer<String> { grid ->
-            tracker.upgradeGridMode(grid, GridOsmMapView.GridMode.QSX)
-        }
         mainViewModel.mutableIsDecoding.observe(lifecycleOwner, decodingObserver)
         mainViewModel.mutableFt8MessageList.observe(lifecycleOwner, messagesObserver)
-        GeneralVariables.mutableNewGrid.observe(lifecycleOwner, newGridObserver)
 
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             when (event) {
@@ -101,7 +83,6 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
         onDispose {
             mainViewModel.mutableIsDecoding.removeObserver(decodingObserver)
             mainViewModel.mutableFt8MessageList.removeObserver(messagesObserver)
-            GeneralVariables.mutableNewGrid.removeObserver(newGridObserver)
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
             mapView.onPause()
             mapView.onDetach()
