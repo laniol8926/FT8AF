@@ -33,6 +33,8 @@ object SettingsBackup {
         "wrlApiKey",
         "icomUserName",
         "icomPassword",
+        "lotwUsername",
+        "lotwPassword",
     )
 
     /**

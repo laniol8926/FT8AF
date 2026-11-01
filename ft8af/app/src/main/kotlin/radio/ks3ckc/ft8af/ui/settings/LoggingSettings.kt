@@ -101,6 +101,25 @@ fun LoggingSettings(
     var showWrl by remember { mutableStateOf(false) }
     var showUdp by remember { mutableStateOf(false) }
 
+    // Fork: LoTW confirmations download. Credentials read from config (not GeneralVariables).
+    var showLotw by remember { mutableStateOf(false) }
+    var lotwUser by remember { mutableStateOf("") }
+    var lotwPass by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        val cfg = withContext(Dispatchers.IO) { mainViewModel.databaseOpr.getAllConfigSync() }
+        lotwUser = cfg[radio.ks3ckc.ft8af.lotw.LotwClient.CONFIG_USERNAME].orEmpty()
+        lotwPass = cfg[radio.ks3ckc.ft8af.lotw.LotwClient.CONFIG_PASSWORD].orEmpty()
+    }
+    if (showLotw) {
+        LotwDialog(
+            mainViewModel = mainViewModel,
+            initialUsername = lotwUser,
+            initialPassword = lotwPass,
+            onDismiss = { showLotw = false },
+            onSaved = { lotwUser = it },
+        )
+    }
+
     // -- WSJT-X UDP server address dialog --
     if (showUdp) {
         WsjtxUdpDialog(
@@ -339,6 +358,14 @@ fun LoggingSettings(
                         },
                         showChevron = true,
                         onClick = { showWrl = true },
+                    )
+                    SectionDivider()
+                    SettingsRow(
+                        label = "LoTW confirmations",
+                        description = "Download QSLs from LoTW and mark matching QSOs confirmed",
+                        value = lotwUser.ifEmpty { stringResource(R.string.common_not_configured) },
+                        showChevron = true,
+                        onClick = { showLotw = true },
                     )
                 }
             }
