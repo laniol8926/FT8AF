@@ -538,6 +538,8 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     val panelTab = if (activeTab == FT8AFTab.MAP || activeTab == FT8AFTab.WATERFALL) activeTab else sidePanelTab
     // The screen actually shown in the content area: the Decode screen for the whole split view.
     val screenTab = if (actionsOnDecodeTitle) FT8AFTab.DECODE else activeTab
+    // Landscape tabs without the Decode title row: status + slot bar go to the top (fork).
+    val statusOnTop = isLandscape && controlsDrawerEnabled && !actionsOnDecodeTitle
     // Landscape split view (fork): the QSO panel docks under the decode list (left
     // column) and the right panel runs the full height, so the waterfall there spans
     // top to bottom. Elsewhere in landscape the panel docks full width and carries
@@ -620,6 +622,36 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                             fontSize = 12.sp,
                         )
                     }
+                }
+            }
+
+            // Landscape tabs without the Decode title row (Logbook, POTA, Settings…), fork:
+            // the status line + CAT chip and the slot bar share ONE row at the top instead
+            // of two rows docked at the bottom, so lists get the screen's height.
+            if (statusOnTop) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OperateStatusRow(
+                        isTransmitting = isTransmitting,
+                        isTuning = isTuning,
+                        slotMillis = slotMillis,
+                        txSlot = txSlot,
+                        showCatChip = showCatChip,
+                        catState = catState,
+                        onReconnectCat = onReconnectCatAction,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    // No DT pill here: it's for the Decode screen, where it shows too.
+                    SlotTimerBar(
+                        slotMillis = ModeProfile.fromId(operatingMode).slotMillis.toLong(),
+                        offsetSec = null,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
 
@@ -780,7 +812,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             // The mean decode DT rides on the bar as a live clock-sync pill so the
             // operator can spot a drifting clock without opening Settings → Time Sync.
             // In landscape on the Decode tab it sits under the title row instead.
-            if (!actionsOnDecodeTitle) {
+            if (!actionsOnDecodeTitle && !statusOnTop) {
                 SlotTimerBar(
                     slotMillis = ModeProfile.fromId(operatingMode).slotMillis.toLong(),
                     offsetSec = avgDtSec,
@@ -797,7 +829,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
                 // when collapsed. The actual sheet is the OperateControlsDrawer overlay in the
                 // outer Box; it anchors its bottom to this slot and grows upward on expand.
                 // In landscape on the Decode tab the status line is on the title row instead.
-                if (!actionsOnDecodeTitle) OperateStatusRow(
+                if (!actionsOnDecodeTitle && !statusOnTop) OperateStatusRow(
                     isTransmitting = isTransmitting,
                     isTuning = isTuning,
                     slotMillis = slotMillis,

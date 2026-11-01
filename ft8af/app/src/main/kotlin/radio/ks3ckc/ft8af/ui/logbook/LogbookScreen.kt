@@ -1640,6 +1640,14 @@ private fun LogSearchBar(
     onQueryChange: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Landscape (fork): a slim 36 dp field. The outlined field's 56 dp minimum left
+    // room for a single log line on the A32.
+    if (androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    ) {
+        CompactLogSearchBar(query, onQueryChange, modifier)
+        return
+    }
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -1681,6 +1689,61 @@ private fun LogSearchBar(
             focusedBorderColor = Accent,
             unfocusedBorderColor = Border,
         ),
+    )
+}
+
+@Composable
+private fun CompactLogSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    androidx.compose.foundation.text.BasicTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        singleLine = true,
+        textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp, fontFamily = GeistMonoFamily),
+        cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent),
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+        modifier = modifier
+            .fillMaxWidth()
+            .height(36.dp),
+        decorationBox = { inner ->
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(1.dp, Border, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                radio.ks3ckc.ft8af.ui.components.FT8AFIcons.Search(color = TextMuted, size = 16.dp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                    if (query.isEmpty()) {
+                        Text(
+                            text = stringResource(R.string.log_search_hint),
+                            color = TextFaint,
+                            fontSize = 13.sp,
+                            fontFamily = GeistMonoFamily,
+                            maxLines = 1,
+                        )
+                    }
+                    inner()
+                }
+                if (query.isNotEmpty()) {
+                    val clearLabel = stringResource(R.string.log_search_clear)
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clickable { onQueryChange("") }
+                            .semantics { contentDescription = clearLabel },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        radio.ks3ckc.ft8af.ui.components.FT8AFIcons.Close(color = TextMuted, size = 16.dp)
+                    }
+                }
+            }
+        },
     )
 }
 
@@ -1942,7 +2005,10 @@ private fun QsoTableRow(
         (record.callsign ?: "") to Accent,
         grid to Signal,
         place to TextMuted,
-        parseFreqMhz(record.band ?: "").removeSuffix("MHz").trim() to TextPrimary,
+        parseFreqMhz(record.band ?: "").removeSuffix("MHz").trim().let { f ->
+            // "7.074000" -> "7.074": kHz resolution is what a log shows.
+            f.toDoubleOrNull()?.let { String.format(java.util.Locale.US, "%.3f", it) } ?: f
+        } to TextPrimary,
         (record.mode ?: "") to TextPrimary,
         record.rstSent to TextPrimary,
         record.rstRcvd to TextPrimary,
