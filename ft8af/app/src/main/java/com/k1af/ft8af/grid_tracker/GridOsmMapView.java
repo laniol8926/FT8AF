@@ -883,8 +883,15 @@ public class GridOsmMapView {
             }
         }
         if (showCQ) {
+            // Fork: the Map tab panel boxes every CQ; already-worked stations show their
+            // message struck through. The full tracker keeps "new stations only".
+            boolean everyCq = isCompactInfo(gridMapView);
             for (GridMarker marker : gridMarkers) {
-                marker.showNewInfo();
+                if (everyCq) {
+                    marker.showInfoWindow();
+                } else {
+                    marker.showNewInfo();
+                }
             }
         }
     }
