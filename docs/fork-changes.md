@@ -182,6 +182,14 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   choice is remembered (prefs `ft8af_map` / `mapStyle` = tracker|classic, in
   the settings backup). The full-screen tracker stays in the map's ⚙ menu.
   (`GridTrackerPanel`)
+- **The original map on the tracker's tiles.** With Tracker off, the standard
+  view keeps all of the FT8AF map's function (Decodes / PSK spots / Worked
+  layers, you, connection lines, station markers with labels and pulses, tap a
+  station for its card, PSK filter, info pill, + / − / Me) but draws it over
+  the grid tracker's map (offline night tiles, gray line) instead of the
+  vector outlines; the tile map pans and zooms. Azimuthal projection is still
+  the vector map (the tiles are Mercator). (`OsmStandardMap`,
+  `drawStationLayers`)
 - **Callsign/grid table.** `CallsignQTH` (call → grid) is filled from the log
   at startup (each call's newest grid, ~18.5k calls) and by every saved or
   imported QSO, without overwriting a grid heard on air. On-air grids (CQs

@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -264,6 +265,8 @@ fun MapScreen(
     // Fork: the map card shows the grid tracker instead (remembered across launches).
     val mapContext = LocalContext.current
     var trackerMap by remember { mutableStateOf(loadTrackerMap(mapContext)) }
+    // The tracker-tile MapView behind the standard view, for the zoom / "Me" buttons.
+    var osmMapView by remember { mutableStateOf<org.osmdroid.views.MapView?>(null) }
 
     // Gray-line (day/night terminator) overlay. On by default — it's a passive,
     // translucent shade that HF operators use to spot enhanced-propagation paths.
@@ -564,6 +567,11 @@ fun MapScreen(
             )
         }
 
+        // Fork: the standard view draws its layers over the tracker's map (offline
+        // night tiles, gray line) instead of the vector outlines; that map pans and
+        // zooms itself, so the card's own gestures stand down. Azimuthal stays as was.
+        val osmBase = viewMode == MapViewMode.STANDARD
+
         // Inset, rounded map card — the map fills it; controls float inside.
         // Pinch to zoom, drag to pan, double-tap to toggle 2× zoom in/out.
         Box(
@@ -575,7 +583,8 @@ fun MapScreen(
                 .background(BgSurface)
                 .border(1.dp, Color(0x1F94A3B8), RoundedCornerShape(18.dp))
                 .onSizeChanged { canvasSize = it }
-                .pointerInput(viewMode) {
+                .pointerInput(viewMode, osmBase) {
+                    if (osmBase) return@pointerInput
                     detectTransformGestures { _, panDelta, zoom, _ ->
                         userAdjustedView = true
                         val newScale = (mapScale * zoom).coerceIn(MAP_MIN_ZOOM, MAP_MAX_ZOOM)
@@ -585,7 +594,8 @@ fun MapScreen(
                         mapScale = newScale
                     }
                 }
-                .pointerInput(viewMode) {
+                .pointerInput(viewMode, osmBase) {
+                    if (osmBase) return@pointerInput
                     detectTapGestures(
                         onDoubleTap = { tap ->
                             userAdjustedView = true
@@ -606,18 +616,16 @@ fun MapScreen(
                 },
         ) {
         when (viewMode) {
-            MapViewMode.STANDARD -> StandardMapCanvas(
+            MapViewMode.STANDARD -> OsmStandardMap(
+                mainViewModel = mainViewModel,
                 opLat = opLat,
                 opLon = opLon,
                 stations = visibleStations,
                 pskSpots = pskSpots,
                 connectionLines = connectionLines,
-                nightRing = nightRing,
                 selectedCallsign = selectedCallsign,
                 onStationSelected = { selectedCallsign = it },
-                scale = mapScale,
-                panX = mapPanX,
-                panY = mapPanY,
+                onMapView = { osmMapView = it },
                 modifier = Modifier.fillMaxSize(),
             )
             MapViewMode.AZIMUTHAL -> AzimuthalMapCanvas(
@@ -661,9 +669,14 @@ fun MapScreen(
 
         // Right edge: zoom + recenter ("Me"), 44dp targets for thumb reach.
         MapEdgeControls(
-            scale = mapScale,
+            // Over the tracker tiles the tile map zooms; both buttons stay live.
+            scale = if (osmBase) 2f else mapScale,
             onZoomIn = {
                 userAdjustedView = true
+                if (osmBase) {
+                    osmMapView?.controller?.zoomIn()
+                    return@MapEdgeControls
+                }
                 val newScale = (mapScale * MAP_ZOOM_STEP).coerceAtMost(MAP_MAX_ZOOM)
                 if (newScale != mapScale) {
                     val factor = newScale / mapScale
@@ -675,6 +688,10 @@ fun MapScreen(
             },
             onZoomOut = {
                 userAdjustedView = true
+                if (osmBase) {
+                    osmMapView?.controller?.zoomOut()
+                    return@MapEdgeControls
+                }
                 val newScale = (mapScale / MAP_ZOOM_STEP).coerceAtLeast(MAP_MIN_ZOOM)
                 val factor = newScale / mapScale
                 val clamped = clampPan(mapPanX * factor, mapPanY * factor, newScale)
@@ -684,7 +701,11 @@ fun MapScreen(
             },
             onRecenter = {
                 userAdjustedView = true
-                if (viewMode == MapViewMode.STANDARD) {
+                if (osmBase) {
+                    if (opLatLng != null) {
+                        osmMapView?.controller?.animateTo(org.osmdroid.util.GeoPoint(opLat, opLon))
+                    }
+                } else if (viewMode == MapViewMode.STANDARD) {
                     val w = canvasSize.width.toFloat()
                     val h = canvasSize.height.toFloat()
                     if (w > 0f && h > 0f && opLatLng != null) {
@@ -1609,6 +1630,130 @@ private fun AzimuthalMapCanvas(
 // Standard (equirectangular) map canvas
 // ---------------------------------------------------------------------------
 
+/**
+ * The standard view on the grid tracker's map (fork): the offline night tiles and
+ * gray line of [GridOsmMapView], which pans and zooms itself, with the vector map's
+ * layers (you, connection lines, PSK spots, stations) drawn over it through the tile
+ * map's own projection. A tap on the tiles selects the nearest station.
+ */
+@Composable
+private fun OsmStandardMap(
+    mainViewModel: MainViewModel,
+    opLat: Double,
+    opLon: Double,
+    stations: List<StationMarker>,
+    pskSpots: List<PskSpotMarker>,
+    connectionLines: List<ConnectionLine>,
+    selectedCallsign: String?,
+    onStationSelected: (String?) -> Unit,
+    onMapView: (org.osmdroid.views.MapView?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    val mapView = remember { org.osmdroid.views.MapView(context) }
+    val tiles = remember { com.k1af.ft8af.grid_tracker.GridOsmMapView(context, mapView, mainViewModel) }
+    // Bumped on every pan/zoom so the overlay redraws through the new projection.
+    var viewTick by remember { mutableIntStateOf(0) }
+    val currentStations by androidx.compose.runtime.rememberUpdatedState(stations)
+    val currentOnSelect by androidx.compose.runtime.rememberUpdatedState(onStationSelected)
+
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        tiles.initMap(GeneralVariables.getMyMaidenhead4Grid(), true)
+        mapView.addMapListener(object : org.osmdroid.events.MapListener {
+            override fun onScroll(event: org.osmdroid.events.ScrollEvent?): Boolean {
+                viewTick++
+                return false
+            }
+
+            override fun onZoom(event: org.osmdroid.events.ZoomEvent?): Boolean {
+                viewTick++
+                return false
+            }
+        })
+        // Tap: the nearest station within reach of the finger, else clear the selection.
+        val tapOverlay = org.osmdroid.views.overlay.MapEventsOverlay(
+            object : org.osmdroid.events.MapEventsReceiver {
+                override fun singleTapConfirmedHelper(p: org.osmdroid.util.GeoPoint?): Boolean {
+                    if (p == null) return false
+                    val pj = mapView.projection
+                    val tap = pj.toPixels(p, null)
+                    val reach = 36f * mapView.resources.displayMetrics.density
+                    var best: String? = null
+                    var bestD = Float.MAX_VALUE
+                    for (s in currentStations) {
+                        val sp = pj.toPixels(org.osmdroid.util.GeoPoint(s.lat, s.lon), null)
+                        val d = kotlin.math.hypot((sp.x - tap.x).toFloat(), (sp.y - tap.y).toFloat())
+                        if (d < reach && d < bestD) {
+                            bestD = d
+                            best = s.callsign
+                        }
+                    }
+                    currentOnSelect(best)
+                    return true
+                }
+
+                override fun longPressHelper(p: org.osmdroid.util.GeoPoint?): Boolean = false
+            },
+        )
+        mapView.overlays.add(0, tapOverlay)
+        val lifecycleObserver = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+        mapView.onResume()
+        onMapView(mapView)
+        onDispose {
+            onMapView(null)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+            mapView.onPause()
+            mapView.onDetach()
+        }
+    }
+
+    val pulseTransition = rememberInfiniteTransition(label = "map-pulse-osm")
+    val pulsePhase by pulseTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "map-pulse-phase-osm",
+    )
+
+    Box(modifier = modifier) {
+        androidx.compose.ui.viewinterop.AndroidView(factory = { mapView }, modifier = Modifier.fillMaxSize())
+        // No pointer input here: touches go through to the tile map.
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            // Read so a pan/zoom redraws the overlay through the new projection.
+            if (viewTick < 0) return@Canvas
+            val pj = mapView.projection
+            // Labels and marker sizes follow zoom as on the vector map (tile zoom
+            // 1.6 = the vector map's 1x).
+            val zoom = (mapView.zoomLevelDouble - 0.6).toFloat().coerceAtLeast(1f)
+            drawStationLayers(
+                project = { lat, lon ->
+                    val p = pj.toPixels(org.osmdroid.util.GeoPoint(lat, lon), null)
+                    Offset(p.x.toFloat(), p.y.toFloat())
+                },
+                opLat = opLat,
+                opLon = opLon,
+                stations = stations,
+                pskSpots = pskSpots,
+                connectionLines = connectionLines,
+                selectedCallsign = selectedCallsign,
+                scale = zoom,
+                pulsePhase = pulsePhase,
+            )
+        }
+    }
+}
+
 @Composable
 private fun StandardMapCanvas(
     opLat: Double,
@@ -1673,8 +1818,37 @@ private fun StandardMapCanvas(
         // terminator stroke, drawn over land/grid but under the markers.
         nightRing?.let { ring -> drawGrayLine(ring, vp) }
 
+        drawStationLayers(
+            project = { lat, lon -> vp.projectLatLon(lat, lon) },
+            opLat = opLat,
+            opLon = opLon,
+            stations = stations,
+            pskSpots = pskSpots,
+            connectionLines = connectionLines,
+            selectedCallsign = selectedCallsign,
+            scale = scale,
+            pulsePhase = pulsePhase,
+        )
+    }
+}
+
+/**
+ * The map's markers and lines, through [project] (lat/lon -> screen). Shared by the
+ * vector map and the tracker-tile map (fork) so both draw the same layers.
+ */
+private fun DrawScope.drawStationLayers(
+    project: (Double, Double) -> Offset,
+    opLat: Double,
+    opLon: Double,
+    stations: List<StationMarker>,
+    pskSpots: List<PskSpotMarker>,
+    connectionLines: List<ConnectionLine>,
+    selectedCallsign: String?,
+    scale: Float,
+    pulsePhase: Float,
+) {
         // Operator marker (at projected lat/lon, scaled + panned with map)
-        val opPos = vp.projectLatLon(opLat, opLon)
+        val opPos = project(opLat, opLon)
         val opX = opPos.x
         val opY = opPos.y
         // Operator marker — a bold amber "you are here" dot with a glow halo.
@@ -1687,13 +1861,13 @@ private fun StandardMapCanvas(
         // the station markers; both endpoints project through the viewport so they
         // pan/zoom with the map.
         for (line in connectionLines) {
-            val end = vp.projectLatLon(line.toLat, line.toLon)
+            val end = project(line.toLat, line.toLon)
             drawConnectionLine(opX, opY, end.x, end.y, line.style, line.color)
         }
 
         // PSK Reporter spots — drawn before stations so decoded markers layer on top.
         for (spot in pskSpots) {
-            val pos = vp.projectLatLon(spot.lat, spot.lon)
+            val pos = project(spot.lat, spot.lon)
             val sx = pos.x
             val sy = pos.y
 
@@ -1722,7 +1896,7 @@ private fun StandardMapCanvas(
 
         // Station markers
         for ((index, station) in stations.withIndex()) {
-            val pos = vp.projectLatLon(station.lat, station.lon)
+            val pos = project(station.lat, station.lon)
             val sx = pos.x
             val sy = pos.y
 
@@ -1804,7 +1978,6 @@ private fun StandardMapCanvas(
                 )
             }
         }
-    }
 }
 
 // Cached so the dashed connection line doesn't allocate a PathEffect (and its
