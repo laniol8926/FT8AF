@@ -9,7 +9,7 @@ use tauri::{Emitter, State};
 
 use ft8af::audio::{self, AudioDevice};
 use ft8af::bands::{self, BandEntry, CustomBand};
-use ft8af::db::{ConfirmedFilter, Db, QsoRecord};
+use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
 use ft8af::os_location::{self, OsLocation};
 use ft8af::rig::{self, HamlibRig, RigConfig, SerialPortInfo};
@@ -230,6 +230,36 @@ fn export_adif(
     state
         .db
         .export_adif_range(start.as_deref(), end.as_deref())
+}
+
+/// Import ADIF text (read client-side from the chosen file) into the log.
+/// See `Db::import_adif_with_progress` for the duplicate-matching rule and the
+/// batched-transaction performance note. Emits `"import-progress"` events
+/// (payload: [`ImportProgress`]) so the UI can show a live counter instead of
+/// a silent wait on a large file.
+///
+/// Wrapped in `catch_unwind`: this is the one command that parses arbitrary
+/// external file content, and on Linux a Tauri command runs inside
+/// webkit2gtk's C callback, where an unwinding panic can't cross back out —
+/// it aborts the entire running app instead of just failing this call. The
+/// parser itself (`adif::parse_adif`) is written to never panic, but this is
+/// cheap insurance against anything we missed.
+#[tauri::command]
+fn import_adif(
+    state: State<AppState>,
+    app: tauri::AppHandle,
+    adif: String,
+) -> Result<ImportSummary, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.db.import_adif_with_progress(&adif, |processed, total| {
+            let _ = app.emit("import-progress", ImportProgress { processed, total });
+        })
+    }))
+    .map_err(|_| {
+        "ADIF import hit an unexpected error partway through and stopped; QSOs already \
+         imported before that point are kept, nothing after it was touched."
+            .to_string()
+    })
 }
 
 #[tauri::command]
@@ -512,6 +542,7 @@ fn main() {
             delete_qso,
             save_qso,
             export_adif,
+            import_adif,
             get_config,
             set_config,
             all_config,

@@ -2,7 +2,7 @@
 // around these so the decision/normalization logic stays unit-testable (see
 // AGENTS.md: Composable/JSX code can't be tested directly — extract the logic).
 
-import type { QsoRecord } from "./ipc";
+import type { ImportSummary, QsoRecord } from "./ipc";
 
 /** Logbook confirmation filter, mirroring the Android `FilterDialog`. */
 export type ConfirmFilter = "all" | "confirmed" | "unconfirmed";
@@ -23,7 +23,15 @@ export interface QsoEditForm {
   station_callsign: string;
   my_gridsquare: string;
   comment: string;
+  state: string;
+  country: string;
   confirmed: boolean;
+  qsl_sent: boolean;
+  lotw_sent: boolean;
+  lotw_rcvd: boolean;
+  eqsl_sent: boolean;
+  eqsl_rcvd: boolean;
+  qrz_qsl: boolean;
 }
 
 /**
@@ -43,6 +51,14 @@ export function adifToDateInput(value: string): string {
   const v = (value ?? "").trim();
   if (/^\d{8}$/.test(v)) return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`;
   return v;
+}
+
+/** Format a stored `time_on` ("HHMMSS" or "HHMM", UTC) as "HH:MM" for the
+ *  table view. Blank or non-numeric input -> "". */
+export function formatHhmm(timeOn: string): string {
+  const t = (timeOn ?? "").trim();
+  if (t.length < 4 || !/^\d+$/.test(t)) return "";
+  return `${t.slice(0, 2)}:${t.slice(2, 4)}`;
 }
 
 /**
@@ -89,7 +105,15 @@ export function buildQsoRecord(
     station_callsign: up(form.station_callsign),
     my_gridsquare: up(form.my_gridsquare),
     comment: (form.comment ?? "").trim(),
+    state: t(form.state),
+    country: t(form.country),
     confirmed: !!form.confirmed,
+    qsl_sent: !!form.qsl_sent,
+    lotw_sent: !!form.lotw_sent,
+    lotw_rcvd: !!form.lotw_rcvd,
+    eqsl_sent: !!form.eqsl_sent,
+    eqsl_rcvd: !!form.eqsl_rcvd,
+    qrz_qsl: !!form.qrz_qsl,
   };
 }
 
@@ -110,8 +134,24 @@ export function formFromQso(r?: QsoRecord | null): QsoEditForm {
     station_callsign: r?.station_callsign ?? "",
     my_gridsquare: r?.my_gridsquare ?? "",
     comment: r?.comment ?? "",
+    state: r?.state ?? "",
+    country: r?.country ?? "",
     confirmed: !!r?.confirmed,
+    qsl_sent: !!r?.qsl_sent,
+    lotw_sent: !!r?.lotw_sent,
+    lotw_rcvd: !!r?.lotw_rcvd,
+    eqsl_sent: !!r?.eqsl_sent,
+    eqsl_rcvd: !!r?.eqsl_rcvd,
+    qrz_qsl: !!r?.qrz_qsl,
   };
+}
+
+/** Human-readable summary line for the Logbook's "Import ADIF" result banner. */
+export function formatImportSummary(summary: ImportSummary): string {
+  const parts = [`${summary.imported} imported`];
+  if (summary.duplicates > 0) parts.push(`${summary.duplicates} already logged`);
+  if (summary.skipped > 0) parts.push(`${summary.skipped} skipped`);
+  return parts.join(", ");
 }
 
 /** Whether a search string or non-"all" confirmation filter is currently active. */
@@ -146,4 +186,231 @@ export function filterQsos(
       (filter === "confirmed" ? r.confirmed : !r.confirmed);
     return callOk && confirmOk;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Sortable spreadsheet table (ports the Android Logbook table's format --
+// `LogbookScreen.kt`'s QsoTableHeader/QsoTableRow/sortQsoTable/qslMarks).
+// ---------------------------------------------------------------------------
+
+/** Column indices of the table view, in display order -- mirrors Android's
+ *  QSO_COL_* constants exactly, so the two apps' sort behavior stays in sync. */
+export const QSO_COL_DATE = 0;
+export const QSO_COL_TIME = 1;
+export const QSO_COL_CALL = 2;
+export const QSO_COL_GRID = 3;
+export const QSO_COL_STATE = 4;
+export const QSO_COL_FREQ = 5;
+export const QSO_COL_MODE = 6;
+export const QSO_COL_RST_SENT = 7;
+export const QSO_COL_RST_RCVD = 8;
+export const QSO_COL_STATUS = 9;
+export const QSO_COL_QSL = 10;
+
+export const QSO_TABLE_COLUMNS = [
+  { col: QSO_COL_DATE, label: "Date" },
+  { col: QSO_COL_TIME, label: "Time" },
+  { col: QSO_COL_CALL, label: "Call" },
+  { col: QSO_COL_GRID, label: "Grid" },
+  { col: QSO_COL_STATE, label: "State" },
+  { col: QSO_COL_FREQ, label: "Freq MHz" },
+  { col: QSO_COL_MODE, label: "Mode" },
+  { col: QSO_COL_RST_SENT, label: "RST Sent" },
+  { col: QSO_COL_RST_RCVD, label: "RST Rcvd" },
+  { col: QSO_COL_STATUS, label: "Status" },
+  { col: QSO_COL_QSL, label: "QSL" },
+] as const;
+
+/**
+ * The State column's display value: a non-US logged COUNTRY is shown as is;
+ * for the US (or no logged country) it's the logged STATE. `null` means
+ * nothing to show.
+ *
+ * Android's equivalent (`logbookPlace`) also falls back to a grid->state
+ * lookup when nothing was explicitly logged; this app has no such lookup yet
+ * (see `fork-changes.md`), so this is Android's function with that lookup
+ * always empty -- a station worked but never logged/imported with a STATE
+ * shows blank here even where the Android app would derive one from the grid.
+ */
+export function logbookPlace(r: QsoRecord): string | null {
+  const country = (r.country ?? "").trim();
+  const isUs = country === "" || /^united states( of america)?$|^usa$/i.test(country);
+  if (!isUs) return country;
+  const state = (r.state ?? "").trim();
+  if (state) return state;
+  return country || null;
+}
+
+/** QSL column marks: LoTW, eQSL, Paper, QRZ.com, each "received" (✓), "sent"
+ *  (↑, only when not received) or "neither" (·). QRZ has no "sent" side --
+ *  the upload itself is `synced_qrz`, not a QSL confirmation flag. */
+export interface QslMark {
+  service: "L" | "E" | "P" | "Q";
+  mark: "✓" | "↑" | "·";
+}
+
+export function qslMarks(r: QsoRecord): QslMark[] {
+  const mark = (rcvd: boolean, sent: boolean): QslMark["mark"] =>
+    rcvd ? "✓" : sent ? "↑" : "·";
+  return [
+    { service: "L", mark: mark(!!r.lotw_rcvd, !!r.lotw_sent) },
+    { service: "E", mark: mark(!!r.eqsl_rcvd, !!r.eqsl_sent) },
+    { service: "P", mark: mark(!!r.confirmed, !!r.qsl_sent) },
+    { service: "Q", mark: mark(!!r.qrz_qsl, false) },
+  ];
+}
+
+/** Sortable QSL score: received counts double, sent single -- an all-received
+ *  row (L✓E✓P✓Q✓) sorts above a mostly-sent one (L✓E↑P·Q·). */
+function qslScore(r: QsoRecord): number {
+  return qslMarks(r).reduce((sum, { mark }) => sum + (mark === "✓" ? 2 : mark === "↑" ? 1 : 0), 0);
+}
+
+/**
+ * Status pill this row would show: "CONF" when LoTW-confirmed (the strongest
+ * confirmation), "WORKED" for any other confirmation (paper, eQSL, or
+ * QRZ.com), else none. A simplified stand-in for Android's richer
+ * `isLotW_QSL`/`isQSL` pair -- this app doesn't track a separate aggregate
+ * "any confirmation" flag, so WORKED is derived from the three non-LoTW
+ * signals directly.
+ */
+export function qsoStatusLabel(r: QsoRecord): "CONF" | "WORKED" | null {
+  if (r.lotw_rcvd) return "CONF";
+  if (r.confirmed || r.eqsl_rcvd || r.qrz_qsl) return "WORKED";
+  return null;
+}
+
+/** Sortable status score, including a small bump for any upload-service sync
+ *  (matches Android's status key: confirmation tier first, sync as a tiebreak). */
+function qsoStatusScore(r: QsoRecord): number {
+  const base = r.lotw_rcvd ? 2 : r.confirmed || r.eqsl_rcvd || r.qrz_qsl ? 1 : 0;
+  const synced = r.synced_cloudlog || r.synced_qrz ? 0.5 : 0;
+  return base + synced;
+}
+
+/** Upload-service chip labels (CL / QRZ) shown beside the status pill. */
+export function syncChipLabels(r: QsoRecord): string[] {
+  const labels: string[] = [];
+  if (r.synced_cloudlog) labels.push("CL");
+  if (r.synced_qrz) labels.push("QRZ");
+  return labels;
+}
+
+function dateTimeKey(r: QsoRecord): string {
+  // `time_on` is always HHMMSS (6 digits) from this app's own writes, but an
+  // import can carry a shorter HHMM. That's still safe to compare unpadded:
+  // HHMM is a true string prefix of its own HHMMSS (same leading digits), so
+  // plain lexicographic comparison already orders it correctly either way.
+  return `${r.qso_date ?? ""}${r.time_on ?? ""}`;
+}
+
+function sortByDateTimeDesc(rows: QsoRecord[]): QsoRecord[] {
+  return [...rows].sort((a, b) => {
+    const ak = dateTimeKey(a);
+    const bk = dateTimeKey(b);
+    return ak < bk ? 1 : ak > bk ? -1 : 0;
+  });
+}
+
+function parseNumericField(s: string): number | null {
+  const t = (s ?? "").trim().replace(/\+/g, "");
+  if (t === "") return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Sort the table view by `column` (one of the `QSO_COL_*` constants). Date
+ * and time sort together (by actual QSO date+time, not insertion order --
+ * an imported historical log is not in id order); frequency and reports
+ * sort numerically with blanks last; status/QSL sort by their score. Ties
+ * fall back to newest-first, relying on `Array.prototype.sort`'s guaranteed
+ * stability (ES2019+), same as the Kotlin original relies on `sortedWith`.
+ */
+export function sortQsoTable(rows: QsoRecord[], column: number, ascending: boolean): QsoRecord[] {
+  const newestFirst = sortByDateTimeDesc(rows);
+  if (column === QSO_COL_DATE || column === QSO_COL_TIME) {
+    return ascending ? [...newestFirst].reverse() : newestFirst;
+  }
+
+  const numKey: ((r: QsoRecord) => number | null) | null = {
+    [QSO_COL_FREQ]: (r: QsoRecord) => parseNumericField(r.freq),
+    [QSO_COL_RST_SENT]: (r: QsoRecord) => parseNumericField(r.rst_sent),
+    [QSO_COL_RST_RCVD]: (r: QsoRecord) => parseNumericField(r.rst_rcvd),
+    [QSO_COL_STATUS]: (r: QsoRecord) => qsoStatusScore(r),
+    [QSO_COL_QSL]: (r: QsoRecord) => qslScore(r),
+  }[column] ?? null;
+  if (numKey) {
+    return [...newestFirst].sort((a, b) => {
+      const x = numKey(a);
+      const y = numKey(b);
+      if (x == null && y == null) return 0;
+      if (x == null) return 1;
+      if (y == null) return -1;
+      return ascending ? x - y : y - x;
+    });
+  }
+
+  const textKey: ((r: QsoRecord) => string) | null = {
+    [QSO_COL_CALL]: (r: QsoRecord) => (r.call ?? "").toUpperCase(),
+    [QSO_COL_GRID]: (r: QsoRecord) => (r.gridsquare ?? "").toUpperCase(),
+    [QSO_COL_STATE]: (r: QsoRecord) => (logbookPlace(r) ?? "").toUpperCase(),
+    [QSO_COL_MODE]: (r: QsoRecord) => (r.mode ?? "").toUpperCase(),
+  }[column] ?? null;
+  if (textKey) {
+    return [...newestFirst].sort((a, b) => {
+      const x = textKey(a);
+      const y = textKey(b);
+      if (x === "" && y === "") return 0;
+      if (x === "") return 1;
+      if (y === "") return -1;
+      if (x === y) return 0;
+      const cmp = x < y ? -1 : 1;
+      return ascending ? cmp : -cmp;
+    });
+  }
+
+  return newestFirst;
+}
+
+/** A virtualized table's visible window: which row indices to actually
+ *  render, and how tall the two spacer rows before/after them need to be. */
+export interface VirtualWindow {
+  startIndex: number;
+  endIndex: number;
+  topSpacerPx: number;
+  bottomSpacerPx: number;
+}
+
+/**
+ * Compute which row slice of a long table to actually mount as DOM nodes.
+ *
+ * Confirmed necessary on real data: rendering a plain (non-virtualized) table
+ * for a ~54,500-row log pinned the webview's renderer at 100% CPU for
+ * minutes with nothing on screen -- removing the row-count cap on the fetch
+ * (so sorting could see the whole log, not an arbitrary insertion-order
+ * window) made the UI itself the new bottleneck. Only `[startIndex, endIndex)`
+ * need to exist as real rows; the rest of the scroll range is represented by
+ * two spacer rows sized in pixels, so the scrollbar still reflects the true
+ * total.
+ */
+export function computeVirtualWindow(
+  totalRows: number,
+  rowHeightPx: number,
+  scrollTopPx: number,
+  viewportHeightPx: number,
+  overscan: number,
+): VirtualWindow {
+  if (totalRows <= 0 || rowHeightPx <= 0) {
+    return { startIndex: 0, endIndex: 0, topSpacerPx: 0, bottomSpacerPx: 0 };
+  }
+  const visibleCount = Math.ceil(viewportHeightPx / rowHeightPx) + overscan * 2;
+  const startIndex = Math.max(0, Math.floor(scrollTopPx / rowHeightPx) - overscan);
+  const endIndex = Math.min(totalRows, startIndex + visibleCount);
+  return {
+    startIndex,
+    endIndex,
+    topSpacerPx: startIndex * rowHeightPx,
+    bottomSpacerPx: (totalRows - endIndex) * rowHeightPx,
+  };
 }

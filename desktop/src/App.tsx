@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useRef, useState, type MouseEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
 import {
   api,
   onEngineEvent,
+  onImportProgress,
   type AudioDevice,
   type BandInfo,
   type ClockSyncEvent,
@@ -9,6 +10,7 @@ import {
   type CycleTick,
   type EngineEvent,
   type HamlibRig,
+  type ImportProgress,
   type QsoRecord,
   type RigConfig,
   type RigStatusEvent,
@@ -21,11 +23,22 @@ import {
   type WfWindow,
 } from "./ipc";
 import {
+  adifToDateInput,
   buildExportArgs,
   buildQsoRecord,
+  computeVirtualWindow,
+  formatHhmm,
+  formatImportSummary,
   formFromQso,
   isLogFiltered,
+  logbookPlace,
+  qslMarks,
   qsoCountLabel,
+  qsoStatusLabel,
+  QSO_COL_DATE,
+  QSO_TABLE_COLUMNS,
+  sortQsoTable,
+  syncChipLabels,
   type ConfirmFilter,
   type QsoEditForm,
 } from "./logbook";
@@ -36,6 +49,12 @@ import { audioDeviceLabel } from "./audioDevice";
 type Tab = "decode" | "log" | "settings";
 type Filter = "all" | "cq" | "tome";
 const MAX_MESSAGES = 800;
+
+// "No limit" for the Logbook fetch: Number.MAX_SAFE_INTEGER round-trips
+// cleanly to Rust's i64 and SQLite treats a LIMIT this large as unbounded.
+// The table sorts client-side over the full fetched set, so a smaller cap
+// here would silently make sorting wrong on a log bigger than the cap.
+const LOG_FETCH_ALL = Number.MAX_SAFE_INTEGER;
 
 // Quiet period a gain slider must see before its value is sent to the
 // backend. Long enough to collapse a drag gesture, short enough that a
@@ -267,7 +286,7 @@ export default function App() {
           </button>
         ))}
       </div>
-      <div className={"content" + (tab === "decode" ? " decode" : "")}>
+      <div className={"content" + (tab === "decode" || tab === "log" ? " decode" : "")}>
         {tab === "decode" && (
           <DecodeScreen
             messages={visible}
@@ -617,9 +636,66 @@ function LogScreen() {
   const [rangeEnd, setRangeEnd] = useState("");
   // Edit-QSO dialog target: undefined = closed, null = new QSO, record = edit.
   const [editing, setEditing] = useState<QsoRecord | null | undefined>(undefined);
+  const [importMsg, setImportMsg] = useState("");
+  const [importFailed, setImportFailed] = useState(false);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  // Table sort: newest-first (Date, descending) by default.
+  const [sortColumn, setSortColumn] = useState<number>(QSO_COL_DATE);
+  const [sortAscending, setSortAscending] = useState(false);
+
+  function onSort(col: number) {
+    if (col === sortColumn) {
+      setSortAscending((a) => !a);
+    } else {
+      setSortColumn(col);
+      setSortAscending(false);
+    }
+  }
+
+  // Row virtualization: confirmed necessary on a real ~54,500-row log, where
+  // rendering every row as a real <tr> pinned the webview's renderer at 100%
+  // CPU indefinitely. Only [startIndex, endIndex) are mounted; two spacer
+  // rows stand in for the rest so the scrollbar still reflects the true
+  // total. ROW_HEIGHT must match the CSS-enforced `.qso-table tbody tr`
+  // height exactly, or the windowing math and the real scroll height disagree.
+  const ROW_HEIGHT = 26;
+  const OVERSCAN = 8;
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(400);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => setViewportHeight(el.clientHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Memoized: with the fetch cap removed, `rows` can be many thousands of
+  // QSOs, and sorting that on every render -- including the rapid re-renders
+  // from import-progress ticking every 200 records -- made the whole UI feel
+  // unresponsive (confirmed: clicking the Import button appeared to do
+  // nothing while a big unrelated re-sort was in flight). Only recompute when
+  // the data or the sort choice actually changes.
+  const sortedRows = useMemo(
+    () => sortQsoTable(rows, sortColumn, sortAscending),
+    [rows, sortColumn, sortAscending],
+  );
+  const virtualWindow = computeVirtualWindow(
+    sortedRows.length, ROW_HEIGHT, scrollTop, viewportHeight, OVERSCAN,
+  );
+  const visibleRows = sortedRows.slice(virtualWindow.startIndex, virtualWindow.endIndex);
 
   function refresh() {
-    api.searchLog(search, filter, 500, 0).then(setRows);
+    // No cap: the table sorts client-side over whatever's fetched, so a
+    // capped page only ever sorted that arbitrary window (insertion order,
+    // not chronological) instead of the whole matching log -- confirmed by
+    // the user on a multi-thousand-row CQRLOG import.
+    api.searchLog(search, filter, LOG_FETCH_ALL, 0).then(setRows);
     api.logCount().then(setCount);
   }
   // Re-query whenever the live search box or the confirmation filter changes.
@@ -635,6 +711,35 @@ function LogScreen() {
     a.download = "ft8af_log.adi";
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function importAdifFile(file: File) {
+    // Set busy state synchronously, before the first await -- otherwise the
+    // button and message stay unchanged (looking like the click did nothing)
+    // for however long reading the file and the IPC round-trip take to even
+    // start.
+    setImportMsg("");
+    setImportFailed(false);
+    setImportProgress({ processed: 0, total: 0 });
+    const text = await file.text();
+    const unlisten = await onImportProgress(setImportProgress);
+    try {
+      const summary = await api.importAdif(text);
+      setImportMsg(`✓ Import complete: ${formatImportSummary(summary)}`);
+    } catch (err) {
+      setImportFailed(true);
+      setImportMsg(`⚠ Import failed: ${err}`);
+    } finally {
+      unlisten();
+      setImportProgress(null);
+    }
+    refresh();
+  }
+
+  function onImportFileChosen(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file next time
+    if (file) importAdifFile(file);
   }
 
   async function remove(id?: number | null) {
@@ -687,46 +792,115 @@ function LogScreen() {
           aria-label="Export end date"
         />
         <button className="primary" onClick={exportAdif}>Export ADIF</button>
+        <span className="muted">·</span>
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".adi,.adif,.txt,text/plain"
+          style={{ display: "none" }}
+          onChange={onImportFileChosen}
+        />
+        <button onClick={() => importInputRef.current?.click()} disabled={!!importProgress}>
+          Import ADIF…
+        </button>
+        {importProgress ? (
+          <span className="import-progress" role="status">
+            {importProgress.total > 0
+              ? `Processing record: ${importProgress.processed} / ${importProgress.total}`
+              : "Processing record… (reading file)"}
+          </span>
+        ) : (
+          importMsg && (
+            <span className={importFailed ? "import-error" : "import-done"} role="status">
+              {importMsg}
+            </span>
+          )
+        )}
       </div>
-      <table>
+      <div
+        className="decode-list"
+        ref={scrollRef}
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      >
+      <table className="qso-table">
         <thead>
           <tr>
-            <th>Date</th>
-            <th>Time</th>
-            <th>Call</th>
-            <th>Grid</th>
-            <th>Band</th>
-            <th>Sent</th>
-            <th>Rcvd</th>
-            <th>QSL</th>
+            {QSO_TABLE_COLUMNS.map(({ col, label }) => {
+              const sorted = col === sortColumn;
+              return (
+                <th
+                  key={col}
+                  className={sorted ? "sortable sorted" : "sortable"}
+                  onClick={() => onSort(col)}
+                >
+                  {label}
+                  {sorted ? (sortAscending ? " ▲" : " ▼") : ""}
+                </th>
+              );
+            })}
             <th></th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.id} className={r.confirmed ? "confirmed clickable" : "clickable"}>
-              <td onClick={() => setEditing(r)}>{r.qso_date}</td>
-              <td onClick={() => setEditing(r)}>{r.time_on}</td>
-              <td onClick={() => setEditing(r)}>{r.call}</td>
-              <td onClick={() => setEditing(r)}>{r.gridsquare}</td>
-              <td onClick={() => setEditing(r)}>{r.band}</td>
-              <td onClick={() => setEditing(r)}>{r.rst_sent}</td>
-              <td onClick={() => setEditing(r)}>{r.rst_rcvd}</td>
-              <td onClick={() => setEditing(r)}>
-                {r.confirmed ? <span className="confirm-dot">✓</span> : ""}
-              </td>
-              <td>
-                <button onClick={() => remove(r.id)}>✕</button>
-              </td>
+          {virtualWindow.topSpacerPx > 0 && (
+            <tr aria-hidden style={{ height: virtualWindow.topSpacerPx }}>
+              <td colSpan={QSO_TABLE_COLUMNS.length + 1} style={{ border: "none", padding: 0 }} />
             </tr>
-          ))}
-          {rows.length === 0 && (
+          )}
+          {visibleRows.map((r) => {
+            const status = qsoStatusLabel(r);
+            return (
+              <tr key={r.id} className={status ? "confirmed clickable" : "clickable"}>
+                <td onClick={() => setEditing(r)}>{adifToDateInput(r.qso_date)}</td>
+                <td onClick={() => setEditing(r)}>{formatHhmm(r.time_on)}</td>
+                <td onClick={() => setEditing(r)} className="call-cell">{r.call}</td>
+                <td onClick={() => setEditing(r)}>{r.gridsquare}</td>
+                <td onClick={() => setEditing(r)}>{logbookPlace(r) ?? ""}</td>
+                <td onClick={() => setEditing(r)}>{r.freq}</td>
+                <td onClick={() => setEditing(r)}>{r.mode}</td>
+                <td onClick={() => setEditing(r)}>{r.rst_sent}</td>
+                <td onClick={() => setEditing(r)}>{r.rst_rcvd}</td>
+                <td onClick={() => setEditing(r)} className="status-cell">
+                  {status && (
+                    <span className={status === "CONF" ? "status-pill conf" : "status-pill worked"}>
+                      {status}
+                    </span>
+                  )}
+                  {syncChipLabels(r).map((label) => (
+                    <span key={label} className="sync-chip">{label}</span>
+                  ))}
+                </td>
+                <td onClick={() => setEditing(r)} className="qsl-cell">
+                  {qslMarks(r).map(({ service, mark }) => (
+                    <span
+                      key={service}
+                      className={
+                        mark === "✓" ? "qsl-mark rcvd" : mark === "↑" ? "qsl-mark sent" : "qsl-mark none"
+                      }
+                    >
+                      {service}{mark}
+                    </span>
+                  ))}
+                </td>
+                <td>
+                  <button onClick={() => remove(r.id)}>✕</button>
+                </td>
+              </tr>
+            );
+          })}
+          {virtualWindow.bottomSpacerPx > 0 && (
+            <tr aria-hidden style={{ height: virtualWindow.bottomSpacerPx }}>
+              <td colSpan={QSO_TABLE_COLUMNS.length + 1} style={{ border: "none", padding: 0 }} />
+            </tr>
+          )}
+          {sortedRows.length === 0 && (
             <tr>
-              <td colSpan={9} className="muted">No QSOs logged yet.</td>
+              <td colSpan={QSO_TABLE_COLUMNS.length + 1} className="muted">No QSOs logged yet.</td>
             </tr>
           )}
         </tbody>
       </table>
+      </div>
       {editing !== undefined && (
         <EditQsoDialog
           record={editing}
@@ -753,7 +927,21 @@ const EDIT_FIELDS: { key: keyof QsoEditForm; label: string }[] = [
   { key: "time_off", label: "Time off" },
   { key: "station_callsign", label: "My call" },
   { key: "my_gridsquare", label: "My grid" },
+  { key: "state", label: "State" },
+  { key: "country", label: "Country" },
   { key: "comment", label: "Comment" },
+];
+
+/** QSL/upload checkboxes shown below EDIT_FIELDS, matching the Android
+ *  Logbook's QSL column services (L/E/P/Q -- see `logbook.ts`'s `qslMarks`). */
+const QSL_CHECKBOXES: { key: keyof QsoEditForm; label: string }[] = [
+  { key: "confirmed", label: "Paper QSL received" },
+  { key: "qsl_sent", label: "Paper QSL sent" },
+  { key: "lotw_rcvd", label: "LoTW received" },
+  { key: "lotw_sent", label: "LoTW sent" },
+  { key: "eqsl_rcvd", label: "eQSL received" },
+  { key: "eqsl_sent", label: "eQSL sent" },
+  { key: "qrz_qsl", label: "Confirmed on QRZ.com" },
 ];
 
 function EditQsoDialog(props: {
@@ -795,14 +983,18 @@ function EditQsoDialog(props: {
             </div>
           ))}
         </div>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={form.confirmed}
-            onChange={(e) => set("confirmed", e.target.checked)}
-          />
-          Confirmed (QSL received)
-        </label>
+        <div className="qsl-checks">
+          {QSL_CHECKBOXES.map((c) => (
+            <label className="check" key={c.key}>
+              <input
+                type="checkbox"
+                checked={form[c.key] as boolean}
+                onChange={(e) => set(c.key, e.target.checked as never)}
+              />
+              {c.label}
+            </label>
+          ))}
+        </div>
         {saveError && <div className="error" role="alert">Save failed: {saveError}</div>}
         <div className="actions">
           <button onClick={onCancel}>Cancel</button>

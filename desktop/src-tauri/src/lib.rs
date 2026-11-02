@@ -4,6 +4,7 @@
 //! Audio, scheduling, rig control, persistence and the Tauri shell are added in
 //! later milestones.
 
+pub mod adif;
 pub mod audio;
 pub mod bands;
 // Build-time arch-selection helpers, shared with `build.rs` via `include!`.

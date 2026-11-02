@@ -74,8 +74,51 @@ export interface QsoRecord {
   station_callsign: string;
   my_gridsquare: string;
   comment: string;
-  /** QSL confirmed status (drives the Logbook filter + ADIF QSL_RCVD). */
+  /** Paper QSL card received (drives the Logbook filter + ADIF QSL_RCVD). */
   confirmed: boolean;
+  /** Paper QSL card sent (ADIF QSL_SENT). */
+  qsl_sent: boolean;
+  /** LoTW confirmation sent (ADIF LOTW_QSL_SENT). */
+  lotw_sent: boolean;
+  /** LoTW confirmation received (ADIF LOTW_QSL_RCVD). */
+  lotw_rcvd: boolean;
+  /** eQSL sent (ADIF EQSL_QSL_SENT). */
+  eqsl_sent: boolean;
+  /** eQSL received (ADIF EQSL_QSL_RCVD). */
+  eqsl_rcvd: boolean;
+  /** Confirmed on QRZ.com. */
+  qrz_qsl: boolean;
+  /** Logged US state, or another country's subdivision (ADIF STATE). Not
+   *  derived from the grid -- only ever what was explicitly logged/imported. */
+  state: string;
+  /** Logged country (ADIF COUNTRY). */
+  country: string;
+  /** Already uploaded to Cloudlog/Wavelog/Nextlog. Read-only: set by syncing,
+   *  not by editing or importing a QSO -- optional here only so a record built
+   *  for `saveQso` doesn't have to carry it through; always present when read
+   *  back from the backend. */
+  synced_cloudlog?: boolean;
+  /** Already uploaded to QRZ.com's logbook. Read-only: see synced_cloudlog. */
+  synced_qrz?: boolean;
+}
+
+/** Result of an ADIF import: see the Rust `Db::import_adif` doc comment for
+ *  the duplicate-matching rule (call + date + mode, TIME_ON to the minute,
+ *  band not compared; a match only ever has its QSL_RCVD flag turned on). */
+export interface ImportSummary {
+  imported: number;
+  duplicates: number;
+  skipped: number;
+}
+
+/** Live progress for an in-flight ADIF import, emitted on `"import-progress"`. */
+export interface ImportProgress {
+  processed: number;
+  total: number;
+}
+
+export function onImportProgress(cb: (p: ImportProgress) => void): Promise<UnlistenFn> {
+  return listen<ImportProgress>("import-progress", (ev) => cb(ev.payload));
 }
 
 export interface AudioDevice {
@@ -208,6 +251,8 @@ export const api = {
   /** Export ADIF, optionally restricted to an inclusive YYYYMMDD date range. */
   exportAdif: (start?: string, end?: string) =>
     invoke<string>("export_adif", { start: start ?? null, end: end ?? null }),
+  /** Import ADIF text (already read client-side from the chosen file). */
+  importAdif: (adif: string) => invoke<ImportSummary>("import_adif", { adif }),
 
   getConfig: (key: string) => invoke<string | null>("get_config", { key }),
   setConfig: (key: string, value: string) => invoke("set_config", { key, value }),

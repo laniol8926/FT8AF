@@ -339,6 +339,7 @@ impl QsoEngine {
             my_gridsquare: self.my_grid.clone(),
             comment: String::new(),
             confirmed: false,
+            ..Default::default()
         };
 
         // If a courtesy "73" is queued (the RReport arm set stage = Bye73), leave

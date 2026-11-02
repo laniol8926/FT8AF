@@ -154,6 +154,42 @@ tr.clickable:hover td { background: #1d2730; }
 .logbar .date { width: 140px; }
 tr.confirmed td { color: #7ed492; }
 .confirm-dot { color: var(--ok); font-weight: 700; }
+.import-progress { color: var(--accent); font-weight: 600; }
+.import-done { color: var(--ok); font-weight: 600; }
+.import-error { color: var(--tx); font-weight: 600; }
+
+/* Logbook table: sortable headers, status pill + sync chips, QSL marks. */
+/* Fixed row height, enforced here rather than left to content: the Logbook
+   table is virtualized (see LogScreen in App.tsx) and the windowing math
+   needs an exact, known row height to compute scroll offsets and spacers. */
+.qso-table tbody tr { height: 26px; }
+.qso-table th.sortable { cursor: pointer; user-select: none; }
+.qso-table th.sortable:hover { color: var(--text); }
+.qso-table th.sorted { color: var(--accent); background: rgba(78,161,255,0.12); }
+.qso-table .call-cell { font-weight: 700; color: var(--accent); }
+.qso-table .status-cell, .qso-table .qsl-cell {
+  white-space: nowrap; display: flex; align-items: center; gap: 4px;
+}
+.status-pill {
+  display: inline-block; padding: 1px 6px; border-radius: 8px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.3px;
+}
+.status-pill.conf { background: rgba(63,174,106,0.18); color: var(--ok); }
+.status-pill.worked { background: rgba(78,161,255,0.16); color: var(--accent); }
+.sync-chip {
+  display: inline-block; padding: 1px 5px; border-radius: 6px; font-size: 9.5px;
+  font-weight: 700; background: rgba(78,161,255,0.12); color: var(--accent);
+  border: 1px solid rgba(78,161,255,0.3);
+}
+.qsl-mark { font-size: 10.5px; font-weight: 600; }
+.qsl-mark.rcvd { color: var(--ok); }
+.qsl-mark.sent { color: var(--accent); }
+.qsl-mark.none { color: var(--muted); }
+
+/* Edit-QSO dialog: QSL/upload checkboxes in two columns. */
+.qsl-checks {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-top: 8px;
+}
 
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.55);
