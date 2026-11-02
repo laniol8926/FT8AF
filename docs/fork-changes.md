@@ -247,9 +247,10 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   `ft8af_log.adi`, exports and uploads. (`DatabaseOpr.fillPlace`,
   `pickLoggedState`, `QrzXmlClient.cached/prefetch`)
 - **Import no longer duplicates the app's QSOs.** The "already logged?"
-  check matches call, date, band and mode case-insensitively and TIME_ON to
-  the minute: CQRLOG/QRZ write `1357` / `30M`, the app `135745` / `30m`, and
-  an exact match had re-added the same QSO. The three pairs this caused on
+  check matches call, date and mode case-insensitively and TIME_ON to the
+  minute: CQRLOG/QRZ write `1357`, the app `135745`, and an exact match had
+  re-added the same QSO. Band is not compared, as upstream (same call,
+  minute and mode on another band = one QSO with a wrong band). The three pairs this caused on
   the test phones were merged on 2026-11-01 (pre-merge copies in
   `Documents\FT8AF-db-backups`). (`DatabaseOpr.checkIsQSL`)
 - **Settings backup covers more.** Advanced → Backup & Restore (upstream
