@@ -114,6 +114,11 @@ public class GridMarkerInfoWindow extends InfoWindow {
         this.mView.setOnTouchListener(new View.OnTouchListener() {
             public boolean onTouch(View v, MotionEvent e) {
                 if (e.getAction() == 1) {
+                    // Fork: in the Map tab panel the box has no call button; tapping
+                    // the box itself calls the station (the full tracker's button action).
+                    if (compact && !GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())) {
+                        doCallNow();
+                    }
                     GridMarkerInfoWindow.this.close();
                 }
                 return true;
