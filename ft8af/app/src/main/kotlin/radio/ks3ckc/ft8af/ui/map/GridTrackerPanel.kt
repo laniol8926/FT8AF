@@ -18,15 +18,23 @@ import com.k1af.ft8af.grid_tracker.GridOsmMapView
 import org.osmdroid.views.MapView
 
 private const val PREFS = "ft8af_map"
-private const val KEY_TRACKER = "trackerMap"
+// "tracker" or "classic". A string (not a boolean) so the settings backup, which
+// carries string prefs, keeps it; a new key so every install starts on the tracker.
+private const val KEY_MAP_STYLE = "mapStyle"
 
-/** Whether the map card shows the grid tracker instead of the Compose map (fork). */
+/**
+ * Whether the map card shows the grid tracker (the default, fork) rather than the
+ * original FT8AF map, which the Tracker button still switches back to.
+ */
 internal fun loadTrackerMap(context: Context): Boolean =
-    runCatching { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_TRACKER, false) }
-        .getOrDefault(false)
+    runCatching {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MAP_STYLE, "tracker") != "classic"
+    }.getOrDefault(true)
 
 internal fun saveTrackerMap(context: Context, on: Boolean) {
-    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_TRACKER, on).apply()
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        .putString(KEY_MAP_STYLE, if (on) "tracker" else "classic").apply()
 }
 
 /**

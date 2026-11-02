@@ -177,7 +177,10 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   so touching the box while resizing the map never transmits (tap-the-box and
   hold-the-box were tried and dropped). Tapping a box closes it
   (`GridOsmMapView.setCompactInfo`; the full-screen tracker keeps full boxes).
-  The choice is remembered. The full-screen tracker stays in the map's ⚙ menu.
+  **The tracker is the default map** (2026-11-02, the user's choice); the
+  Tracker button still switches back to the original FT8AF map, and the
+  choice is remembered (prefs `ft8af_map` / `mapStyle` = tracker|classic, in
+  the settings backup). The full-screen tracker stays in the map's ⚙ menu.
   (`GridTrackerPanel`)
 - **Callsign/grid table.** `CallsignQTH` (call → grid) is filled from the log
   at startup (each call's newest grid, ~18.5k calls) and by every saved or
