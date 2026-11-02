@@ -668,13 +668,16 @@ public class Ft8MessageTest {
     }
 
     @Test
-    public void getFromCallTransmitCallsign_unknownSnr_fallsBackToZero() {
+    public void getFromCallTransmitCallsign_unknownSnr_staysUnknown() {
+        // Fork: kept unknown (getSnr() still sends +00) so the sequencer can fill it
+        // from the station's reply instead of reporting a placeholder 0.
         Ft8Message msg = new Ft8Message("CQ", "K1ABC", "FN42");
         msg.utcTime = 0;
         // snr is SNR_UNKNOWN by default
         msg.freq_hz = 1500f;
         com.k1af.ft8af.ft8transmit.TransmitCallsign tc = msg.getFromCallTransmitCallsign();
-        assertThat(tc.snr).isEqualTo(0);
+        assertThat(tc.snr).isEqualTo(Ft8Message.SNR_UNKNOWN);
+        assertThat(tc.getSnr()).isEqualTo("+00");
     }
 
     @Test

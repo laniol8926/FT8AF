@@ -638,9 +638,11 @@ t71     Telemetry data, up to 18 hex digits
 
     //Get the sender's transmit callsign object
     public TransmitCallsign getFromCallTransmitCallsign() {
+        // Fork: an unknown SNR stays unknown (getSnr() still sends +00 for it), so the
+        // sequencer can fill it from the station's reply instead of keeping 0.
         return new TransmitCallsign(this.i3, this.n3, this.callsignFrom, freq_hz
                 , this.getSequence()
-                , hasSnr() ? snr : 0);
+                , hasSnr() ? snr : SNR_UNKNOWN);
     }
 
     //Get the receiver's transmit callsign object. NOTE: the sequence is opposite to the sender's!!!

@@ -7,7 +7,7 @@ import org.junit.Test;
 /**
  * Coverage for the pure logic on the {@link TransmitCallsign} data holder:
  *   - {@link TransmitCallsign#haveTargetCallsign()} (null/"CQ" => no target)
- *   - {@link TransmitCallsign#getSnr()} (signed-decimal formatting; '+' only when > 0)
+ *   - {@link TransmitCallsign#getSnr()} (standard report form: sign and two digits)
  *
  * Plain JUnit: TransmitCallsign has no Android runtime dependency.
  */
@@ -40,19 +40,20 @@ public class TransmitCallsignTest {
     }
 
     @Test
-    public void getSnr_positive_hasPlusSign() {
-        assertThat(withSnr(7).getSnr()).isEqualTo("+7");
+    public void getSnr_positive_hasPlusSignAndTwoDigits() {
+        assertThat(withSnr(7).getSnr()).isEqualTo("+07");
     }
 
     @Test
-    public void getSnr_zero_hasNoPlusSign() {
-        // The branch is snr>0, so 0 falls to the plain "%d" form.
-        assertThat(withSnr(0).getSnr()).isEqualTo("0");
+    public void getSnr_zero_isPlusZeroZero() {
+        // Fork: the standard FT8 report form; a bare "0" made the non-standard "R0".
+        assertThat(withSnr(0).getSnr()).isEqualTo("+00");
     }
 
     @Test
     public void getSnr_negative_keepsMinusSign() {
         assertThat(withSnr(-12).getSnr()).isEqualTo("-12");
+        assertThat(withSnr(-4).getSnr()).isEqualTo("-04");
     }
 
     @Test

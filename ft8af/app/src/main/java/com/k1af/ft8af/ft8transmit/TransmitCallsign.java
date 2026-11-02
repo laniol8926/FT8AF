@@ -65,10 +65,8 @@ public class TransmitCallsign {
     @SuppressLint("DefaultLocale")
     public String getSnr(){
         int s = (snr == com.k1af.ft8af.Ft8Message.SNR_UNKNOWN) ? 0 : snr;
-        if (s>0){
-            return String.format("+%d",s);
-        }else {
-            return String.format("%d",s);
-        }
+        // Fork: the standard report form, a sign and two digits (+00, -04, +07). A bare
+        // "0" made "R0", which isn't a standard FT8 report: the partner didn't copy it.
+        return String.format(java.util.Locale.US, "%+03d", s);
     }
 }

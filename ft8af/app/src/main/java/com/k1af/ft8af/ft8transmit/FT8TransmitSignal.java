@@ -1858,6 +1858,12 @@ public class FT8TransmitSignal {
                     }
                 }
                 sendReport = messages.get(i).hasSnr() ? messages.get(i).snr : 0;// save the received signal
+                // Fork: a target picked without a known SNR (e.g. from a map/tracker box)
+                // takes it from this reply, so the report we send is how we hear them now
+                // rather than a placeholder 0 ("R0" to WA4HR on 2026-11-02).
+                if (toCallsign.snr == Ft8Message.SNR_UNKNOWN && ft8Message.hasSnr()) {
+                    toCallsign.snr = ft8Message.snr;
+                }
 
                 int order = GeneralVariables.checkFunOrder(ft8Message);// check the message sequence number
                 if (order != -1) return order;// successfully parsed the sequence number
