@@ -280,6 +280,45 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   the plain name back once it's free: delete the stale `ft8af_log.adi` (and
   the numbered copies) with a file manager after a reinstall.
 
+## Desktop (`desktop/`, Tauri — ported from the Android app above)
+
+The desktop app is a separate codebase (shares only the vendored C `ft8_lib`
+DSP core), so these are rewrites of the Android features above, not shared
+code. Built and tested on a Linux aarch64 SBC; see `desktop/linux/run-ft8af.sh`
+for the Hamlib version workaround needed there.
+
+- **ADIF import** (`Db::import_adif_with_progress`, `adif.rs`): the desktop
+  app could only export before. Byte-safe parser (never panics on a
+  multi-byte UTF-8 char split by a tag's declared length — real CQRLOG/QRZ.com
+  exports with accented names/comments did this); runs in one SQLite
+  transaction (a per-row INSERT with no transaction took many minutes on a
+  ~50k-row file under SQLite's default rollback-journal mode); live
+  "Processing record: N / M" progress and a done/failed banner in the UI.
+- **Duplicate matching**, fixed against two real ~54,500-QSO exports (CQRLOG
+  + QRZ.com) of the same log that otherwise landed around 61–65k instead of
+  ~53k: **MODE is excluded from the match** (mirrors the Android fix above
+  and the existing band exclusion) — a program's own ADIF round-trip can
+  widen FT4/FT8 to the generic MFSK/PSK family with no SUBMODE to recover the
+  real mode from. SUBMODE is read and preferred over MODE on import. A
+  duplicate match upgrades a generic MODE to the specific submode and
+  TIME_ON to whichever side is more precise (HHMM vs HHMMSS) if the other
+  side has it, same "only ever add, never remove" rule as the QSL flags.
+- **Logbook table**: ported the table format above — sortable Date/Time/
+  Call/Grid/State/Freq/Mode/RST Sent/RST Rcvd/Status/QSL columns, the CONF/
+  WORKED status pill, CL/QRZ sync chips, and the four-mark QSL column
+  (L/E/P/Q). Schema gained per-service QSL tracking and logged STATE/COUNTRY
+  to back it. **Known gap**: State only shows what was explicitly logged or
+  imported — no grid→state lookup like Android's `UsStateLookup` yet.
+- **Logbook table rendering**, confirmed necessary at this log's real size:
+  removed the artificial 500-row fetch cap (sorting a capped,
+  insertion-ordered window silently sorted the wrong thing once the log
+  exceeded it), which then needed the sort memoized (was recomputing over
+  the whole table on every unrelated re-render) and real row virtualization
+  (`computeVirtualWindow`) — rendering all ~54,500 rows as real `<tr>`s with
+  no windowing pinned the webview's renderer at 100% CPU indefinitely.
+- **Open items**: no grid-to-state/country lookup (see above); no map, POTA,
+  QRZ photos, Bluetooth, or PSKReporter yet (desktop README).
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now
