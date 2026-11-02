@@ -169,8 +169,10 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   grid tracker: offline night map, this slot's QSO lines and CQ markers,
   labelled, redrawn each slot. No grid shading (a big log covered the map).
   The boxes are one line, the message itself (e.g. `CQ KG4KTB EM73`): no
-  dBm/ms, distance, prefix country or zone icons. Tapping a CQ box calls the
-  station (what the call button did); a QSO-line box just closes
+  dBm/ms, distance, prefix country or zone icons. **Press and hold** a CQ box
+  to call the station (what the call button did); a tap only closes it, and a
+  drag or pinch that touches a box (resizing the map) never transmits. A
+  QSO-line box just closes
   (`GridOsmMapView.setCompactInfo`; the full-screen tracker keeps full boxes).
   The choice is remembered. The full-screen tracker stays in the map's ⚙ menu.
   (`GridTrackerPanel`)

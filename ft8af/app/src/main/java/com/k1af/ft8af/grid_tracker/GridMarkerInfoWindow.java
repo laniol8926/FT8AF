@@ -8,6 +8,7 @@ package com.k1af.ft8af.grid_tracker;
 import android.annotation.SuppressLint;
 import android.graphics.Paint;
 import android.util.Log;
+import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.ImageButton;
@@ -111,14 +112,38 @@ public class GridMarkerInfoWindow extends InfoWindow {
                 doCallNow();
             }
         });
+        // Fork: in the Map tab panel the box has no call button; press and hold the box to
+        // call the station (the full tracker's button action). A tap only closes it, and a
+        // drag or pinch that starts on the box (resizing the map) never calls: the gesture
+        // detector drops a long press once the finger moves or a second finger comes down.
+        final GestureDetector holdToCall = new GestureDetector(mapView.getContext(),
+                new GestureDetector.SimpleOnGestureListener() {
+                    @Override
+                    public boolean onDown(MotionEvent e) {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean onSingleTapUp(MotionEvent e) {
+                        GridMarkerInfoWindow.this.close();
+                        return true;
+                    }
+
+                    @Override
+                    public void onLongPress(MotionEvent e) {
+                        if (!GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())) {
+                            doCallNow();
+                        }
+                        GridMarkerInfoWindow.this.close();
+                    }
+                });
         this.mView.setOnTouchListener(new View.OnTouchListener() {
             public boolean onTouch(View v, MotionEvent e) {
+                if (compact) {
+                    holdToCall.onTouchEvent(e);
+                    return true;
+                }
                 if (e.getAction() == 1) {
-                    // Fork: in the Map tab panel the box has no call button; tapping
-                    // the box itself calls the station (the full tracker's button action).
-                    if (compact && !GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())) {
-                        doCallNow();
-                    }
                     GridMarkerInfoWindow.this.close();
                 }
                 return true;
