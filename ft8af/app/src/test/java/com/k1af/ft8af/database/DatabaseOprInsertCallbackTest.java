@@ -28,9 +28,13 @@ import org.robolectric.RobolectricTestRunner;
 public class DatabaseOprInsertCallbackTest {
 
     private static QSLRecord record(String call, boolean hasFieldWarning) {
+        return record(call, "FT8", hasFieldWarning);
+    }
+
+    private static QSLRecord record(String call, String mode, boolean hasFieldWarning) {
         QSLRecord r = new QSLRecord(1_700_000_000_000L, 1_700_000_010_000L
                 , "K1ABC", "FN31", call, "IO91"
-                , 59, -10, "FT8", 14_074_000L, 1500);
+                , 59, -10, mode, 14_074_000L, 1500);
         r.isInvalid = hasFieldWarning;
         return r;
     }
@@ -99,6 +103,24 @@ public class DatabaseOprInsertCallbackTest {
         assertThat(cb.lastIsInvalid).isFalse();
         assertThat(cb.lastIsNewQSL).isFalse();
         assertThat(cb.lastHasWarning).isTrue();
+    }
+
+    @Test
+    public void reimportWithADifferentMode_matchesAsUpdateNotANewDuplicate() {
+        // checkIsQSL's dedup match deliberately excludes MODE (see its own doc comment):
+        // confirmed on a real ~54,500-QSO log, an ADIF round-trip through one program can
+        // widen FT4/FT8 to the generic MFSK family on records with no SUBMODE tag, while a
+        // fresh export from the original source still has the specific mode -- comparing
+        // mode made the same QSO fail to match its own duplicate and get inserted again.
+        DatabaseOpr opr = new DatabaseOpr(ApplicationProvider.getApplicationContext(), null, null,
+                DatabaseOpr.SCHEMA_VERSION);
+        opr.doInsertQSLData(record("K3GHI", "FT8", false), null, false);
+
+        RecordingCallback cb = new RecordingCallback();
+        boolean inserted = opr.doInsertQSLData(record("K3GHI", "MFSK", false), cb, false);
+
+        assertThat(inserted).isTrue();
+        assertThat(cb.lastIsNewQSL).isFalse(); // matched the existing row, not a new duplicate
     }
 
     @Test
