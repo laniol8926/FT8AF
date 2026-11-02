@@ -8,9 +8,9 @@ package com.k1af.ft8af.grid_tracker;
 import android.annotation.SuppressLint;
 import android.graphics.Paint;
 import android.util.Log;
-import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.TextView;
@@ -102,7 +102,19 @@ public class GridMarkerInfoWindow extends InfoWindow {
 
         ImageButton imageButton=(ImageButton) this.mView.findViewById(R.id.callThisImageButton);
         //if (GeneralVariables.myCallsign.equals(msg.getCallsignFrom())){
-        if (compact || GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())){
+        if (compact) {
+            // Fork: in the Map tab panel the call button stays (a deliberate touch to call),
+            // shrunk to about the text line's height instead of the full 48 px icon.
+            int size = Math.round(26 * mapView.getResources().getDisplayMetrics().density);
+            ViewGroup.LayoutParams lp = imageButton.getLayoutParams();
+            lp.width = size;
+            lp.height = size;
+            imageButton.setLayoutParams(lp);
+            imageButton.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            int pad = Math.round(3 * mapView.getResources().getDisplayMetrics().density);
+            imageButton.setPadding(pad, pad, pad, pad);
+        }
+        if (GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())){
             imageButton.setVisibility(View.GONE);
         }
 
@@ -112,37 +124,8 @@ public class GridMarkerInfoWindow extends InfoWindow {
                 doCallNow();
             }
         });
-        // Fork: in the Map tab panel the box has no call button; press and hold the box to
-        // call the station (the full tracker's button action). A tap only closes it, and a
-        // drag or pinch that starts on the box (resizing the map) never calls: the gesture
-        // detector drops a long press once the finger moves or a second finger comes down.
-        final GestureDetector holdToCall = new GestureDetector(mapView.getContext(),
-                new GestureDetector.SimpleOnGestureListener() {
-                    @Override
-                    public boolean onDown(MotionEvent e) {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean onSingleTapUp(MotionEvent e) {
-                        GridMarkerInfoWindow.this.close();
-                        return true;
-                    }
-
-                    @Override
-                    public void onLongPress(MotionEvent e) {
-                        if (!GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())) {
-                            doCallNow();
-                        }
-                        GridMarkerInfoWindow.this.close();
-                    }
-                });
         this.mView.setOnTouchListener(new View.OnTouchListener() {
             public boolean onTouch(View v, MotionEvent e) {
-                if (compact) {
-                    holdToCall.onTouchEvent(e);
-                    return true;
-                }
                 if (e.getAction() == 1) {
                     GridMarkerInfoWindow.this.close();
                 }
