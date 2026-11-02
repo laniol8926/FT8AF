@@ -389,6 +389,13 @@ class DecodeCollapseTest {
                 size = 3, previousSize = 2,
             ),
         ).isEqualTo(0)
+        // A new newest row without growth (list trimmed / collapsed) -> back to the top (fork).
+        assertThat(
+            autoScrollTargetIndex(
+                DecodeSortMode.LAST_HEARD, previousSortMode = DecodeSortMode.LAST_HEARD,
+                size = 5, previousSize = 5, newestChanged = true,
+            ),
+        ).isEqualTo(0)
         // No growth, same mode -> no scroll.
         assertThat(
             autoScrollTargetIndex(

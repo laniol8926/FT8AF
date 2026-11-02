@@ -233,13 +233,23 @@ fun DecodeScreen(
     val listState = rememberLazyListState()
     var previousCount by remember { mutableIntStateOf(0) }
     var previousSortMode by remember { mutableStateOf(sortMode) }
-    LaunchedEffect(collapsedMessages.size, sortMode) {
-        val target = autoScrollTargetIndex(sortMode, previousSortMode, collapsedMessages.size, previousCount)
+    // Fork (landscape only): also back to the top when the newest row changes without
+    // the list growing (trimmed to its cap, or collapsed by a filter).
+    val scrollOnNewest = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val newestKey = collapsedMessages.firstOrNull()?.let { rowAnimationKey(it) }
+    var previousNewestKey by remember { mutableStateOf(newestKey) }
+    LaunchedEffect(collapsedMessages.size, sortMode, newestKey) {
+        val target = autoScrollTargetIndex(
+            sortMode, previousSortMode, collapsedMessages.size, previousCount,
+            newestChanged = scrollOnNewest && newestKey != previousNewestKey,
+        )
         if (target != null) {
             listState.animateScrollToItem(target)
         }
         previousCount = collapsedMessages.size
         previousSortMode = sortMode
+        previousNewestKey = newestKey
     }
 
     // A tapped Needed-DX notification asks us to pre-select that station: reset to the

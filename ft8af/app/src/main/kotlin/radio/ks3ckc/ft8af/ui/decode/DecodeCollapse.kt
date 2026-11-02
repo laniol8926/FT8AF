@@ -200,11 +200,15 @@ internal fun autoScrollTargetIndex(
     previousSortMode: DecodeSortMode,
     size: Int,
     previousSize: Int,
+    // Fork: the newest row is a different one. The list is trimmed to a message cap
+    // and filters collapse rows, so a new slot can arrive without the count growing;
+    // the list then kept its place and the new slot sat above the viewport.
+    newestChanged: Boolean = false,
 ): Int? {
     if (sortMode != DecodeSortMode.LAST_HEARD || size == 0) return null
     val justSwitchedToLastHeard = sortMode != previousSortMode
     val grew = size > previousSize
-    return if (justSwitchedToLastHeard || grew) 0 else null
+    return if (justSwitchedToLastHeard || grew || newestChanged) 0 else null
 }
 
 /**
