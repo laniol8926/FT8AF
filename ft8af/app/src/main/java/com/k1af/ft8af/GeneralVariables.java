@@ -1572,7 +1572,9 @@ public class GeneralVariables {
         Map<String, String> m = gridStateMap;
         if (m == null) {
             m = loadGridStateMap();
-            gridStateMap = m;
+            // Fork: keep only a real load. Before the app context exists (or if the
+            // asset failed) the load is empty; caching it disabled every later lookup.
+            if (!m.isEmpty()) gridStateMap = m;
         }
         return m.get(grid.substring(0, 4).toUpperCase());
     }

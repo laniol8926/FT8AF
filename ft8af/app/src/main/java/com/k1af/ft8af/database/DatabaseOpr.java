@@ -1682,22 +1682,21 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         QSLRecord newRecord = record;
         newRecord.id = -1;
         //Check if the log record already exists.
-        // Fork: match the minute of TIME_ON, case-insensitively, and the band. Loggers
-        // differ on seconds (FT8AF logs 135745, CQRLOG/QRZ export 1357) and on band case
-        // (30m / 30M), and an exact match re-added the same QSO as a second row.
+        // Fork: match the minute of TIME_ON and call/mode case-insensitively. Loggers
+        // differ on seconds (FT8AF logs 135745, CQRLOG/QRZ export 1357), and an exact
+        // match re-added the same QSO as a second row. Band stays out, as upstream: the
+        // same call, minute and mode on another band is one QSO with a wrong band, not
+        // a second QSO (ThirdPartyServiceCloudlogDownloadTest relies on it).
         String time = record.getTime_on() == null ? "" : record.getTime_on();
-        String band = record.getBandLength() == null ? "" : record.getBandLength();
         String querySQL = "select * from QSLTable WHERE (upper(call)=upper(?))" +
                 "and (qso_date=?) and (substr(time_on,1,4)=substr(?,1,4))" +
-                "and (upper(mode)=upper(?))" +
-                "and (?='' or lower(band)=lower(?))";
+                "and (upper(mode)=upper(?))";
 
         Cursor cursor = db.rawQuery(querySQL, new String[]{
                 record.getToCallsign()
                 , record.getQso_date()
                 , time
-                , record.getMode()
-                , band, band});
+                , record.getMode()});
         try {
             if (cursor.getCount() > 0) {
                 cursor.moveToFirst();
