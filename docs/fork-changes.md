@@ -33,7 +33,8 @@ only.
 | Balanced decode depth between Fast and Deep | PR #959 (merged) |
 | Per-slot counts on every time-group divider that match the rows shown | fork |
 | Landscape layout: controls on the title row, a split view with the decode list beside the map or waterfall, a 30-character message column, compact view by default | fork; see [landscape-layout.md](landscape-layout.md) |
-| Worked-before rows (landscape): a red strike-through on the message text (drawn over it; `TextDecoration` was too faint) | fork |
+| Worked-before rows (landscape): a red strike-through on the message text (drawn over it; `TextDecoration` was too faint). It marks every station worked before on this band, whatever the pill shows (Decode Highlights → Worked off, or NEW STATE / NEW GRID / POTA outranking WORKED), the same test as the grid tracker. To *hide* worked stations: Decode Highlights → Worked on, mode Hide | fork |
+| Decode list (landscape) returns to the newest slot whenever the newest row changes, not only when the list grows: trimmed to its message cap or collapsed by a filter (CQ Calls), it used to keep its place with the new slot above the viewport | fork |
 | Landscape QSO layout: while TX is on the QSO panel fills the left column and the waterfall runs the full height on the right; see below | fork |
 
 ## QSO sequencing (fork)
@@ -166,8 +167,10 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   the waterfall shows without the spectrum strip.
 - **Grid tracker in the map panel.** The map header's **Tracker** button swaps
   the map card (Map tab and the landscape Decode panel) for the FT8CN/FT8TW
-  grid tracker: offline night map, this slot's QSO lines and CQ markers,
-  labelled, redrawn each slot. No grid shading (a big log covered the map).
+  grid tracker: offline night map, the current (newest) slot's QSO lines and
+  CQ markers, redrawn whole on every decode pass, one per station pair. Every
+  CQ gets a box (already-worked stations struck through); QSO-line boxes only
+  for new stations. No grid shading (a big log covered the map).
   The boxes are one line, the message itself (e.g. `CQ KG4KTB EM73`): no
   dBm/ms, distance, prefix country or zone icons. A CQ box keeps its call
   button, shrunk to the text line's height (~26 dp); only that button calls,
@@ -181,6 +184,9 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   imported QSO, without overwriting a grid heard on air. On-air grids (CQs
   and replies to anyone) keep updating it. Stations are then placed by grid
   instead of their country's centre, so the tracker draws far more QSO lines.
+  The whole table is loaded into memory at startup, so a station's grid is
+  known on its first decode (the per-call lookup is async and missed it).
+  A message carrying no grid never writes an empty one.
 
 ## Logbook and NEW STATE
 
