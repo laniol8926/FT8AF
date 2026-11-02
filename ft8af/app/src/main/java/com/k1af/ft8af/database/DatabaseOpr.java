@@ -1496,6 +1496,24 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Fork: load the whole CallsignQTH table into the in-memory call → grid map, so a
+     * station's grid is known on its first decode (the per-call lookup is async and
+     * missed that slot). Keeps grids already in memory. Blocking; off the main thread.
+     */
+    public int loadCallsignQTHToMemory() {
+        int n = 0;
+        try (Cursor c = db.rawQuery("SELECT callsign, grid FROM CallsignQTH WHERE length(grid)>=4", null)) {
+            while (c.moveToNext()) {
+                if (c.isNull(0) || c.isNull(1)) continue;
+                if (GeneralVariables.callsignAndGrids.putIfAbsent(c.getString(0), c.getString(1)) == null) n++;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "loadCallsignQTHToMemory: " + e.getMessage());
+        }
+        return n;
+    }
+
     private static void markImportedUploads(SQLiteDatabase db, QSLRecord record) {
         StringBuilder set = new StringBuilder();
         if (record.uploadedQrz) set.append("synced_qrz=1");

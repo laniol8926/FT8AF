@@ -662,6 +662,8 @@ public class MainViewModel extends ViewModel {
             if (databaseOpr != null) {
                 int added = databaseOpr.fillCallsignQTHFromLog();
                 if (added > 0) GeneralVariables.fileLog("CallsignQTH: " + added + " grids added from the log");
+                int loaded = databaseOpr.loadCallsignQTHToMemory();
+                GeneralVariables.fileLog("CallsignQTH: " + loaded + " grids loaded to memory");
             }
         }, "callsign-grid-fill").start();
         //create recording object

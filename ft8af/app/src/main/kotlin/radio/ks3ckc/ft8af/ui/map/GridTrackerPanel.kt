@@ -50,24 +50,29 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
         tracker.setShowQSX(true)
 
         // No grid shading (unlike the full-screen tracker): with a big log the worked /
-        // confirmed / known grids cover the map. Only this cycle's lines and CQs show.
+        // confirmed / known grids cover the map. Only the current slot's lines and CQs show.
 
-        val decodingObserver = Observer<Boolean> { decoding ->
-            if (decoding == true) {
-                tracker.hideInfoWindows()
-                tracker.clearLines()
-                tracker.clearMarkers()
-            }
-        }
+        // The current slot only (the newest one decoded), redrawn whole on every pass so
+        // it matches the newest group in the decode list. Main thread only.
+        val recentSlots = java.util.TreeMap<Long, List<Ft8Message>>()
         val messagesObserver = Observer<ArrayList<Ft8Message>> {
             val current = mainViewModel.currentMessages ?: return@Observer
-            // The waterfall label list can still carry the previous slot's decodes into
-            // this one (a deep pass merges onto it); draw only the newest slot, so last
-            // slot's CQ bubbles don't reappear after the clear.
             val slotMs = GeneralVariables.currentMode().slotMillis.toLong().coerceAtLeast(1L)
-            val messages = ArrayList(current)
-            val newestSlot = messages.maxOfOrNull { it.utcTime / slotMs } ?: return@Observer
-            for (msg in messages.filter { it.utcTime / slotMs == newestSlot }) {
+            ArrayList(current).groupBy { it.utcTime / slotMs }.forEach { (slot, msgs) ->
+                recentSlots[slot] = msgs
+            }
+            if (recentSlots.isEmpty()) return@Observer
+            val newest = recentSlots.lastKey()
+            recentSlots.headMap(newest).clear()
+
+            tracker.hideInfoWindows()
+            tracker.clearLines()
+            tracker.clearMarkers()
+            // Newest message per station pair: one box each.
+            val drawn = HashSet<String>()
+            for (msg in recentSlots.descendingMap().values.flatten()) {
+                val key = "${msg.callsignFrom}|${msg.callsignTo}"
+                if (!drawn.add(key)) continue
                 // No upgradeGridInfo: it shades each decoded grid and never clears it.
                 tracker.drawLine(msg, mainViewModel.databaseOpr)
                 if (msg.checkIsCQ()) {
@@ -76,7 +81,6 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
             }
             tracker.showInfoWindows()
         }
-        mainViewModel.mutableIsDecoding.observe(lifecycleOwner, decodingObserver)
         mainViewModel.mutableFt8MessageList.observe(lifecycleOwner, messagesObserver)
 
         val lifecycleObserver = LifecycleEventObserver { _, event ->
@@ -90,7 +94,6 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
         mapView.onResume()
 
         onDispose {
-            mainViewModel.mutableIsDecoding.removeObserver(decodingObserver)
             mainViewModel.mutableFt8MessageList.removeObserver(messagesObserver)
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
             mapView.onPause()
