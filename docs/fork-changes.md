@@ -274,6 +274,11 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   After each logged QSO the whole file is also copied to
   **Download/FT8AF/ft8af_log.adi**, next to the exports (via MediaStore on
   Android 10+). (`AdifLogFile.mirrorToDownloads`)
+  After an uninstall + reinstall the old install's `ft8af_log.adi` blocks
+  the name (and is invisible to the new install), which used to make a new
+  `ft8af_log (N).adi` on every QSO. The app now reuses its own copy and takes
+  the plain name back once it's free: delete the stale `ft8af_log.adi` (and
+  the numbered copies) with a file manager after a reinstall.
 
 ## Smaller fixes
 
