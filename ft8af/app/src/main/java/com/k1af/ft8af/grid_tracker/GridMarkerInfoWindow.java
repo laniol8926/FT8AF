@@ -51,6 +51,15 @@ public class GridMarkerInfoWindow extends InfoWindow {
         if (!msg.fromDxcc) fromDxccImage.setVisibility(View.GONE);
         if (!msg.fromItu) fromItuImage.setVisibility(View.GONE);
         if (!msg.fromCq) fromCqImage.setVisibility(View.GONE);
+        // Fork: the Map tab panel's box is the message line only (see GridOsmMapView).
+        boolean compact = GridOsmMapView.isCompactInfo(mapView);
+        if (compact) {
+            fromDxccImage.setVisibility(View.GONE);
+            fromItuImage.setVisibility(View.GONE);
+            fromCqImage.setVisibility(View.GONE);
+            descriptionView.setVisibility(View.GONE);
+            subDescriptionView.setVisibility(View.GONE);
+        }
 
         ConstraintLayout layout=(ConstraintLayout) mView.findViewById(R.id.trackerMarkerConstraintLayout);
         if (msg.fromCq||msg.fromItu||msg.fromDxcc){//If this is a zone not yet contacted, change the color to red
@@ -92,7 +101,7 @@ public class GridMarkerInfoWindow extends InfoWindow {
 
         ImageButton imageButton=(ImageButton) this.mView.findViewById(R.id.callThisImageButton);
         //if (GeneralVariables.myCallsign.equals(msg.getCallsignFrom())){
-        if (GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())){
+        if (compact || GeneralVariables.checkIsMyCallsign(msg.getCallsignFrom())){
             imageButton.setVisibility(View.GONE);
         }
 

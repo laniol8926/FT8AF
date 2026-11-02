@@ -30,11 +30,14 @@ public class GridInfoWindow extends InfoWindow {
     private final TextView titleView;
     private final TextView descriptionView;
     private final TextView subDescriptionView;
+    // Fork: the Map tab panel's box is the message line only (see GridOsmMapView).
+    private final boolean compact;
 
 
     @SuppressLint("UseCompatLoadingForDrawables")
     public GridInfoWindow(int layoutResId, MapView mapView, Ft8Message msg) {
         super(layoutResId, mapView);
+        this.compact = GridOsmMapView.isCompactInfo(mapView);
         //setResIds(mapView.getContext());
         titleView = (TextView) this.mView.findViewById(R.id.tracker_info_bubble_title);
         descriptionView = (TextView) this.mView.findViewById(R.id.tracker_info_bubble_description);
@@ -53,6 +56,16 @@ public class GridInfoWindow extends InfoWindow {
         if (!msg.toDxcc) toDxccImage.setVisibility(View.GONE);
         if (!msg.toItu) toItuImage.setVisibility(View.GONE);
         if (!msg.toCq) toCqImage.setVisibility(View.GONE);
+        if (compact) {
+            fromDxccImage.setVisibility(View.GONE);
+            fromItuImage.setVisibility(View.GONE);
+            fromCqImage.setVisibility(View.GONE);
+            toDxccImage.setVisibility(View.GONE);
+            toItuImage.setVisibility(View.GONE);
+            toCqImage.setVisibility(View.GONE);
+            descriptionView.setVisibility(View.GONE);
+            subDescriptionView.setVisibility(View.GONE);
+        }
 
 
         //Check if this callsign has been successfully contacted on the current band

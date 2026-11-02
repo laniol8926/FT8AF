@@ -95,6 +95,22 @@ public class GridOsmMapView {
         this.mainViewModel = mainViewModel;
     }
 
+    /** Fork: MapView tag marking the Map tab's tracker panel, whose boxes are one line. */
+    public static final String COMPACT_INFO_TAG = "ft8af.tracker.compactInfo";
+
+    /**
+     * Fork: call before the first drawing; boxes then show only the message line
+     * (e.g. "CQ KG4KTB EM73"): no dBm/ms, distance, country, zone icons or call button.
+     */
+    public void setCompactInfo(boolean compact) {
+        gridMapView.setTag(compact ? COMPACT_INFO_TAG : null);
+    }
+
+    /** Fork: whether [mapView]'s info boxes are the compact one-liners. */
+    public static boolean isCompactInfo(MapView mapView) {
+        return mapView != null && COMPACT_INFO_TAG.equals(mapView.getTag());
+    }
+
 
     public void initMap(String grid, boolean offset) {
         mapViewOtherData(gridMapView);//Set up the tile source

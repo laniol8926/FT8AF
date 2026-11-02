@@ -42,6 +42,8 @@ internal fun GridTrackerPanel(mainViewModel: MainViewModel, modifier: Modifier =
     val tracker = remember { GridOsmMapView(context, mapView, mainViewModel) }
 
     DisposableEffect(lifecycleOwner) {
+        // One-line boxes: just the message (callsign and grid), no detail lines.
+        tracker.setCompactInfo(true)
         tracker.initMap(GeneralVariables.getMyMaidenhead4Grid(), true)
         // Label the QSO lines too, not only CQs (GridOsmMapView defaults QSX labels off;
         // the full-screen tracker turns them on from its own settings bar).

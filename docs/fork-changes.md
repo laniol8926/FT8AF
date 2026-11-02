@@ -168,6 +168,9 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   the map card (Map tab and the landscape Decode panel) for the FT8CN/FT8TW
   grid tracker: offline night map, this slot's QSO lines and CQ markers,
   labelled, redrawn each slot. No grid shading (a big log covered the map).
+  The boxes are one line, the message itself (e.g. `CQ KG4KTB EM73`): no
+  dBm/ms, distance, prefix country, zone icons or call button
+  (`GridOsmMapView.setCompactInfo`; the full-screen tracker keeps full boxes).
   The choice is remembered. The full-screen tracker stays in the map's ⚙ menu.
   (`GridTrackerPanel`)
 - **Callsign/grid table.** `CallsignQTH` (call → grid) is filled from the log
@@ -278,13 +281,6 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
 
 ## Open items
 
-- **Grid tracker pop-up boxes** (map panel Tracker). The info bubbles on CQ
-  markers and QSO lines need work: they overlap each other and crowd the
-  small panel (two CQ boxes stacked over the US), show "dBm"/"ms" detail and
-  a country from the prefix lookup (KG4KTB in EM73 shown as "Guantanamo
-  Bay"). Decided (2026-11-01): clean them up by removing info from the boxes;
-  which lines to keep is to be settled when work resumes.
-  (`GridOsmMapView` info windows, `GridTrackerPanel`)
 - In landscape the bottom row of Settings → Radio & Audio can sit behind
   other content (Enabled Bands was hard to reach).
 - A non-debug build with a higher version code (e.g. upstream
