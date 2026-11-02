@@ -435,9 +435,10 @@ public class WaterfallView extends View {
                 String label = waterfallLabel(msg, landscape);
                 _canvas.drawTextOnPath(label, path
                         , 0, 0, messagePaint);//Message
-                // Strike-through on worked stations: portrait only (fork) -- in landscape
-                // the decode list already strikes them, and the waterfall stays clean.
-                if (!landscape && GeneralVariables.checkQSLCallsign(msg.getCallsignFrom())) {//Draw strikethrough line
+                // Strike-through on every labelled station worked before on this band,
+                // portrait and landscape alike (fork): the same mark as the decode list
+                // and the grid tracker.
+                if (GeneralVariables.checkQSLCallsign(msg.getCallsignFrom())) {//Draw strikethrough line
                     float text_len = messagePaint.measureText(label);
                     float text_start = ((pathEnd- pathStart)-text_len)/2;
                     float text_high =dpToPixel(4);//messagePaint.getFontSpacing()/2;

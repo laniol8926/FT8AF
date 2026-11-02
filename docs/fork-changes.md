@@ -63,7 +63,13 @@ only.
   Settings), with a toast; between overs it changes as before.
 - **Waterfall labels (landscape):** only CQs (whole message), decodes addressed
   to us and the QSO partner (callsign) are labelled; other stations show just
-  their trace, and there is no strike-through on the waterfall.
+  their trace. A labelled station worked before on this band is struck
+  through, in landscape as in portrait (since 2026-11-02; the same mark as
+  the decode list and the grid tracker).
+- **TX reports use the standard form** (`+00`, `-04`, `+07`). A call target
+  picked without a known SNR takes it from the station's reply; it had sent
+  "R0" (a placeholder 0 written bare), which the partner didn't copy.
+  (`TransmitCallsign.getSnr`, `FT8TransmitSignal.checkFunctionOrdFromMessages`)
 - **White line on the QSO partner's frequency** on every waterfall, beside the
   red TX markers (portrait too, for now).
 - **The waterfall keeps its history across a rotation.** The view going away
