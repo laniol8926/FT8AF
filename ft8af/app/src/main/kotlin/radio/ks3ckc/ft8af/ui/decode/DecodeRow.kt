@@ -170,13 +170,18 @@ fun DecodeRow(
         // (which have no parsed callsignFrom) aren't left blank.
         val hoistedMsgText = message.getMessageText()?.trim().orEmpty()
         // Worked-before rows get a red strike-through on the message, like the
-        // waterfall's, so the eye skips them without reading across to the WORKED pill
-        // on the far right (for operators who keep worked stations shown, not hidden).
-        // Landscape only (fork); portrait is as upstream.
+        // waterfall's, so the eye skips them. Landscape only (fork); portrait is as
+        // upstream. It marks any station worked before on this band -- the grid
+        // tracker's test -- whatever the pill shows: with Decode Highlights → Worked
+        // off, or a NEW STATE / NEW GRID / POTA label outranking WORKED, the row is
+        // still struck, so the list and the tracker agree.
         val landscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
             android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val worked = landscape &&
-            (hoistedStatus == QsoStatus.WORKED || hoistedStatus == QsoStatus.CONFIRMED)
+        val worked = landscape && (
+            hoistedStatus == QsoStatus.WORKED || hoistedStatus == QsoStatus.CONFIRMED ||
+                message.isQSL_Callsign ||
+                GeneralVariables.checkQSLCallsign(message.getCallsignFrom())
+            )
 
         Column(modifier = Modifier.weight(1f)) {
             if (compact) {
