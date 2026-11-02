@@ -20,6 +20,17 @@ import java.nio.file.Files;
  */
 public class AdifLogFileTest {
 
+    @Test
+    public void runningLogName_matchesTheMirrorAndItsNumberedCopiesOnly() {
+        assertThat(AdifLogFile.isRunningLogName("ft8af_log.adi")).isTrue();
+        assertThat(AdifLogFile.isRunningLogName("ft8af_log (8).adi")).isTrue();
+        assertThat(AdifLogFile.isRunningLogName("ft8af_log (12).adi")).isTrue();
+        // Dated exports and other files are left alone.
+        assertThat(AdifLogFile.isRunningLogName("ft8af-log-20261027-152734.adi")).isFalse();
+        assertThat(AdifLogFile.isRunningLogName("ft8af_log_old.adi")).isFalse();
+        assertThat(AdifLogFile.isRunningLogName(null)).isFalse();
+    }
+
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 

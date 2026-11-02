@@ -117,9 +117,13 @@ public final class AdifLogFile {
      * Copy the whole running log over {@code Download/FT8AF/ft8af_log.adi}, creating it the
      * first time. A full copy (not an append) so the public file always matches the
      * running one, whatever state it was left in. On Android 10+ through MediaStore: the
-     * entry this app created is found by name and path and rewritten ("wt"). If it was
-     * created by an earlier install (not ours to write), MediaStore makes a numbered copy
-     * instead. Never throws.
+     * entry this app created is found and rewritten ("wt").
+     *
+     * <p>Fork: MediaStore only shows an app its own Downloads entries, so a file left by an
+     * earlier install (e.g. after an uninstall) is invisible and blocks the name; inserting
+     * again then made a new "ft8af_log (N).adi" on every QSO. Now any of our own
+     * {@code ft8af_log*.adi} entries is reused (the exact name first, else the newest), and
+     * renamed back to {@code ft8af_log.adi} once that name is free. Never throws.
      */
     static void mirrorToDownloads(Context context, File source) {
         synchronized (WRITE_LOCK) {
@@ -129,13 +133,31 @@ public final class AdifLogFile {
                     Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
                     String relativePath = Environment.DIRECTORY_DOWNLOADS + "/FT8AF/";
                     Uri target = null;
+                    String targetName = null;
                     try (Cursor c = resolver.query(collection,
-                            new String[]{MediaStore.Downloads._ID},
-                            MediaStore.Downloads.DISPLAY_NAME + "=? AND "
+                            new String[]{MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME},
+                            MediaStore.Downloads.DISPLAY_NAME + " LIKE ? AND "
                                     + MediaStore.Downloads.RELATIVE_PATH + "=?",
-                            new String[]{FILE_NAME, relativePath}, null)) {
-                        if (c != null && c.moveToFirst()) {
-                            target = ContentUris.withAppendedId(collection, c.getLong(0));
+                            new String[]{"ft8af_log%.adi", relativePath},
+                            MediaStore.Downloads._ID + " DESC")) {
+                        while (c != null && c.moveToNext()) {
+                            String name = c.getString(1);
+                            if (!isRunningLogName(name)) continue;
+                            if (target == null || FILE_NAME.equals(name)) {
+                                target = ContentUris.withAppendedId(collection, c.getLong(0));
+                                targetName = name;
+                            }
+                            if (FILE_NAME.equals(name)) break;
+                        }
+                    }
+                    if (target != null && !FILE_NAME.equals(targetName)) {
+                        // Ours but numbered: take the plain name back if it's free now.
+                        try {
+                            ContentValues rename = new ContentValues();
+                            rename.put(MediaStore.Downloads.DISPLAY_NAME, FILE_NAME);
+                            resolver.update(target, rename, null, null);
+                        } catch (Throwable ignored) {
+                            // Still taken by another install's file: keep the numbered name.
                         }
                     }
                     if (target == null) {
@@ -164,6 +186,15 @@ public final class AdifLogFile {
                 Log.e(TAG, "mirrorToDownloads failed", t);
             }
         }
+    }
+
+    /**
+     * Whether [name] is the running log mirror: {@code ft8af_log.adi} or a MediaStore
+     * numbered copy of it ({@code ft8af_log (3).adi}), not a dated export
+     * ({@code ft8af-log-20261027-152734.adi}) or another file. Fork.
+     */
+    static boolean isRunningLogName(String name) {
+        return name != null && name.matches("ft8af_log( \\(\\d+\\))?\\.adi");
     }
 
     private static void copy(java.io.InputStream in, OutputStream out) throws IOException {
