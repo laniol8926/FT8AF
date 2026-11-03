@@ -108,16 +108,16 @@ class LogbookTableSortTest {
     }
 
     @Test
-    fun statusPill_confirmedByLotwOrQrz_elseWorked() {
+    fun statusPill_confirmedByLotwOrQrz_elseBlank() {
         val lotw = rec("L1L", "20260101", confirmed = true)
         val qrz = rec("Q1Q", "20260101").apply { qrzQsl = true }
         val eqslOnly = rec("E1E", "20260101").apply { eqslRcvd = true }
-        val plain = rec("P1P", "20260101")
+        val uploadedOnly = rec("U1U", "20260101", worked = true).apply { syncedQrz = true }
         assertThat(qsoStatusOf(lotw)).isEqualTo(QsoStatus.CONFIRMED)
         assertThat(qsoStatusOf(qrz)).isEqualTo(QsoStatus.CONFIRMED)
-        // eQSL / paper show only in the QSL column; every logged QSO is at least WORKED.
-        assertThat(qsoStatusOf(eqslOnly)).isEqualTo(QsoStatus.WORKED)
-        assertThat(qsoStatusOf(plain)).isEqualTo(QsoStatus.WORKED)
+        // eQSL / paper show only in the QSL column; an upload alone isn't a confirmation.
+        assertThat(qsoStatusOf(eqslOnly)).isNull()
+        assertThat(qsoStatusOf(uploadedOnly)).isNull()
     }
 
     @Test

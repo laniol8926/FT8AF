@@ -1838,8 +1838,10 @@ private fun QsoRow(
     val state = UsStateLookup.stateFromGrid(context, grid)
     var menuOpen by remember { mutableStateOf(false) }
 
-    // CONF or WORKED pill; the chip area to the right is where the sync indicators live.
-    val status = qsoStatusOf(record)
+    // Show a status pill only when something positive has happened (worked or
+    // confirmed on LoTW / QRZ.com). New rows default to no badge — the chip area
+    // to the right is where the sync indicators live.
+    val status = qsoStatusOf(record) ?: if (record.isQSL) QsoStatus.WORKED else null
 
     // Build the secondary line entries (state takes precedence over DXCC when present
     // because for US contacts the DXCC string is always just "United States" and the
@@ -1937,7 +1939,11 @@ private fun QsoRow(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            StatusPill(status = status, compact = true)
+            // Status pill — only shown when worked or confirmed; brand-new QSOs
+            // get no badge to keep the row visually quiet.
+            if (status != null) {
+                StatusPill(status = status, compact = true)
+            }
 
             // Sync-to-service indicator chips (independent of QSL state)
             SyncChips(
@@ -2010,7 +2016,7 @@ private val LogHeaderStatusWidth = 320.dp
 // Headings are stacked on two lines so the narrow columns stay narrow.
 // Status is wide enough for the CONF pill plus the QRZ tag side by side.
 private val QsoTableWeights =
-    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.75f, 0.55f, 0.55f, 1.07f, 0.98f)
+    listOf(1.02f, 0.58f, 0.95f, 0.62f, 0.75f, 0.68f, 0.75f, 0.55f, 0.55f, 0.62f, 0.98f)
 private val QsoTableMenuWidth = 36.dp
 
 @Composable
@@ -2091,10 +2097,10 @@ internal const val QSO_COL_QSL = 10
 
 /**
  * Status pill for a QSO (fork): CONFIRMED when LoTW or QRZ.com confirms it, else
- * WORKED — every logged QSO was worked. eQSL and paper show only in the QSL column.
+ * none. The QSL column's marks show which logbook confirmed it.
  */
-internal fun qsoStatusOf(r: QSLCallsignRecord): QsoStatus =
-    if (r.isLotW_QSL || r.qrzQsl) QsoStatus.CONFIRMED else QsoStatus.WORKED
+internal fun qsoStatusOf(r: QSLCallsignRecord): QsoStatus? =
+    if (r.isLotW_QSL || r.qrzQsl) QsoStatus.CONFIRMED else null
 
 /**
  * QSL column marks (fork): LoTW, eQSL, Paper, each "✓" received, "↑" sent, "·" neither.
@@ -2114,7 +2120,7 @@ internal fun qslMarks(r: QSLCallsignRecord): List<Pair<String, Char>> {
 /**
  * Sort the table view by [column] (one of the QSO_COL_ constants). Date and time
  * sort together (date+time); frequency and reports numerically (blanks last);
- * status CONFIRMED (LoTW or QRZ) > WORKED, then uploads. Ties fall back to newest first.
+ * status CONFIRMED (LoTW or QRZ) first. Ties fall back to newest first.
  * [stateOf] maps a grid to its US state (the State column's value).
  */
 internal fun sortQsoTable(
@@ -2142,10 +2148,7 @@ internal fun sortQsoTable(
         QSO_COL_FREQ -> { r -> num(parseFreqMhz(r.band ?: "").removeSuffix("MHz")) }
         QSO_COL_RST_SENT -> { r -> num(r.rstSent) }
         QSO_COL_RST_RCVD -> { r -> num(r.rstRcvd) }
-        QSO_COL_STATUS -> { r ->
-            (if (qsoStatusOf(r) == QsoStatus.CONFIRMED) 1.0 else 0.0) +
-                (if (r.syncedQrz || r.syncedCloudlog || r.syncedWrl) 0.5 else 0.0)
-        }
+        QSO_COL_STATUS -> { r -> if (qsoStatusOf(r) != null) 1.0 else 0.0 }
         // Received counts double, sent single: L✓E✓P✓ sorts above L✓E↑P·.
         QSO_COL_QSL -> { r ->
             qslMarks(r).sumOf { (_, m) -> if (m == '✓') 2.0 else if (m == '↑') 1.0 else 0.0 }
@@ -2248,21 +2251,10 @@ private fun QsoTableRow(
                 .padding(horizontal = 4.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            // Status pill plus the upload tags (QRZ / CL / WRL), as on the cards.
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // "CONF", not "CONFIRMED": the short pill leaves room for the QRZ tag.
-                StatusPill(
-                    status = status,
-                    compact = true,
-                    label = if (status == QsoStatus.CONFIRMED) "CONF" else null,
-                )
-                SyncChips(
-                    cloudlog = record.syncedCloudlog,
-                    qrz = record.syncedQrz,
-                    wrl = record.syncedWrl,
-                    cloudlogLabel = cloudlogFamilyLabel(GeneralVariables.cloudlogServerAddress),
-                    tight = true,
-                )
+            // CONF when confirmed, else blank; no upload tags (the QSL column's marks
+            // show which logbook confirmed it).
+            if (status != null) {
+                StatusPill(status = status, compact = true, label = "CONF")
             }
         }
         Box(
