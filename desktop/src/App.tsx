@@ -69,6 +69,12 @@ const WF_TICK_STEP_HZ = 500;
 const WF_TOP_HZ = 3500;
 const TX_MIN_HZ = 200;
 const TX_MAX_HZ = 2900;
+// Height (px) of the slot-boundary band: tall enough to bake a readable
+// HH:MM:SS label into, baked into the canvas pixels themselves (not a
+// separate DOM overlay) so the label scrolls down with its own boundary
+// line by construction -- no separate scroll-rate tracking/animation needed
+// to keep it in sync. Every other row is still exactly 1px.
+const WF_BOUNDARY_BAND_HEIGHT = 12;
 let wfCanvas: HTMLCanvasElement | null = null;
 function registerWfCanvas(c: HTMLCanvasElement | null) {
   wfCanvas = c;
@@ -82,8 +88,9 @@ function drawWaterfallRow(bins: number[], boundary = false) {
   const ctx = cv.getContext("2d");
   if (!ctx) return;
   const h = cv.height;
-  // Scroll the existing image down by one row, then paint the new row on top.
-  ctx.drawImage(cv, 0, 0, cols, h - 1, 0, 1, cols, h - 1);
+  const rows = boundary ? WF_BOUNDARY_BAND_HEIGHT : 1;
+  // Scroll the existing image down by `rows`, then paint the new band on top.
+  ctx.drawImage(cv, 0, 0, cols, h - rows, 0, rows, cols, h - rows);
   const img = ctx.createImageData(cols, 1);
   for (let i = 0; i < cols; i++) {
     const [r, g, b] = colormap(bins[i]);
@@ -92,11 +99,23 @@ function drawWaterfallRow(bins: number[], boundary = false) {
     img.data[i * 4 + 2] = b;
     img.data[i * 4 + 3] = 255;
   }
-  ctx.putImageData(img, 0, 0);
-  // 15 s UTC cycle grid line on the same fixed clock as the decoder.
+  // Repeat the new spectrum row to fill the whole band, so a boundary band
+  // looks like the waterfall's normal texture, not a blank/black gap.
+  for (let row = 0; row < rows; row++) ctx.putImageData(img, 0, row);
+  // 15 s UTC cycle grid line on the same fixed clock as the decoder, with
+  // the slot's start time baked right into the same band so it travels
+  // with the line as the waterfall scrolls.
   if (boundary) {
     ctx.fillStyle = "rgba(255,255,255,0.35)";
     ctx.fillRect(0, 0, cols, 1);
+    const label = new Date().toISOString().substring(11, 19);
+    ctx.font = "9px monospace";
+    const textWidth = ctx.measureText(label).width;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 1, textWidth + 4, WF_BOUNDARY_BAND_HEIGHT - 1);
+    ctx.fillStyle = "#fff";
+    ctx.textBaseline = "top";
+    ctx.fillText(label, 2, 2);
   }
 }
 
@@ -293,7 +312,6 @@ export default function App() {
             messages={visible}
             filter={filter}
             setFilter={setFilter}
-            cycle={cycle}
             txFreq={txFreq}
             onSelectFreq={(hz) => {
               setTxFreq(hz);
@@ -486,11 +504,9 @@ function WaterfallScale() {
 function WaterfallView({
   txFreq,
   onSelectFreq,
-  cycle,
 }: {
   txFreq: number;
   onSelectFreq: (hz: number) => void;
-  cycle: CycleTick | null;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -506,16 +522,14 @@ function WaterfallView({
   }
 
   const leftPct = (txFreq / WF_TOP_HZ) * 100;
-  // HH:MM:SS of the current slot's start, same formatting SlotTimerBar
-  // already uses -- the newest boundary line is always the one that just
-  // appeared at the waterfall's top edge.
-  const slotTime = cycle ? new Date(cycle.utc_ms).toISOString().substring(11, 19) : null;
 
   return (
     <div
       // Half the window width, per the user's explicit request -- the scale
-      // ruler and the TX/slot-time overlays below are all positioned as
-      // percentages of this same box, so they stay aligned at any width.
+      // ruler and the TX marker below are positioned as percentages of this
+      // same box, so they stay aligned at any width. The slot-time label is
+      // baked into the canvas itself (drawWaterfallRow), not a DOM overlay
+      // here -- it needs to scroll down with its own boundary line.
       style={{ position: "relative", width: "50%", marginBottom: 8, cursor: "crosshair" }}
       onClick={handleClick}
       title="Click to set TX frequency"
@@ -532,22 +546,6 @@ function WaterfallView({
           display: "block",
         }}
       />
-      {slotTime && (
-        <div
-          style={{
-            position: "absolute",
-            top: 16,
-            left: 4,
-            color: "#fff",
-            fontSize: 11,
-            fontVariantNumeric: "tabular-nums",
-            pointerEvents: "none",
-            textShadow: "0 0 3px #000",
-          }}
-        >
-          {slotTime}
-        </div>
-      )}
       {/* TX frequency marker */}
       <div
         style={{
@@ -591,17 +589,16 @@ function DecodeScreen(props: {
   messages: UiMessage[];
   filter: Filter;
   setFilter: (f: Filter) => void;
-  cycle: CycleTick | null;
   txFreq: number;
   onSelectFreq: (hz: number) => void;
   onAnswer: (m: UiMessage) => void;
   inputGain: number;
   onInputGain: (v: number) => void;
 }) {
-  const { messages, filter, setFilter, cycle, txFreq, onSelectFreq, onAnswer, inputGain, onInputGain } = props;
+  const { messages, filter, setFilter, txFreq, onSelectFreq, onAnswer, inputGain, onInputGain } = props;
   return (
     <>
-      <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} cycle={cycle} />
+      <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} />
       <div className="chips">
         {(["all", "cq", "tome"] as Filter[]).map((f) => (
           <div key={f} className={"chip" + (filter === f ? " active" : "")} onClick={() => setFilter(f)}>
