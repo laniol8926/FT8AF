@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// One logged QSO. Field names follow ADIF.
 ///
@@ -293,13 +293,26 @@ impl Db {
         }
         if version < 5 {
             // v5: MODE dropped from the import dedup match (see
-            // `merge_import_flags`'s doc comment for why) -- replace the v3
+            // `merge_matched_qso`'s doc comment for why) -- replace the v3
             // index, which included `UPPER(mode)`, with one matching the new
             // (mode-free) WHERE clause exactly.
             conn.execute_batch(
                 "DROP INDEX IF EXISTS qso_log_import_dedup_idx;
                  CREATE INDEX IF NOT EXISTS qso_log_import_dedup_idx
                      ON qso_log(UPPER(call), qso_date, substr(time_on || '000000', 1, 4));",
+            )?;
+        }
+        if version < 6 {
+            // v6: index matching find_lotw_twin_locked's WHERE clause
+            // (UPPER(call), qso_date, UPPER(band), UPPER(mode)) -- without it,
+            // every record that misses the exact-minute match falls through
+            // to a near-full-table scan for its twin. Confirmed on the real
+            // ~55k-record QRZ.com file: importing it against an already-
+            // populated ~45k-row log (so most records hit the twin-match
+            // fallback) took over 90 seconds without this index.
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS qso_log_lotw_twin_idx
+                     ON qso_log(UPPER(call), qso_date, UPPER(band), UPPER(mode));",
             )?;
         }
         conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
@@ -508,11 +521,12 @@ impl Db {
     /// original source (e.g. QRZ.com) still has the specific one; comparing
     /// mode made ~7,100 of ~54,500 QSOs fail to match their own duplicate,
     /// nearly doubling the log on import. A match is never overwritten by
-    /// the import: see [`merge_import_flags`]
-    /// for exactly what an import may still change on an existing QSO (new
-    /// QSL/upload flags turned on, never cleared; STATE/COUNTRY filled only
-    /// when blank). Anything that doesn't match an existing QSO is inserted
-    /// as new. Records with no usable `CALL` are skipped.
+    /// the import: see [`merge_matched_qso`] for exactly what an import may
+    /// still change on an existing QSO (new QSL/upload flags turned on,
+    /// never cleared; STATE/COUNTRY filled only when blank; see its doc
+    /// comment for the LoTW-twin fill exception). Anything that doesn't
+    /// match an existing QSO, directly or via [`Self::find_lotw_twin_locked`],
+    /// is inserted as new. Records with no usable `CALL` are skipped.
     ///
     /// The whole import runs inside **one SQLite transaction**, held for the
     /// duration (hence working through `_locked` helpers rather than the
@@ -522,7 +536,17 @@ impl Db {
     /// per row under SQLite's default rollback-journal mode — confirmed on
     /// real hardware to turn a ~50k-row import into many minutes with no
     /// visible progress, which looked identical to a hang. Batched into one
-    /// transaction, the same import finishes in a fraction of a second.
+    /// transaction, a fresh ~50k-row import finishes in a fraction of a
+    /// second. A later import of a similarly large file *against* an
+    /// already-populated log is slower — every record that misses the exact
+    /// match falls through to [`Self::find_lotw_twin_locked`]'s fallback
+    /// query — confirmed on the user's real files at ~97s for a ~54,500-
+    /// record QRZ.com file against an already-imported ~45,600-row log.
+    /// Still far better than the pre-batching multi-minute silent hang, and
+    /// `on_progress` keeps the UI visibly moving throughout rather than
+    /// looking frozen; a further speedup (caching prepared statements across
+    /// the loop instead of re-preparing per record) is a possible follow-up,
+    /// not done here.
     ///
     /// `on_progress(processed, total)` is called every 200 records and once
     /// more at the end (never, on an empty import), so a caller can show a
@@ -541,20 +565,25 @@ impl Db {
         for (idx, rec) in records.iter().enumerate() {
             match crate::adif::adif_record_to_qso(&rec.fields) {
                 None => summary.skipped += 1,
-                Some(qso) => match Self::find_duplicate_locked(
-                    &conn, &qso.call, &qso.qso_date, &qso.time_on,
-                ) {
-                    Some(existing) => {
-                        if let Some(merged) = merge_import_flags(&existing, &qso) {
-                            let _ = Self::update_flags_locked(&conn, existing.id.unwrap(), &merged);
+                Some(qso) => {
+                    let existing = Self::find_duplicate_locked(
+                        &conn, &qso.call, &qso.qso_date, &qso.time_on,
+                    )
+                    .or_else(|| Self::find_lotw_twin_locked(&conn, &qso));
+                    match existing {
+                        Some(existing) => {
+                            if let Some(merged) = merge_matched_qso(&existing, &qso) {
+                                let _ =
+                                    Self::update_flags_locked(&conn, existing.id.unwrap(), &merged);
+                            }
+                            summary.duplicates += 1;
                         }
-                        summary.duplicates += 1;
+                        None => match Self::insert_qso_locked(&conn, &qso) {
+                            Ok(_) => summary.imported += 1,
+                            Err(_) => summary.skipped += 1,
+                        },
                     }
-                    None => match Self::insert_qso_locked(&conn, &qso) {
-                        Ok(_) => summary.imported += 1,
-                        Err(_) => summary.skipped += 1,
-                    },
-                },
+                }
             }
             let processed = (idx + 1) as i64;
             if processed % 200 == 0 || processed == total {
@@ -589,20 +618,66 @@ impl Db {
         .ok()
     }
 
-    /// Write back an import duplicate's merged QSL/upload flags and
-    /// STATE/COUNTRY (see [`merge_import_flags`]). Never touches any other
-    /// column — an import duplicate match is otherwise left exactly as the
-    /// app (or the user, editing in place) already had it.
+    /// Minutes a LoTW-style record's `TIME_ON` may differ from its full
+    /// twin's, before [`Self::find_lotw_twin_locked`] gives up. Matches
+    /// Android's `DatabaseOpr.LOTW_TWIN_MINUTES`.
+    const LOTW_TWIN_MINUTES: i32 = 15;
+
+    /// Find a QSO one QSO's worth of data away: the same call (ci) + date +
+    /// band (ci) + mode (ci), within [`Self::LOTW_TWIN_MINUTES`] of
+    /// `imported`'s `TIME_ON` (nearest wins), and the *opposite*
+    /// [`is_lotw_style_record`]-ness from `imported`. Only called when
+    /// [`Self::find_duplicate_locked`] already found nothing — see
+    /// [`merge_matched_qso`]'s doc comment for why this exists and what a
+    /// match does. Ports Android's `DatabaseOpr.matchLotwTwin` exactly,
+    /// including its first-seen-wins tie-break (`ORDER BY id`, strict `<`).
+    fn find_lotw_twin_locked(conn: &Connection, imported: &QsoRecord) -> Option<QsoRecord> {
+        let minute = minute_of_day(&imported.time_on)?;
+        if imported.qso_date.trim().is_empty() {
+            return None;
+        }
+        let incoming_lotw = is_lotw_style_record(imported);
+        let side = if incoming_lotw { "NOT" } else { "" };
+        let sql = format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log
+             WHERE UPPER(call) = UPPER(?1) AND qso_date = ?2
+               AND UPPER(band) = UPPER(?3) AND UPPER(mode) = UPPER(?4)
+               AND {side} {LOTW_ROW_SQL}
+             ORDER BY id ASC",
+        );
+        let mut stmt = conn.prepare(&sql).ok()?;
+        let rows = stmt
+            .query_map(
+                params![imported.call, imported.qso_date, imported.band, imported.mode],
+                row_to_qso,
+            )
+            .ok()?;
+        let mut best: Option<(i32, QsoRecord)> = None;
+        for row in rows.flatten() {
+            let Some(m) = minute_of_day(&row.time_on) else { continue };
+            let gap = (m - minute).abs();
+            if gap <= Self::LOTW_TWIN_MINUTES
+                && best.as_ref().is_none_or(|(best_gap, _)| gap < *best_gap)
+            {
+                best = Some((gap, row));
+            }
+        }
+        best.map(|(_, r)| r)
+    }
+
+    /// Write back an import duplicate's merged QSL/upload flags, STATE/
+    /// COUNTRY, and (for a LoTW-twin fill) time/report/frequency/grid --
+    /// see [`merge_matched_qso`]. Never touches any other column.
     fn update_flags_locked(conn: &Connection, id: i64, r: &QsoRecord) -> anyhow::Result<()> {
         conn.execute(
             "UPDATE qso_log SET qsl_rcvd=?1, qsl_sent=?2, lotw_sent=?3, lotw_rcvd=?4,
                 eqsl_sent=?5, eqsl_rcvd=?6, qrz_qsl=?7, state=?8, country=?9, time_on=?10,
-                mode=?11
-             WHERE id=?12",
+                mode=?11, time_off=?12, rst_sent=?13, rst_rcvd=?14, freq=?15, gridsquare=?16
+             WHERE id=?17",
             params![
                 r.confirmed as i64, r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
                 r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64, r.state, r.country,
-                r.time_on, r.mode, id,
+                r.time_on, r.mode, r.time_off, r.rst_sent, r.rst_rcvd, r.freq, r.gridsquare, id,
             ],
         )?;
         Ok(())
@@ -704,7 +779,7 @@ pub fn adif_record(r: &QsoRecord) -> String {
 /// program that round-trips a log through its own ADIF import/export can
 /// widen FT4/FT8 to the family name when it has no `SUBMODE` tag to recover
 /// the specific one from, while a fresh export from the original source still
-/// has it. [`merge_import_flags`] prefers the specific name when the two
+/// has it. [`merge_matched_qso`] prefers the specific name when the two
 /// disagree.
 const GENERIC_MODE_FAMILIES: &[&str] = &["MFSK", "PSK", "DATA"];
 
@@ -712,30 +787,81 @@ fn is_generic_mode_family(mode: &str) -> bool {
     GENERIC_MODE_FAMILIES.contains(&mode.trim().to_ascii_uppercase().as_str())
 }
 
-/// What an ADIF import duplicate match may still change on an existing QSO:
-/// new QSL/upload flags are only ever turned on, never cleared; STATE/COUNTRY
-/// are only ever filled in when the existing value is blank; `TIME_ON` is only
-/// ever replaced with a *more precise* value, never a less precise one; and
-/// `MODE` is only ever replaced with a specific submode (FT4, FT8, ...) when
-/// the existing value is just the generic family name it belongs to (see
-/// [`GENERIC_MODE_FAMILIES`]) — confirmed on a real ~54,500-QSO log where
-/// `MODE` was excluded from duplicate matching entirely (see
-/// `find_duplicate_locked`) for exactly this reason: CQRLOG's own ADIF
-/// import/export round-trip had widened every FT4/FT8 contact to `MFSK` with
-/// no `SUBMODE` tag to recover from, while a QRZ.com re-export of the same
-/// log still had the real mode, and comparing `MODE` during matching made
-/// ~7,100 of those QSOs fail to match their own duplicate.
+/// HHMM[SS] (a dropped leading zero allowed) to minutes past midnight, or
+/// `None`. Ports Android's `DatabaseOpr.minuteOfDay` exactly.
+fn minute_of_day(time: &str) -> Option<i32> {
+    let mut digits: String = time.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() % 2 == 1 {
+        digits.insert(0, '0');
+    }
+    if digits.len() < 4 {
+        return None;
+    }
+    let h: i32 = digits[0..2].parse().ok()?;
+    let m: i32 = digits[2..4].parse().ok()?;
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+/// SQL test for a LoTW-style stored row (see [`is_lotw_style_record`]): no
+/// report received, `TIME_OFF` equals `TIME_ON` to the minute. Unlike
+/// Android (which stores "no report" as the literal sentinel strings `-120`/
+/// `-100`), desktop's ADIF import (`adif::adif_record_to_qso`) leaves
+/// `rst_rcvd` as a genuinely empty string when the field is absent, so that's
+/// the test here.
+const LOTW_ROW_SQL: &str = "(rst_rcvd = '' AND length(time_off) >= 4 \
+    AND substr(time_on,1,4) = substr(time_off,1,4))";
+
+/// A LoTW-style record: no report received and `TIME_OFF` present, equal to
+/// `TIME_ON` to the minute. One QSO can appear twice in a QRZ.com/CQRLOG
+/// export — the operator's full record and a copy QRZ.com added from a LoTW
+/// confirmation (no RST, usually no FREQ, `TIME_OFF` = `TIME_ON`, start time
+/// a few minutes off the full record's). Confirmed on the user's real
+/// ~54,500-record QRZ.com export: ADIF `RST_RCVD` is absent (not a literal
+/// sentinel) on ~10,900 such copies. Ports Android's `DatabaseOpr.isLotwStyle`.
+fn is_lotw_style_record(r: &QsoRecord) -> bool {
+    if !r.rst_rcvd.trim().is_empty() {
+        return false;
+    }
+    match (minute_of_day(&r.time_on), minute_of_day(&r.time_off)) {
+        (Some(on), Some(off)) => on == off,
+        _ => false,
+    }
+}
+
+/// What a match (either [`Db::find_duplicate_locked`]'s exact minute match,
+/// or [`Db::find_lotw_twin_locked`]'s fallback) may still change on an
+/// existing QSO:
 ///
-/// Otherwise an import never overwrites data the app, or the user editing in
-/// place, already has — `TIME_ON`'s precision-only exception is the same
-/// idea: duplicate-matching already treats differing precision as the same
-/// QSO (comparing only the shared `HHMM` prefix), and the longer value is
-/// never less correct than the shorter one, so whichever import carries it
-/// wins, regardless of which one happened to create the row first.
+/// - New QSL/upload flags are only ever turned on, never cleared.
+/// - STATE/COUNTRY are only ever filled in when the existing value is blank.
+/// - `MODE` is only ever replaced with a specific submode (FT4, FT8, ...)
+///   when the existing value is just the generic family name it belongs to
+///   (see [`GENERIC_MODE_FAMILIES`]) — confirmed on a real ~54,500-QSO log
+///   where `MODE` was excluded from duplicate matching entirely (see
+///   `find_duplicate_locked`) for exactly this reason: CQRLOG's own ADIF
+///   round-trip had widened every FT4/FT8 contact to `MFSK` with no
+///   `SUBMODE` tag to recover from, while a QRZ.com re-export of the same
+///   log still had the real mode, and comparing `MODE` during matching made
+///   ~7,100 of those QSOs fail to match their own duplicate.
+/// - **LoTW-twin fill**: when the *existing* row is [`is_lotw_style_record`]
+///   and `imported` is not, the existing row adopts `imported`'s
+///   `time_on`/`time_off`/`rst_sent`/`rst_rcvd`/frequency (if `imported` has
+///   one) and grid (if the existing row's is blank) — the row that started
+///   as the bare LoTW copy becomes the full QSO record. Ports Android's
+///   `DatabaseOpr.fillLotwRow`. The *reverse* direction (existing is the full
+///   record, `imported` is the LoTW-style copy) never reaches this branch, so
+///   a LoTW-style copy's `RST_SENT` can never clobber a real stored report —
+///   this exact regression was fixed on Android in commit `d82697f8`
+///   ("a LoTW-style record's RST_SENT never overwrites the stored report").
+///   Outside that branch, `TIME_ON` still only ever moves to a *more
+///   precise* value (comparing only the shared `HHMM` prefix, so a longer
+///   value is never less correct), never a less precise one, regardless of
+///   which side created the row.
 ///
-/// Returns `None` when `imported` wouldn't actually change anything, so the
-/// caller can skip a pointless `UPDATE`.
-fn merge_import_flags(existing: &QsoRecord, imported: &QsoRecord) -> Option<QsoRecord> {
+/// Otherwise a match never overwrites data the app, or the user editing in
+/// place, already has. Returns `None` when `imported` wouldn't actually
+/// change anything, so the caller can skip a pointless `UPDATE`.
+fn merge_matched_qso(existing: &QsoRecord, imported: &QsoRecord) -> Option<QsoRecord> {
     let mut merged = existing.clone();
     let mut changed = false;
     macro_rules! or_in {
@@ -765,7 +891,19 @@ fn merge_import_flags(existing: &QsoRecord, imported: &QsoRecord) -> Option<QsoR
         merged.country = imported.country.clone();
         changed = true;
     }
-    if imported.time_on.len() > merged.time_on.len() {
+    if is_lotw_style_record(&merged) && !is_lotw_style_record(imported) {
+        merged.time_on = imported.time_on.clone();
+        merged.time_off = imported.time_off.clone();
+        merged.rst_sent = imported.rst_sent.clone();
+        merged.rst_rcvd = imported.rst_rcvd.clone();
+        if !imported.freq.trim().is_empty() {
+            merged.freq = imported.freq.clone();
+        }
+        if merged.gridsquare.trim().is_empty() {
+            merged.gridsquare = imported.gridsquare.clone();
+        }
+        changed = true;
+    } else if imported.time_on.len() > merged.time_on.len() {
         merged.time_on = imported.time_on.clone();
         changed = true;
     }
@@ -1228,6 +1366,58 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v5_log_in_place_and_adds_the_lotw_twin_index() {
+        // The real upgrade path for an existing user's database (including
+        // the one this session's own earlier mode-dedup fix just migrated to
+        // v5): rows and the v5 index must survive, and the new v6 index
+        // must appear alongside it.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE qso_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call TEXT NOT NULL, gridsquare TEXT, mode TEXT, rst_sent TEXT,
+                rst_rcvd TEXT, qso_date TEXT, time_on TEXT, qso_date_off TEXT,
+                time_off TEXT, band TEXT, freq TEXT, station_callsign TEXT,
+                my_gridsquare TEXT, comment TEXT, created_at INTEGER,
+                qsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                synced_cloudlog INTEGER NOT NULL DEFAULT 0,
+                synced_qrz INTEGER NOT NULL DEFAULT 0,
+                qsl_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_rcvd INTEGER NOT NULL DEFAULT 0,
+                eqsl_sent INTEGER NOT NULL DEFAULT 0,
+                eqsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                qrz_qsl INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT ''
+            );
+            CREATE UNIQUE INDEX qso_log_dedup_idx
+                ON qso_log(call, qso_date, time_on, mode);
+            CREATE INDEX qso_log_import_dedup_idx
+                ON qso_log(UPPER(call), qso_date, substr(time_on || '000000', 1, 4));
+            INSERT INTO qso_log(call, mode, qso_date, time_on)
+                VALUES('K1ABC', 'FT8', '20260604', '120000');
+            PRAGMA user_version = 5;
+            "#,
+        )
+        .unwrap();
+        let db = Db::from_conn(conn).unwrap();
+        assert_eq!(db.count(), 1, "existing rows must survive the migration");
+        let has_index: bool = db
+            .conn
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='qso_log_lotw_twin_idx'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(has_index, "v6 migration must create the LoTW-twin index");
+    }
+
+    #[test]
     fn import_adif_inserts_new_qsos() {
         let db = Db::open_in_memory().unwrap();
         let adif = "FT8AF ADIF Export<eoh>\n\
@@ -1352,7 +1542,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_import_flags_only_fills_blanks_and_only_turns_flags_on() {
+    fn merge_matched_qso_only_fills_blanks_and_only_turns_flags_on() {
         let existing = QsoRecord {
             call: "K1ABC".into(),
             confirmed: true,
@@ -1368,18 +1558,18 @@ mod tests {
             country: "UNITED STATES".into(),
             ..Default::default()
         };
-        let merged = merge_import_flags(&existing, &imported).expect("something changed");
+        let merged = merge_matched_qso(&existing, &imported).expect("something changed");
         assert!(merged.confirmed, "existing true flag must survive the import's false");
         assert!(merged.lotw_rcvd, "a new true flag from the import must be adopted");
         assert_eq!(merged.state, "TX", "blank-only fill must not overwrite an existing STATE");
         assert_eq!(merged.country, "UNITED STATES", "a blank COUNTRY is filled in");
 
         // Nothing new to contribute -> no-op.
-        assert!(merge_import_flags(&merged, &imported).is_none());
+        assert!(merge_matched_qso(&merged, &imported).is_none());
     }
 
     #[test]
-    fn merge_import_flags_upgrades_time_on_precision_but_never_downgrades_it() {
+    fn merge_matched_qso_upgrades_time_on_precision_but_never_downgrades_it() {
         // CQRLOG exports TIME_ON as HHMM; QRZ.com exports HHMMSS, the actual
         // time of the QSO. Whichever import created the row, the more precise
         // value must win.
@@ -1387,28 +1577,28 @@ mod tests {
         let precise = QsoRecord { time_on: "123045".into(), ..Default::default() };
 
         // CQRLOG (coarse) logged first, QRZ (precise) imported after: upgrade.
-        let merged = merge_import_flags(&coarse, &precise).expect("more precise time must count as a change");
+        let merged = merge_matched_qso(&coarse, &precise).expect("more precise time must count as a change");
         assert_eq!(merged.time_on, "123045");
 
         // QRZ (precise) logged first, CQRLOG (coarse) imported after: no downgrade.
         assert!(
-            merge_import_flags(&precise, &coarse).is_none(),
+            merge_matched_qso(&precise, &coarse).is_none(),
             "a less precise TIME_ON must never replace a more precise one"
         );
     }
 
     #[test]
-    fn merge_import_flags_upgrades_generic_mode_to_the_specific_submode() {
+    fn merge_matched_qso_upgrades_generic_mode_to_the_specific_submode() {
         let generic = QsoRecord { call: "K1ABC".into(), mode: "MFSK".into(), ..Default::default() };
         let specific = QsoRecord { mode: "FT4".into(), ..Default::default() };
 
         // Generic (MFSK) logged first, specific (FT4) imported after: upgrade.
-        let merged = merge_import_flags(&generic, &specific).expect("a specific mode must count as a change");
+        let merged = merge_matched_qso(&generic, &specific).expect("a specific mode must count as a change");
         assert_eq!(merged.mode, "FT4");
 
         // Specific (FT4) logged first, generic (MFSK) imported after: no downgrade.
         assert!(
-            merge_import_flags(&specific, &generic).is_none(),
+            merge_matched_qso(&specific, &generic).is_none(),
             "a generic family mode must never replace a specific submode"
         );
 
@@ -1416,7 +1606,198 @@ mod tests {
         // rule is "only replace a generic label", not "always take the import's"):
         // neither side is generic, so nothing changes.
         let other_specific = QsoRecord { mode: "FT8".into(), ..Default::default() };
-        assert!(merge_import_flags(&specific, &other_specific).is_none());
+        assert!(merge_matched_qso(&specific, &other_specific).is_none());
+    }
+
+    #[test]
+    fn minute_of_day_parses_hhmm_and_hhmmss_and_rejects_garbage() {
+        assert_eq!(minute_of_day("0113"), Some(73));
+        assert_eq!(minute_of_day("011345"), Some(73));
+        assert_eq!(minute_of_day("113"), Some(73)); // dropped leading zero
+        assert_eq!(minute_of_day(""), None);
+        assert_eq!(minute_of_day("ab"), None);
+        assert_eq!(minute_of_day("2500"), None); // hour out of range
+        assert_eq!(minute_of_day("0060"), None); // minute out of range
+    }
+
+    #[test]
+    fn is_lotw_style_record_requires_no_report_and_time_off_equal_to_time_on() {
+        let lotw_style = QsoRecord {
+            time_on: "0114".into(),
+            time_off: "0114".into(),
+            rst_rcvd: "".into(),
+            ..Default::default()
+        };
+        assert!(is_lotw_style_record(&lotw_style));
+
+        let has_report = QsoRecord { rst_rcvd: "-21".into(), ..lotw_style.clone() };
+        assert!(!is_lotw_style_record(&has_report), "a real report means it's not a LoTW copy");
+
+        let different_minute =
+            QsoRecord { time_off: "0120".into(), ..lotw_style.clone() };
+        assert!(!is_lotw_style_record(&different_minute));
+
+        let no_time_off = QsoRecord { time_off: "".into(), ..lotw_style };
+        assert!(!is_lotw_style_record(&no_time_off));
+    }
+
+    #[test]
+    fn merge_matched_qso_lotw_twin_never_lets_the_copys_rst_sent_overwrite_a_stored_report() {
+        // K3JOS 20190617: the stored row is the full QSO (-06/-21); the "import"
+        // here is the LoTW-style copy, whose RST_SENT (-21) is really what we
+        // received, not what we sent. The fill branch must not fire at all --
+        // the existing/stored side isn't the LoTW-style one -- so nothing about
+        // the reports can change. This is the exact regression fixed on
+        // Android in d82697f8.
+        let full = QsoRecord {
+            call: "K3JOS".into(),
+            time_on: "0113".into(),
+            time_off: "0114".into(),
+            rst_sent: "-06".into(),
+            rst_rcvd: "-21".into(),
+            ..Default::default()
+        };
+        let copy = QsoRecord {
+            time_on: "0114".into(),
+            time_off: "0114".into(),
+            rst_sent: "-21".into(),
+            rst_rcvd: "".into(),
+            lotw_rcvd: true,
+            ..Default::default()
+        };
+        let merged = merge_matched_qso(&full, &copy).expect("the LoTW flag is still a change");
+        assert_eq!(merged.rst_sent, "-06", "the copy's RST_SENT must never overwrite the real report");
+        assert_eq!(merged.rst_rcvd, "-21");
+        assert!(merged.lotw_rcvd);
+    }
+
+    #[test]
+    fn merge_matched_qso_lotw_twin_fills_a_stored_lotw_row_from_the_full_record() {
+        // KC3OL 20201214: the copy (no FREQ) was stored first; the full record
+        // (with FREQ) arrives later and must fill in the stored row's
+        // times/reports/frequency/grid.
+        let stored_lotw = QsoRecord {
+            call: "KC3OL".into(),
+            time_on: "2046".into(),
+            time_off: "2046".into(),
+            rst_sent: "599".into(),
+            rst_rcvd: "".into(),
+            freq: "".into(),
+            gridsquare: "".into(),
+            ..Default::default()
+        };
+        let full = QsoRecord {
+            time_on: "2045".into(),
+            time_off: "2046".into(),
+            rst_sent: "O".into(),
+            rst_rcvd: "O".into(),
+            freq: "18.1".into(),
+            gridsquare: "FN42".into(),
+            ..Default::default()
+        };
+        let merged =
+            merge_matched_qso(&stored_lotw, &full).expect("a full record must fill a stored LoTW row");
+        assert_eq!(merged.time_on, "2045");
+        assert_eq!(merged.time_off, "2046");
+        assert_eq!(merged.rst_sent, "O");
+        assert_eq!(merged.rst_rcvd, "O");
+        assert_eq!(merged.freq, "18.1");
+        assert_eq!(merged.gridsquare, "FN42");
+    }
+
+    #[test]
+    fn merge_matched_qso_lotw_twin_keeps_a_non_blank_grid_and_a_blank_import_freq() {
+        let stored_lotw = QsoRecord {
+            time_on: "2046".into(),
+            time_off: "2046".into(),
+            rst_rcvd: "".into(),
+            freq: "".into(),
+            gridsquare: "FN42".into(), // already has a grid
+            ..Default::default()
+        };
+        let full = QsoRecord {
+            time_on: "2045".into(),
+            time_off: "2046".into(),
+            freq: "".into(), // no FREQ on this particular full record either
+            gridsquare: "EM72".into(),
+            ..Default::default()
+        };
+        let merged = merge_matched_qso(&stored_lotw, &full).expect("time_on still changes");
+        assert_eq!(merged.freq, "", "an empty incoming FREQ must not overwrite anything");
+        assert_eq!(merged.gridsquare, "FN42", "a non-blank grid is never overwritten");
+    }
+
+    #[test]
+    fn import_adif_merges_a_lotw_copy_into_its_full_record_without_overwriting_reports() {
+        // K3JOS 20190617, real example from the Android port: full 0113-0114
+        // 40m FT8 7.07645 -06/-21, plus a LoTW-style copy 0114/0114 whose
+        // RST_SENT (-21) must never overwrite the full record's real reports.
+        // The exact-minute match doesn't fire (0113 != 0114 to the minute);
+        // this exercises the 15-minute, same-band/mode twin match instead.
+        let db = Db::open_in_memory().unwrap();
+        let full = "<call:5>K3JOS <mode:3>FT8 <qso_date:8>20190617 <time_on:4>0113 \
+            <time_off:4>0114 <band:3>40m <freq:7>7.07645 <rst_sent:3>-06 <rst_rcvd:3>-21 <eor>";
+        let copy = "<call:5>K3JOS <mode:3>FT8 <qso_date:8>20190617 <time_on:4>0114 \
+            <time_off:4>0114 <band:3>40m <rst_sent:3>-21 <LOTW_QSL_RCVD:1>Y <eor>";
+        db.import_adif(full);
+        let summary = db.import_adif(copy);
+        assert_eq!(summary, ImportSummary { imported: 0, duplicates: 1, skipped: 0 });
+        assert_eq!(db.count(), 1, "must merge into one row, not two");
+        let row = &db.list_qsos(10, 0)[0];
+        assert_eq!(row.rst_sent, "-06");
+        assert_eq!(row.rst_rcvd, "-21");
+        assert!(row.lotw_rcvd);
+    }
+
+    #[test]
+    fn import_adif_fills_a_lotw_copy_imported_first_once_the_full_record_arrives() {
+        // Same QSO as above, reversed import order: the LoTW-style copy
+        // arrives first (nothing to match, so it's inserted as a real QSO),
+        // then the full record comes in and must fill it rather than create
+        // a second row.
+        let db = Db::open_in_memory().unwrap();
+        let copy = "<call:5>K3JOS <mode:3>FT8 <qso_date:8>20190617 <time_on:4>0114 \
+            <time_off:4>0114 <band:3>40m <rst_sent:3>-21 <eor>";
+        let full = "<call:5>K3JOS <mode:3>FT8 <qso_date:8>20190617 <time_on:4>0113 \
+            <time_off:4>0114 <band:3>40m <freq:7>7.07645 <rst_sent:3>-06 <rst_rcvd:3>-21 <eor>";
+        assert_eq!(db.import_adif(copy), ImportSummary { imported: 1, duplicates: 0, skipped: 0 });
+        assert_eq!(db.import_adif(full), ImportSummary { imported: 0, duplicates: 1, skipped: 0 });
+        assert_eq!(db.count(), 1);
+        let row = &db.list_qsos(10, 0)[0];
+        assert_eq!(row.time_on, "0113");
+        assert_eq!(row.rst_sent, "-06");
+        assert_eq!(row.rst_rcvd, "-21");
+        assert_eq!(row.freq, "7.07645");
+    }
+
+    #[test]
+    fn import_adif_a_lotw_style_record_with_no_full_twin_is_inserted_as_a_real_qso() {
+        // UT5MB 2024-06-07 0254 20M FT4: confirmed via LoTW/QRZ/eQSL with no
+        // full record anywhere in the log -- a real QSO, not a copy of
+        // anything, so it must be inserted rather than silently dropped.
+        let db = Db::open_in_memory().unwrap();
+        let adif = "<call:5>UT5MB <mode:3>FT4 <qso_date:8>20240607 <time_on:4>0254 \
+            <time_off:4>0254 <band:3>20m <LOTW_QSL_RCVD:1>Y <eor>";
+        let summary = db.import_adif(adif);
+        assert_eq!(summary, ImportSummary { imported: 1, duplicates: 0, skipped: 0 });
+        assert_eq!(db.count(), 1);
+        assert!(db.list_qsos(10, 0)[0].lotw_rcvd);
+    }
+
+    #[test]
+    fn import_adif_lotw_twin_requires_matching_band_and_mode() {
+        // A LoTW-style record on a different band from its would-be twin must
+        // not merge into it -- the twin match is deliberately stricter on
+        // band/mode than the plain exact-minute match (which ignores both).
+        let db = Db::open_in_memory().unwrap();
+        let full = "<call:5>W3XOX <mode:3>FT8 <qso_date:8>20170728 <time_on:4>0100 \
+            <time_off:4>0101 <band:3>20m <rst_sent:3>-06 <rst_rcvd:3>-21 <eor>";
+        let copy = "<call:5>W3XOX <mode:3>FT8 <qso_date:8>20170728 <time_on:4>0102 \
+            <time_off:4>0102 <band:3>40m <rst_sent:3>-21 <eor>";
+        db.import_adif(full);
+        let summary = db.import_adif(copy);
+        assert_eq!(summary, ImportSummary { imported: 1, duplicates: 0, skipped: 0 });
+        assert_eq!(db.count(), 2, "different band -> not a twin, inserted separately");
     }
 
     #[test]
@@ -1431,7 +1812,7 @@ mod tests {
 
     #[test]
     fn import_adif_matches_a_duplicate_even_when_mode_disagrees() {
-        // Confirmed on a real ~54,500-QSO log (see `merge_import_flags`'s doc
+        // Confirmed on a real ~54,500-QSO log (see `merge_matched_qso`'s doc
         // comment): CQRLOG's own ADIF round-trip widened every FT4/FT8 QSO to
         // the generic `MFSK` family with no SUBMODE to recover the real mode
         // from, while a QRZ.com re-export of the same log still had it.
