@@ -1743,19 +1743,133 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         try {
             if (cursor.getCount() > 0) {
                 cursor.moveToFirst();
-                newRecord.isLotW_QSL = cursor.getInt(cursor.getColumnIndex("isLotW_QSL")) == 1
-                        || record.isLotW_QSL;
-                newRecord.id = cursor.getLong(cursor.getColumnIndex("id"));
-                // The re-import updates that follow match on (call, qso_date, time_on,
-                // mode) exactly, so take the stored row's values for them.
-                newRecord.setTime_on(cursor.getString(cursor.getColumnIndex("time_on")));
-                newRecord.setToCallsign(cursor.getString(cursor.getColumnIndex("call")));
-                newRecord.setMode(cursor.getString(cursor.getColumnIndex("mode")));
+                adoptStoredRow(cursor, newRecord);
             }
         } finally {
             cursor.close();
         }
+        if (newRecord.id == -1) {
+            matchLotwTwin(newRecord);
+        }
         return newRecord.id != -1;//
+    }
+
+    /**
+     * Makes {@code record} refer to the stored row under {@code cursor}. The re-import
+     * updates that follow match on (call, qso_date, time_on, mode) exactly, so take the
+     * stored row's values for them. A LoTW-style stored row (no report, see
+     * {@link #isLotwStyle}) is first filled in from a full incoming record.
+     */
+    @SuppressLint("Range")
+    private void adoptStoredRow(Cursor cursor, QSLRecord record) {
+        record.isLotW_QSL = cursor.getInt(cursor.getColumnIndex("isLotW_QSL")) == 1
+                || record.isLotW_QSL;
+        record.id = cursor.getLong(cursor.getColumnIndex("id"));
+        boolean storedLotw = isLotwStyle(cursor.getString(cursor.getColumnIndex("rst_rcvd")),
+                cursor.getString(cursor.getColumnIndex("time_on")),
+                cursor.getString(cursor.getColumnIndex("time_off")));
+        if (storedLotw && !isLotwStyle(record)) {
+            fillLotwRow(record.id, record);//The row now carries the incoming time_on
+        } else {
+            record.setTime_on(cursor.getString(cursor.getColumnIndex("time_on")));
+        }
+        record.setToCallsign(cursor.getString(cursor.getColumnIndex("call")));
+        record.setMode(cursor.getString(cursor.getColumnIndex("mode")));
+    }
+
+    /** Minutes a LoTW-style record's TIME_ON may differ from its full twin's (fork). */
+    static final int LOTW_TWIN_MINUTES = 15;
+
+    /**
+     * Fork: one QSO kept twice in the source logs -- the operator's full record and a
+     * copy QRZ.com added from LoTW (no RST, usually no FREQ, TIME_OFF = TIME_ON, start
+     * time a few minutes off). On the AI5II log (2026-11-02) ~7,400 of 52,951 QSOs were
+     * such copies, so every QRZ.com/CQRLOG re-import brought them back as separate
+     * QSOs. When the minute match finds nothing, a LoTW-style record joins a full row
+     * with the same call, date, band and mode within {@link #LOTW_TWIN_MINUTES}, and a
+     * full record joins (and fills in) such a LoTW-style row. A LoTW-style record with
+     * no full twin (e.g. UT5MB 2024-06-07) is a real QSO and is inserted as usual.
+     */
+    @SuppressLint("Range")
+    private void matchLotwTwin(QSLRecord record) {
+        int minute = minuteOfDay(record.getTime_on());
+        if (minute < 0 || record.getQso_date() == null) return;
+        boolean incomingLotw = isLotwStyle(record);
+        String side = incomingLotw
+                ? " and not " + LOTW_ROW_SQL
+                : " and " + LOTW_ROW_SQL;
+        Cursor cursor = db.rawQuery("select * from QSLTable WHERE (upper(call)=upper(?))"
+                        + " and (qso_date=?) and (upper(band)=upper(?)) and (upper(mode)=upper(?))"
+                        + side,
+                new String[]{record.getToCallsign(), record.getQso_date()
+                        , String.valueOf(record.getBandLength()), String.valueOf(record.getMode())});
+        try {
+            int best = -1;
+            int bestGap = Integer.MAX_VALUE;
+            while (cursor.moveToNext()) {
+                int m = minuteOfDay(cursor.getString(cursor.getColumnIndex("time_on")));
+                if (m < 0) continue;
+                int gap = Math.abs(m - minute);
+                if (gap <= LOTW_TWIN_MINUTES && gap < bestGap) {
+                    bestGap = gap;
+                    best = cursor.getPosition();
+                }
+            }
+            if (best >= 0) {
+                cursor.moveToPosition(best);
+                adoptStoredRow(cursor, record);
+            }
+        } finally {
+            cursor.close();
+        }
+    }
+
+    /** SQL test for a LoTW-style stored row: no report received, TIME_OFF = TIME_ON. */
+    private static final String LOTW_ROW_SQL =
+            "(rst_rcvd in ('-120','-100') and length(time_off)>=4"
+                    + " and substr(time_on,1,4)=substr(time_off,1,4))";
+
+    /** A LoTW-style incoming record: no report received, TIME_OFF = TIME_ON (fork). */
+    static boolean isLotwStyle(QSLRecord r) {
+        return isLotwStyle(String.valueOf(r.getReceivedReport()), r.getTime_on(), r.getTime_off());
+    }
+
+    static boolean isLotwStyle(String rstRcvd, String timeOn, String timeOff) {
+        if (!"-120".equals(rstRcvd) && !"-100".equals(rstRcvd)) return false;
+        int on = minuteOfDay(timeOn);
+        return on >= 0 && on == minuteOfDay(timeOff);
+    }
+
+    /** HHMM[SS] (a dropped leading zero allowed) to minutes past midnight, or -1. */
+    static int minuteOfDay(String time) {
+        if (time == null) return -1;
+        String d = time.replaceAll("[^0-9]", "");
+        if (d.length() % 2 == 1) d = "0" + d;
+        if (d.length() < 4) return -1;
+        int h = Integer.parseInt(d.substring(0, 2));
+        int m = Integer.parseInt(d.substring(2, 4));
+        return h < 24 && m < 60 ? h * 60 + m : -1;
+    }
+
+    /** Fills a LoTW-style row with the times, frequency and reports of its full twin. */
+    private void fillLotwRow(long id, QSLRecord full) {
+        db.execSQL("UPDATE QSLTable SET time_on=?, time_off=?, rst_sent=?, rst_rcvd=?"
+                        + ", freq=CASE WHEN ?>0 THEN ? ELSE freq END"
+                        + ", gridsquare=CASE WHEN gridsquare IS NULL OR gridsquare='' THEN ? ELSE gridsquare END"
+                        + " WHERE id=?",
+                new Object[]{full.getTime_on(), full.getTime_off()
+                        , AdifFormat.formatReport(full.getMode(), full.getSendReport())
+                        , AdifFormat.formatReport(full.getMode(), full.getReceivedReport())
+                        , full.getBandFreq()
+                        , BaseRigOperation.getFrequencyFloat(full.getBandFreq())
+                        , full.getToMaidenGrid() == null ? "" : full.getToMaidenGrid()
+                        , id});
+    }
+
+    /** "No report" sentinels (-120 / -100) shown blank in the logbook (fork). */
+    static String displayReport(String stored) {
+        if (stored == null || "-120".equals(stored) || "-100".equals(stored)) return "";
+        return stored;
     }
 
     @SuppressLint("Range")
@@ -2721,8 +2835,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                     int idxRstR = cursor.getColumnIndex("rst_rcvd");
                     String rstS = idxRstS >= 0 ? cursor.getString(idxRstS) : null;
                     String rstR = idxRstR >= 0 ? cursor.getString(idxRstR) : null;
-                    record.rstSent = rstS != null ? rstS : "";
-                    record.rstRcvd = rstR != null ? rstR : "";
+                    // Fork: -120 / -100 are "no report" (e.g. LoTW-sourced records), shown blank.
+                    record.rstSent = displayReport(rstS);
+                    record.rstRcvd = displayReport(rstR);
                     // Logged COUNTRY / STATE (ADIF imports): the table's State column.
                     int idxCountry = cursor.getColumnIndex("country");
                     String country = idxCountry >= 0 ? cursor.getString(idxCountry) : null;
