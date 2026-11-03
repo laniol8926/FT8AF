@@ -16,7 +16,7 @@ public class ImportSharedLogs {
     // substring() when a record claims a multi-megabyte field.
     private static final int MAX_ADIF_FIELD_LEN = 64 * 1024;
     // Records per committed transaction during a bulk import (fork).
-    private static final int IMPORT_BATCH = 500;
+    private static final int IMPORT_BATCH = 200;
     private final MainViewModel mainViewModel;
 
     public ImportSharedLogs(MainViewModel mainViewModel) throws IOException {
@@ -199,6 +199,8 @@ public class ImportSharedLogs {
                             opr.doInsertQSLData(qslRecord, afterInsertQSLData, false);
                             if (position % IMPORT_BATCH == 0) {
                                 opr.commitImportBatch();
+                            } else {
+                                opr.yieldImportBatch();//Let a waiting UI/decoder call in
                             }
 
                             if (onShareLogEvents != null) {

@@ -1099,6 +1099,17 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         db.beginTransaction();
     }
 
+    /**
+     * Call after each imported record: if another thread is waiting for the database
+     * (the UI, decoding), commits the batch so far and lets it in before going on.
+     * The app has a single connection without WAL, so an open batch otherwise blocks
+     * every other database call -- the main thread waited past 5 s and Android showed
+     * "isn't responding".
+     */
+    public void yieldImportBatch() {
+        db.yieldIfContendedSafely();
+    }
+
     /** Commits the open import batch and starts the next one. */
     public void commitImportBatch() {
         db.setTransactionSuccessful();

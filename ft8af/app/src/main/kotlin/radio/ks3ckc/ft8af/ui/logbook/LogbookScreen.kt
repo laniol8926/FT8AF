@@ -44,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -1509,7 +1510,10 @@ internal fun computeBestDx(
  */
 internal fun sortQsosByDateTimeDesc(
     records: List<QSLCallsignRecord>,
-): List<QSLCallsignRecord> = records.sortedByDescending { qsoSortKey(it) }
+): List<QSLCallsignRecord> =
+    // Fork: key built once per record (sortedByDescending's selector runs on every
+    // comparison, ~1.7M string builds on a 53k-QSO log).
+    records.map { qsoSortKey(it) to it }.sortedByDescending { it.first }.map { it.second }
 
 /**
  * Filter the recent-QSO list by a free-text [query] typed into the logbook search
@@ -1595,7 +1599,33 @@ private fun RecentTab(
     // when the operator leaves the Logbook, which matches the expectation that
     // search is a transient "find this contact" action, not a persisted filter.
     var query by rememberSaveable { mutableStateOf("") }
-    val filtered = remember(records, query) { filterQsoRecords(records, query) }
+    // Landscape (fork): a spreadsheet-style table, one line per QSO under a
+    // header that stays put. Portrait keeps the cards.
+    val tableView = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
+        android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    // Table sort (fork): tap a heading to sort by it, again to reverse. Default
+    // is the date/time column, newest first -- the cards' order.
+    var sortColumn by rememberSaveable { mutableStateOf(QSO_COL_DATE) }
+    var sortAscending by rememberSaveable { mutableStateOf(false) }
+    val context = LocalContext.current
+    // Fork: filter + sort off the main thread. On a ~53k-QSO log doing it in
+    // composition on every keystroke or heading tap blocked the UI past 5 s
+    // ("isn't responding"). The previous result stays on screen meanwhile;
+    // null only before the first result.
+    val shown by produceState<List<QSLCallsignRecord>?>(
+        null, records, query, tableView, sortColumn, sortAscending,
+    ) {
+        value = withContext(Dispatchers.Default) {
+            val filtered = filterQsoRecords(records, query)
+            if (tableView) {
+                sortQsoTable(filtered, sortColumn, sortAscending) { grid ->
+                    UsStateLookup.stateFromGrid(context, grid)
+                }
+            } else {
+                sortQsosByDateTimeDesc(filtered)
+            }
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         LogSearchBar(
@@ -1606,7 +1636,11 @@ private fun RecentTab(
                 .padding(bottom = 6.dp),
         )
 
-        if (filtered.isEmpty()) {
+        val shownList = shown
+        if (shownList == null) {
+            // First filter/sort still running (a fraction of a second).
+            Spacer(modifier = Modifier.fillMaxSize())
+        } else if (shownList.isEmpty()) {
             // Records exist but none match — keep the search bar above so the
             // operator can refine or clear the query.
             Column(
@@ -1632,24 +1666,6 @@ private fun RecentTab(
                 )
             }
         } else {
-            // Landscape (fork): a spreadsheet-style table, one line per QSO under a
-            // header that stays put. Portrait keeps the cards.
-            val tableView = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
-                android.content.res.Configuration.ORIENTATION_LANDSCAPE
-            // Table sort (fork): tap a heading to sort by it, again to reverse. Default
-            // is the date/time column, newest first -- the cards' order.
-            var sortColumn by rememberSaveable { mutableStateOf(QSO_COL_DATE) }
-            var sortAscending by rememberSaveable { mutableStateOf(false) }
-            val context = LocalContext.current
-            val shown = remember(filtered, tableView, sortColumn, sortAscending) {
-                if (tableView) {
-                    sortQsoTable(filtered, sortColumn, sortAscending) { grid ->
-                        UsStateLookup.stateFromGrid(context, grid)
-                    }
-                } else {
-                    sortQsosByDateTimeDesc(filtered)
-                }
-            }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1675,7 +1691,7 @@ private fun RecentTab(
                     }
                 }
                 items(
-                    items = shown,
+                    items = shownList,
                     // Include id so an edit that changes other fields still maps to a stable key,
                     // and so two grouped rows with otherwise identical display fields don't collide.
                     key = { "${it.id}_${it.callsign}_${it.lastTime}_${it.band}" },
@@ -2155,11 +2171,13 @@ internal fun sortQsoTable(
         }
         else -> null
     }
+    // Keys are computed once per record, not per comparison: on a ~53k-QSO log the
+    // per-comparison keys (state lookups, string building) froze the UI for seconds.
     // sortedWith is stable, so equal keys keep newest-first order.
-    val cmp: Comparator<QSLCallsignRecord> = if (numKey != null) {
-        Comparator { a, b ->
-            val x = numKey(a)
-            val y = numKey(b)
+    if (numKey != null) {
+        val cmp = Comparator<Pair<QSLCallsignRecord, Double?>> { a, b ->
+            val x = a.second
+            val y = b.second
             when {
                 x == null && y == null -> 0
                 x == null -> 1 // blanks last either way
@@ -2167,19 +2185,19 @@ internal fun sortQsoTable(
                 else -> if (ascending) x.compareTo(y) else y.compareTo(x)
             }
         }
-    } else {
-        Comparator { a, b ->
-            val x = textKey(a)
-            val y = textKey(b)
-            when {
-                x.isEmpty() && y.isEmpty() -> 0
-                x.isEmpty() -> 1
-                y.isEmpty() -> -1
-                else -> if (ascending) x.compareTo(y) else y.compareTo(x)
-            }
+        return newestFirst.map { it to numKey(it) }.sortedWith(cmp).map { it.first }
+    }
+    val cmp = Comparator<Pair<QSLCallsignRecord, String>> { a, b ->
+        val x = a.second
+        val y = b.second
+        when {
+            x.isEmpty() && y.isEmpty() -> 0
+            x.isEmpty() -> 1
+            y.isEmpty() -> -1
+            else -> if (ascending) x.compareTo(y) else y.compareTo(x)
         }
     }
-    return newestFirst.sortedWith(cmp)
+    return newestFirst.map { it to textKey(it) }.sortedWith(cmp).map { it.first }
 }
 
 @Composable
