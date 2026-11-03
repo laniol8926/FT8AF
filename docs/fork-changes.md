@@ -418,6 +418,16 @@ on the Quadra exchanges with LoTW, eQSL, HamQTH, ClubLog and HRDLog.net.
   the logbook: no TIME_OFF, so the copy merge wouldn't catch it) to count
   duplicate uploads, match each confirmation to a QSO, and use each record's
   upload date (`APP_LoTW_RXQSO`) to judge LoTW-only QSOs such as UT5MB.
+- **LoTW confirmations download: match the merged QSOs.** It must keep doing
+  only what it does now — set `isLotW_QSL` on a matching QSO, never add one
+  or change anything else (user rule, 2026-11-03). But it matches the exact
+  HH:MM, and some confirmations carry the LoTW copy's time (NG4C 2017-11-01:
+  LoTW 0347, merged QSO 0352). Fall back to the merge's test (call, date,
+  band, mode, within 15 min) when no minute matches.
+  (`LotwClient`, `UPDATE QSLTable SET isLotW_QSL=1 …`)
+- **Import summary counts 30 too many "updated"** (QRZ export: 54,503
+  records, summary 45,567 added + 8,966 updated = 54,533; the logbook itself
+  is right).
 - **Suspect LoTW-only QSOs.** From the QRZ export: 108 LoTW-style records
   confirmed only after our own (re-)upload (e.g. N8KYX, K6HN, sent May 2022,
   matched 2026), and 1,394 uploaded but never matched. Review list, not
