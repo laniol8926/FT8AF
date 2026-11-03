@@ -1,7 +1,7 @@
 # Changes on the laniol8926/FT8AF fork (`dev`)
 
 This is what the fork's `dev` branch adds on top of `patrickrb/FT8AF` `dev`,
-as of 2026-11-01. Upstream `dev` (70 commits) was merged in on 2026-10-27.
+as of 2026-11-02. Upstream `dev` (70 commits) was merged in on 2026-10-27.
 These changes enhance the app; they don't replace upstream behaviour. Where a
 control moved, the original is still in place. Layout changes are landscape
 only; portrait is as upstream.
@@ -255,12 +255,18 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   `ft8af_log.adi`, exports and uploads. (`DatabaseOpr.fillPlace`,
   `pickLoggedState`, `QrzXmlClient.cached/prefetch`)
 - **Import no longer duplicates the app's QSOs.** The "already logged?"
-  check matches call, date and mode case-insensitively and TIME_ON to the
-  minute: CQRLOG/QRZ write `1357`, the app `135745`, and an exact match had
-  re-added the same QSO. Band is not compared, as upstream (same call,
-  minute and mode on another band = one QSO with a wrong band). The three pairs this caused on
+  check matches call case-insensitively, date, and TIME_ON to the minute:
+  CQRLOG/QRZ write `1357`, the app `135745`, and an exact match had re-added
+  the same QSO. Band is not compared, as upstream (same call and minute on
+  another band = one QSO with a wrong band). The three pairs this caused on
   the test phones were merged on 2026-11-01 (pre-merge copies in
   `Documents\FT8AF-db-backups`). (`DatabaseOpr.checkIsQSL`)
+- **Mode is not compared either** (2026-11-02, made on the Quadra with the
+  desktop fix, built and tested on Windows). A log re-exported by one
+  program can carry FT8/FT4 as generic `MFSK` with no `SUBMODE`, while a
+  fresh export from the source still says FT8, so the same QSO came in
+  twice. On a match the stored row's call, time and mode are copied onto
+  the record, so the flag/STATE/COUNTRY updates still hit that row.
 - **Settings backup covers more.** Advanced → Backup & Restore (upstream
   #357) now also saves custom band dials, the theme and followed callsigns.
   Tick "Include sensitive data" to carry the passwords and API keys.
@@ -351,6 +357,13 @@ for the Hamlib version workaround needed there.
   saved rig index can point at a different rig: re-pick "Qrp Labs QMX
   (Hamlib)" once. A rig model change in Settings now reconnects on USB
   without a restart.
+- **Log re-import, 2026-11-02.** Both phones' logbook tables (`QSLTable`,
+  `QslCallsigns`) were emptied and re-imported from the QRZ.com export
+  (54,503 records → 52,948 QSOs) plus the CQRLOG dump (+3) = **52,951**, the
+  same count as the desktop. Zero exact duplicates (call + date + minute).
+  Motorola flags: LoTW sent 52,902 / rcvd 40,931, eQSL sent 52,937 / rcvd
+  30,753, QRZ confirmed 47,336, COUNTRY on every row, STATE on 45,543.
+  Pre-wipe databases: `Documents\FT8AF-db-backups\*-20261102-before-log-wipe.db`.
 
 ## Open items
 
@@ -362,3 +375,14 @@ for the Hamlib version workaround needed there.
 - Other `ToastMessage` notices (e.g. late start) still go only to the debug
   list, which the Compose UI doesn't show.
 - The voice-command mic button covers the QSO sheet's close button.
+- **5,204 near-duplicate QSOs in the source logs.** Same call, date, band
+  and mode with TIME_ON 1–2 minutes apart, mostly 2015–2022. The second copy
+  has no FREQ, `TIME_ON` = `TIME_OFF`, RST 599 / no report received, and was
+  uploaded to QRZ.com around May 2022. They are in the QRZ.com and CQRLOG
+  exports themselves, so the import (and the desktop) keeps them. Not decided
+  yet: leave them, merge them on import, or clean them up at the source.
+- **Android ADIF import is slow** (many minutes for ~53k QSOs, slower on a
+  busy phone): each QSO is several separately committed writes. Committing
+  in batches of ~500–1,000 (as the desktop now does in one transaction) would
+  make it seconds. Also check that the 82 MB QRZ.com export isn't read into
+  memory whole.
