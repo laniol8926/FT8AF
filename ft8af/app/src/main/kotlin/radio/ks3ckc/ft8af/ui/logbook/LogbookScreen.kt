@@ -1838,14 +1838,8 @@ private fun QsoRow(
     val state = UsStateLookup.stateFromGrid(context, grid)
     var menuOpen by remember { mutableStateOf(false) }
 
-    // Show a status pill only when something positive has happened (worked or
-    // LoTW-confirmed). New rows default to no badge — the chip area to the right
-    // is where the sync indicators live.
-    val status = when {
-        record.isLotW_QSL -> QsoStatus.CONFIRMED
-        record.isQSL -> QsoStatus.WORKED
-        else -> null
-    }
+    // CONF or WORKED pill; the chip area to the right is where the sync indicators live.
+    val status = qsoStatusOf(record)
 
     // Build the secondary line entries (state takes precedence over DXCC when present
     // because for US contacts the DXCC string is always just "United States" and the
@@ -1943,11 +1937,7 @@ private fun QsoRow(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            // Status pill — only shown when worked or LoTW-confirmed; brand-new QSOs
-            // get no badge to keep the row visually quiet.
-            if (status != null) {
-                StatusPill(status = status, compact = true)
-            }
+            StatusPill(status = status, compact = true)
 
             // Sync-to-service indicator chips (independent of QSL state)
             SyncChips(
@@ -2100,6 +2090,13 @@ internal const val QSO_COL_STATUS = 9
 internal const val QSO_COL_QSL = 10
 
 /**
+ * Status pill for a QSO (fork): CONFIRMED when LoTW or QRZ.com confirms it, else
+ * WORKED — every logged QSO was worked. eQSL and paper show only in the QSL column.
+ */
+internal fun qsoStatusOf(r: QSLCallsignRecord): QsoStatus =
+    if (r.isLotW_QSL || r.qrzQsl) QsoStatus.CONFIRMED else QsoStatus.WORKED
+
+/**
  * QSL column marks (fork): LoTW, eQSL, Paper, each "✓" received, "↑" sent, "·" neither.
  * LoTW received is the existing isLotW_QSL confirmation.
  */
@@ -2117,7 +2114,7 @@ internal fun qslMarks(r: QSLCallsignRecord): List<Pair<String, Char>> {
 /**
  * Sort the table view by [column] (one of the QSO_COL_ constants). Date and time
  * sort together (date+time); frequency and reports numerically (blanks last);
- * status CONFIRMED > WORKED > none, then uploads. Ties fall back to newest first.
+ * status CONFIRMED (LoTW or QRZ) > WORKED, then uploads. Ties fall back to newest first.
  * [stateOf] maps a grid to its US state (the State column's value).
  */
 internal fun sortQsoTable(
@@ -2146,7 +2143,7 @@ internal fun sortQsoTable(
         QSO_COL_RST_SENT -> { r -> num(r.rstSent) }
         QSO_COL_RST_RCVD -> { r -> num(r.rstRcvd) }
         QSO_COL_STATUS -> { r ->
-            (if (r.isLotW_QSL) 2.0 else if (r.isQSL) 1.0 else 0.0) +
+            (if (qsoStatusOf(r) == QsoStatus.CONFIRMED) 1.0 else 0.0) +
                 (if (r.syncedQrz || r.syncedCloudlog || r.syncedWrl) 0.5 else 0.0)
         }
         // Received counts double, sent single: L✓E✓P✓ sorts above L✓E↑P·.
@@ -2188,12 +2185,8 @@ private fun QsoTableRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    // The same status pill the cards show (CONFIRMED via LoTW, WORKED when marked).
-    val status = when {
-        record.isLotW_QSL -> QsoStatus.CONFIRMED
-        record.isQSL -> QsoStatus.WORKED
-        else -> null
-    }
+    // The same status pill the cards show.
+    val status = qsoStatusOf(record)
     val time = formatQsoTime(record.timeOn ?: "")
     val grid = record.grid ?: ""
     // US state from the grid (as the cards show it); otherwise the country, looked
@@ -2258,13 +2251,11 @@ private fun QsoTableRow(
             // Status pill plus the upload tags (QRZ / CL / WRL), as on the cards.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // "CONF", not "CONFIRMED": the short pill leaves room for the QRZ tag.
-                if (status != null) {
-                    StatusPill(
-                        status = status,
-                        compact = true,
-                        label = if (status == QsoStatus.CONFIRMED) "CONF" else null,
-                    )
-                }
+                StatusPill(
+                    status = status,
+                    compact = true,
+                    label = if (status == QsoStatus.CONFIRMED) "CONF" else null,
+                )
                 SyncChips(
                     cloudlog = record.syncedCloudlog,
                     qrz = record.syncedQrz,

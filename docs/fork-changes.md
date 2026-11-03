@@ -126,8 +126,9 @@ cutout. (Found from new `Layout:` lines in `debug.log`.)
   Callsign, Grid, State, Freq MHz, Mode, RST Sent, RST Rcvd, Status, QSL, ⋮
   (Edit/Delete), two-line headings that stay put, grid lines. **Tap a heading
   to sort** by it (again to reverse; highlighted with ▲/▼). Status shows a
-  short **CONF** (LoTW-confirmed) / WORKED pill and the QRZ / CL / WRL upload
-  tags (QRZ = in the QRZ logbook, not confirmed there). State is the US
+  short **CONF** (confirmed on LoTW or QRZ.com) / **WORKED** (every other
+  logged QSO; cards too) pill and the QRZ / CL / WRL upload tags (QRZ = in the
+  QRZ logbook; the Q in the QSL column = confirmed there). State is the US
   state (grid, else the logged STATE) or, for non-US, the logged country; the
   search field is a slim 36 dp. (`QsoTableRow`, `sortQsoTable`,
   `logbookPlace`)
