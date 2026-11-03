@@ -1087,6 +1087,33 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         }
     }
 
+    /**
+     * Bulk ADIF import batching (fork). Each {@link #doInsertQSLData} is several
+     * statements, and autocommitting every one costs a flash flush apiece -- a 53k-QSO
+     * import took many minutes. The importer opens a batch, calls
+     * {@link #commitImportBatch} every few hundred records and {@link #endImportBatch}
+     * at the end, so a crash or kill loses at most the open batch (re-importing skips
+     * what's already in). Call from the import thread only.
+     */
+    public void beginImportBatch() {
+        db.beginTransaction();
+    }
+
+    /** Commits the open import batch and starts the next one. */
+    public void commitImportBatch() {
+        db.setTransactionSuccessful();
+        db.endTransaction();
+        db.beginTransaction();
+    }
+
+    /** Ends the open import batch: commits it, or rolls it back when {@code commit} is false. */
+    public void endImportBatch(boolean commit) {
+        if (commit) {
+            db.setTransactionSuccessful();
+        }
+        db.endTransaction();
+    }
+
     /** Followed callsigns, for the settings backup (fork). Call off the main thread. */
     public java.util.ArrayList<String> getFollowCallsignsSync() {
         java.util.ArrayList<String> list = new java.util.ArrayList<>();

@@ -15,6 +15,8 @@ public class ImportSharedLogs {
     // Reject individual ADIF field lengths above this to avoid pathological allocations in
     // substring() when a record claims a multi-megabyte field.
     private static final int MAX_ADIF_FIELD_LEN = 64 * 1024;
+    // Records per committed transaction during a bulk import (fork).
+    private static final int IMPORT_BATCH = 500;
     private final MainViewModel mainViewModel;
 
     public ImportSharedLogs(MainViewModel mainViewModel) throws IOException {
@@ -174,31 +176,50 @@ public class ImportSharedLogs {
                 }
 
                 int position = 0;
-                try (InputStream parsing = streamOpener.open();
-                     AdifStreamReader records = new AdifStreamReader(parsing)) {
-                    HashMap<String, String> record;
-                    while ((record = records.nextRecord()) != null) {
-                        position++;
-                        QSLRecord qslRecord = new QSLRecord(record);
+                // Fork: commit every IMPORT_BATCH records instead of every statement
+                // (see DatabaseOpr#beginImportBatch). A read error mid-file still keeps
+                // the records before it, as before; only an exception thrown by the
+                // insert itself rolls back the open batch.
+                com.k1af.ft8af.database.DatabaseOpr opr = mainViewModel.databaseOpr;
+                IOException readError = null;
+                boolean commit = false;
+                opr.beginImportBatch();
+                try {
+                    try (InputStream parsing = streamOpener.open();
+                         AdifStreamReader records = new AdifStreamReader(parsing)) {
+                        HashMap<String, String> record;
+                        while ((record = records.nextRecord()) != null) {
+                            position++;
+                            QSLRecord qslRecord = new QSLRecord(record);
 
-                        // Bulk import: don't append to ft8af_log.adi. These records typically
-                        // originated elsewhere and re-appending would double-count them if the
-                        // same rows are later re-exported. (Real-time mirroring is for on-air /
-                        // web-logged QSOs only.)
-                        mainViewModel.databaseOpr.doInsertQSLData(qslRecord, afterInsertQSLData, false);
+                            // Bulk import: don't append to ft8af_log.adi. These records typically
+                            // originated elsewhere and re-appending would double-count them if the
+                            // same rows are later re-exported. (Real-time mirroring is for on-air /
+                            // web-logged QSOs only.)
+                            opr.doInsertQSLData(qslRecord, afterInsertQSLData, false);
+                            if (position % IMPORT_BATCH == 0) {
+                                opr.commitImportBatch();
+                            }
 
-                        if (onShareLogEvents != null) {
-                            if (!onShareLogEvents.onShareProgress(count, position
-                                    , String.format(GeneralVariables.getStringFromResource(R.string.share_logs_been_read)
-                                            , position))) {
-                                break;
+                            if (onShareLogEvents != null) {
+                                if (!onShareLogEvents.onShareProgress(count, position
+                                        , String.format(GeneralVariables.getStringFromResource(R.string.share_logs_been_read)
+                                                , position))) {
+                                    break;
+                                }
                             }
                         }
+                    } catch (IOException e) {
+                        readError = e;
                     }
-                } catch (IOException e) {
+                    commit = true;
+                } finally {
+                    opr.endImportBatch(commit);
+                }
+                if (readError != null) {
                     if (onShareLogEvents != null) {
                         onShareLogEvents.onShareFailed(String.format(
-                                GeneralVariables.getStringFromResource(R.string.import_share_failed), e.getMessage()));
+                                GeneralVariables.getStringFromResource(R.string.import_share_failed), readError.getMessage()));
                     }
                     return;
                 }
