@@ -2,7 +2,7 @@
 // around these so the decision/normalization logic stays unit-testable (see
 // AGENTS.md: Composable/JSX code can't be tested directly — extract the logic).
 
-import type { ImportSummary, QsoRecord } from "./ipc";
+import type { QsoRecord } from "./ipc";
 
 /** Logbook confirmation filter, mirroring the Android `FilterDialog`. */
 export type ConfirmFilter = "all" | "confirmed" | "unconfirmed";
@@ -146,14 +146,6 @@ export function formFromQso(r?: QsoRecord | null): QsoEditForm {
   };
 }
 
-/** Human-readable summary line for the Logbook's "Import ADIF" result banner. */
-export function formatImportSummary(summary: ImportSummary): string {
-  const parts = [`${summary.imported} imported`];
-  if (summary.duplicates > 0) parts.push(`${summary.duplicates} already logged`);
-  if (summary.skipped > 0) parts.push(`${summary.skipped} skipped`);
-  return parts.join(", ");
-}
-
 /** Whether a search string or non-"all" confirmation filter is currently active. */
 export function isLogFiltered(search: string, filter: ConfirmFilter): boolean {
   return (search ?? "").trim() !== "" || filter !== "all";
@@ -207,16 +199,19 @@ export const QSO_COL_RST_RCVD = 8;
 export const QSO_COL_STATUS = 9;
 export const QSO_COL_QSL = 10;
 
+// Labels with a "\n" stack onto two lines (see .qso-table th's
+// white-space: pre-line) -- narrower columns for the wider headers, freeing
+// up width for the rest of the table, matching Android's header style.
 export const QSO_TABLE_COLUMNS = [
   { col: QSO_COL_DATE, label: "Date" },
   { col: QSO_COL_TIME, label: "Time" },
   { col: QSO_COL_CALL, label: "Call" },
   { col: QSO_COL_GRID, label: "Grid" },
   { col: QSO_COL_STATE, label: "State" },
-  { col: QSO_COL_FREQ, label: "Freq MHz" },
+  { col: QSO_COL_FREQ, label: "Freq\nMHz" },
   { col: QSO_COL_MODE, label: "Mode" },
-  { col: QSO_COL_RST_SENT, label: "RST Sent" },
-  { col: QSO_COL_RST_RCVD, label: "RST Rcvd" },
+  { col: QSO_COL_RST_SENT, label: "RST\nSent" },
+  { col: QSO_COL_RST_RCVD, label: "RST\nRcvd" },
   { col: QSO_COL_STATUS, label: "Status" },
   { col: QSO_COL_QSL, label: "QSL" },
 ] as const;
@@ -267,33 +262,21 @@ function qslScore(r: QsoRecord): number {
 }
 
 /**
- * Status pill this row would show: "CONF" when LoTW-confirmed (the strongest
- * confirmation), "WORKED" for any other confirmation (paper, eQSL, or
- * QRZ.com), else none. A simplified stand-in for Android's richer
- * `isLotW_QSL`/`isQSL` pair -- this app doesn't track a separate aggregate
- * "any confirmation" flag, so WORKED is derived from the three non-LoTW
- * signals directly.
+ * Status pill this row would show: "CONF" when LoTW or QRZ.com confirmed,
+ * else none. User's explicit call (2026-11-03, ported from the Android
+ * decision): no WORKED tier, and no upload-service chips in this cell --
+ * the QRZ tag read as a confirmation when it only meant "uploaded," and the
+ * QSL column's L/E/P/Q marks already show which service actually confirmed
+ * it. eQSL and paper never set CONF on their own.
  */
-export function qsoStatusLabel(r: QsoRecord): "CONF" | "WORKED" | null {
-  if (r.lotw_rcvd) return "CONF";
-  if (r.confirmed || r.eqsl_rcvd || r.qrz_qsl) return "WORKED";
-  return null;
+export function qsoStatusLabel(r: QsoRecord): "CONF" | null {
+  return r.lotw_rcvd || r.qrz_qsl ? "CONF" : null;
 }
 
-/** Sortable status score, including a small bump for any upload-service sync
- *  (matches Android's status key: confirmation tier first, sync as a tiebreak). */
+/** Sortable status score: confirmed first, then newest (via the stable sort's
+ *  newest-first baseline) -- matches Android's sort rule for the same column. */
 function qsoStatusScore(r: QsoRecord): number {
-  const base = r.lotw_rcvd ? 2 : r.confirmed || r.eqsl_rcvd || r.qrz_qsl ? 1 : 0;
-  const synced = r.synced_cloudlog || r.synced_qrz ? 0.5 : 0;
-  return base + synced;
-}
-
-/** Upload-service chip labels (CL / QRZ) shown beside the status pill. */
-export function syncChipLabels(r: QsoRecord): string[] {
-  const labels: string[] = [];
-  if (r.synced_cloudlog) labels.push("CL");
-  if (r.synced_qrz) labels.push("QRZ");
-  return labels;
+  return qsoStatusLabel(r) ? 1 : 0;
 }
 
 function dateTimeKey(r: QsoRecord): string {
@@ -319,6 +302,21 @@ function parseNumericField(s: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Android's "no report" sentinels (it stores a real `-120`/`-100` int and
+ *  writes it to ADIF literally -- a report that could in principle reach this
+ *  app by importing one of its exports), or desktop's own "absent" encoding
+ *  (ADIF `adif_record_to_qso` leaves the field empty when the tag is absent). */
+function isNoReport(rst: string): boolean {
+  const t = (rst ?? "").trim();
+  return t === "" || t === "-120" || t === "-100";
+}
+
+/** An RST for display: Android's displayReport, ported -- "no report" shows
+ *  blank rather than a literal "-120"/"-100". */
+export function displayReport(rst: string): string {
+  return isNoReport(rst) ? "" : rst;
+}
+
 /**
  * Sort the table view by `column` (one of the `QSO_COL_*` constants). Date
  * and time sort together (by actual QSO date+time, not insertion order --
@@ -335,8 +333,8 @@ export function sortQsoTable(rows: QsoRecord[], column: number, ascending: boole
 
   const numKey: ((r: QsoRecord) => number | null) | null = {
     [QSO_COL_FREQ]: (r: QsoRecord) => parseNumericField(r.freq),
-    [QSO_COL_RST_SENT]: (r: QsoRecord) => parseNumericField(r.rst_sent),
-    [QSO_COL_RST_RCVD]: (r: QsoRecord) => parseNumericField(r.rst_rcvd),
+    [QSO_COL_RST_SENT]: (r: QsoRecord) => (isNoReport(r.rst_sent) ? null : parseNumericField(r.rst_sent)),
+    [QSO_COL_RST_RCVD]: (r: QsoRecord) => (isNoReport(r.rst_rcvd) ? null : parseNumericField(r.rst_rcvd)),
     [QSO_COL_STATUS]: (r: QsoRecord) => qsoStatusScore(r),
     [QSO_COL_QSL]: (r: QsoRecord) => qslScore(r),
   }[column] ?? null;

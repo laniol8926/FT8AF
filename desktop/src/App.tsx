@@ -11,6 +11,7 @@ import {
   type EngineEvent,
   type HamlibRig,
   type ImportProgress,
+  type ImportSummary,
   type QsoRecord,
   type RigConfig,
   type RigStatusEvent,
@@ -27,8 +28,8 @@ import {
   buildExportArgs,
   buildQsoRecord,
   computeVirtualWindow,
+  displayReport,
   formatHhmm,
-  formatImportSummary,
   formFromQso,
   isLogFiltered,
   logbookPlace,
@@ -38,7 +39,6 @@ import {
   QSO_COL_DATE,
   QSO_TABLE_COLUMNS,
   sortQsoTable,
-  syncChipLabels,
   type ConfirmFilter,
   type QsoEditForm,
 } from "./logbook";
@@ -64,6 +64,7 @@ const GAIN_DEBOUNCE_MS = 120;
 // The live waterfall draws imperatively to a canvas (registered by WaterfallView)
 // so per-row spectrum events never go through React state.
 const WF_HEIGHT = 160;
+const WF_TICK_STEP_HZ = 500;
 // Top of the displayed audio band; matches the backend's WF_MAX_HZ.
 const WF_TOP_HZ = 3500;
 const TX_MIN_HZ = 200;
@@ -292,6 +293,7 @@ export default function App() {
             messages={visible}
             filter={filter}
             setFilter={setFilter}
+            cycle={cycle}
             txFreq={txFreq}
             onSelectFreq={(hz) => {
               setTxFreq(hz);
@@ -452,12 +454,43 @@ function ClockSyncBadge({ clock }: { clock: ClockSyncEvent | null }) {
   );
 }
 
+// Frequency scale above the waterfall: a tick + label every WF_TICK_STEP_HZ
+// (0, 500, 1000, ... up to WF_TOP_HZ), positioned by the same hz/WF_TOP_HZ
+// fraction the waterfall canvas and the TX marker already use, so they stay
+// aligned. The first/last ticks are pulled in from the edge instead of
+// centered, so "0" and the top label don't overflow the container.
+function WaterfallScale() {
+  const ticks: number[] = [];
+  for (let hz = 0; hz <= WF_TOP_HZ; hz += WF_TICK_STEP_HZ) ticks.push(hz);
+  return (
+    <div style={{ position: "relative", height: 14, marginBottom: 2 }}>
+      {ticks.map((hz) => {
+        const pct = (hz / WF_TOP_HZ) * 100;
+        const transform = hz === 0 ? "none" : hz === WF_TOP_HZ ? "translateX(-100%)" : "translateX(-50%)";
+        return (
+          <span
+            key={hz}
+            style={{
+              position: "absolute", left: `${pct}%`, transform,
+              color: "#fff", fontSize: 10, fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {hz}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function WaterfallView({
   txFreq,
   onSelectFreq,
+  cycle,
 }: {
   txFreq: number;
   onSelectFreq: (hz: number) => void;
+  cycle: CycleTick | null;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -473,13 +506,21 @@ function WaterfallView({
   }
 
   const leftPct = (txFreq / WF_TOP_HZ) * 100;
+  // HH:MM:SS of the current slot's start, same formatting SlotTimerBar
+  // already uses -- the newest boundary line is always the one that just
+  // appeared at the waterfall's top edge.
+  const slotTime = cycle ? new Date(cycle.utc_ms).toISOString().substring(11, 19) : null;
 
   return (
     <div
-      style={{ position: "relative", marginBottom: 8, cursor: "crosshair" }}
+      // Half the window width, per the user's explicit request -- the scale
+      // ruler and the TX/slot-time overlays below are all positioned as
+      // percentages of this same box, so they stay aligned at any width.
+      style={{ position: "relative", width: "50%", marginBottom: 8, cursor: "crosshair" }}
       onClick={handleClick}
       title="Click to set TX frequency"
     >
+      <WaterfallScale />
       <canvas
         ref={ref}
         style={{
@@ -491,6 +532,22 @@ function WaterfallView({
           display: "block",
         }}
       />
+      {slotTime && (
+        <div
+          style={{
+            position: "absolute",
+            top: 16,
+            left: 4,
+            color: "#fff",
+            fontSize: 11,
+            fontVariantNumeric: "tabular-nums",
+            pointerEvents: "none",
+            textShadow: "0 0 3px #000",
+          }}
+        >
+          {slotTime}
+        </div>
+      )}
       {/* TX frequency marker */}
       <div
         style={{
@@ -534,16 +591,17 @@ function DecodeScreen(props: {
   messages: UiMessage[];
   filter: Filter;
   setFilter: (f: Filter) => void;
+  cycle: CycleTick | null;
   txFreq: number;
   onSelectFreq: (hz: number) => void;
   onAnswer: (m: UiMessage) => void;
   inputGain: number;
   onInputGain: (v: number) => void;
 }) {
-  const { messages, filter, setFilter, txFreq, onSelectFreq, onAnswer, inputGain, onInputGain } = props;
+  const { messages, filter, setFilter, cycle, txFreq, onSelectFreq, onAnswer, inputGain, onInputGain } = props;
   return (
     <>
-      <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} />
+      <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} cycle={cycle} />
       <div className="chips">
         {(["all", "cq", "tome"] as Filter[]).map((f) => (
           <div key={f} className={"chip" + (filter === f ? " active" : "")} onClick={() => setFilter(f)}>
@@ -636,8 +694,11 @@ function LogScreen() {
   const [rangeEnd, setRangeEnd] = useState("");
   // Edit-QSO dialog target: undefined = closed, null = new QSO, record = edit.
   const [editing, setEditing] = useState<QsoRecord | null | undefined>(undefined);
-  const [importMsg, setImportMsg] = useState("");
-  const [importFailed, setImportFailed] = useState(false);
+  // Import completion dialog state: exactly one of these is set once an
+  // import finishes, matching the Android app's "Import Complete"/error
+  // popup (dismissed with its own "Done" button, not auto-hidden).
+  const [importResult, setImportResult] = useState<ImportSummary | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   // Table sort: newest-first (Date, descending) by default.
@@ -715,20 +776,18 @@ function LogScreen() {
 
   async function importAdifFile(file: File) {
     // Set busy state synchronously, before the first await -- otherwise the
-    // button and message stay unchanged (looking like the click did nothing)
-    // for however long reading the file and the IPC round-trip take to even
-    // start.
-    setImportMsg("");
-    setImportFailed(false);
+    // button and progress popup stay unchanged (looking like the click did
+    // nothing) for however long reading the file and the IPC round-trip
+    // take to even start.
+    setImportResult(null);
+    setImportError(null);
     setImportProgress({ processed: 0, total: 0 });
     const text = await file.text();
     const unlisten = await onImportProgress(setImportProgress);
     try {
-      const summary = await api.importAdif(text);
-      setImportMsg(`✓ Import complete: ${formatImportSummary(summary)}`);
+      setImportResult(await api.importAdif(text));
     } catch (err) {
-      setImportFailed(true);
-      setImportMsg(`⚠ Import failed: ${err}`);
+      setImportError(String(err));
     } finally {
       unlisten();
       setImportProgress(null);
@@ -803,19 +862,6 @@ function LogScreen() {
         <button onClick={() => importInputRef.current?.click()} disabled={!!importProgress}>
           Import ADIF…
         </button>
-        {importProgress ? (
-          <span className="import-progress" role="status">
-            {importProgress.total > 0
-              ? `Processing record: ${importProgress.processed} / ${importProgress.total}`
-              : "Processing record… (reading file)"}
-          </span>
-        ) : (
-          importMsg && (
-            <span className={importFailed ? "import-error" : "import-done"} role="status">
-              {importMsg}
-            </span>
-          )
-        )}
       </div>
       <div
         className="decode-list"
@@ -850,7 +896,9 @@ function LogScreen() {
           {visibleRows.map((r) => {
             const status = qsoStatusLabel(r);
             return (
-              <tr key={r.id} className={status ? "confirmed clickable" : "clickable"}>
+              <tr key={r.id} className="clickable">
+                {/* Confirmation shows via the Status pill and QSL marks only
+                    (matching Android) -- the row itself is never tinted. */}
                 <td onClick={() => setEditing(r)}>{adifToDateInput(r.qso_date)}</td>
                 <td onClick={() => setEditing(r)}>{formatHhmm(r.time_on)}</td>
                 <td onClick={() => setEditing(r)} className="call-cell">{r.call}</td>
@@ -858,29 +906,26 @@ function LogScreen() {
                 <td onClick={() => setEditing(r)}>{logbookPlace(r) ?? ""}</td>
                 <td onClick={() => setEditing(r)}>{r.freq}</td>
                 <td onClick={() => setEditing(r)}>{r.mode}</td>
-                <td onClick={() => setEditing(r)}>{r.rst_sent}</td>
-                <td onClick={() => setEditing(r)}>{r.rst_rcvd}</td>
-                <td onClick={() => setEditing(r)} className="status-cell">
-                  {status && (
-                    <span className={status === "CONF" ? "status-pill conf" : "status-pill worked"}>
-                      {status}
-                    </span>
-                  )}
-                  {syncChipLabels(r).map((label) => (
-                    <span key={label} className="sync-chip">{label}</span>
-                  ))}
+                <td onClick={() => setEditing(r)}>{displayReport(r.rst_sent)}</td>
+                <td onClick={() => setEditing(r)}>{displayReport(r.rst_rcvd)}</td>
+                <td onClick={() => setEditing(r)}>
+                  <div className="status-cell">
+                    {status && <span className="status-pill conf">{status}</span>}
+                  </div>
                 </td>
-                <td onClick={() => setEditing(r)} className="qsl-cell">
-                  {qslMarks(r).map(({ service, mark }) => (
-                    <span
-                      key={service}
-                      className={
-                        mark === "✓" ? "qsl-mark rcvd" : mark === "↑" ? "qsl-mark sent" : "qsl-mark none"
-                      }
-                    >
-                      {service}{mark}
-                    </span>
-                  ))}
+                <td onClick={() => setEditing(r)}>
+                  <div className="qsl-cell">
+                    {qslMarks(r).map(({ service, mark }) => (
+                      <span
+                        key={service}
+                        className={
+                          mark === "✓" ? "qsl-mark rcvd" : mark === "↑" ? "qsl-mark sent" : "qsl-mark none"
+                        }
+                      >
+                        {service}{mark}
+                      </span>
+                    ))}
+                  </div>
                 </td>
                 <td>
                   <button onClick={() => remove(r.id)}>✕</button>
@@ -908,7 +953,69 @@ function LogScreen() {
           onSave={saveEdit}
         />
       )}
+      {importProgress && <ImportProgressDialog progress={importProgress} />}
+      {importResult && (
+        <ImportCompleteDialog summary={importResult} onDone={() => setImportResult(null)} />
+      )}
+      {importError && (
+        <ImportErrorDialog message={importError} onDone={() => setImportError(null)} />
+      )}
     </>
+  );
+}
+
+// Modal import-progress popup, matching the Android app's "Importing ADIF
+// log..." dialog (title, progress bar, "N of M records", a working
+// indicator) -- the previous inline text next to the button was too easy to
+// miss, per the user's reference screenshot of Android's dialog.
+function ImportProgressDialog(props: { progress: ImportProgress }) {
+  const { processed, total } = props.progress;
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  return (
+    <div className="modal-overlay">
+      <div className="modal import-dialog">
+        <h3>Importing ADIF log…</h3>
+        <div className="bar">
+          <div style={{ width: `${pct}%` }} />
+        </div>
+        <div className="count">
+          {total > 0 ? `${processed} of ${total} records` : "Reading file…"}
+        </div>
+        <div className="working">Working…</div>
+      </div>
+    </div>
+  );
+}
+
+// Matches the Android app's "Import Complete" popup exactly: Added/Updated/
+// Skipped as three separate lines, dismissed with its own "Done" button
+// rather than auto-hiding (per the user's reference screenshot).
+function ImportCompleteDialog(props: { summary: ImportSummary; onDone: () => void }) {
+  const { summary, onDone } = props;
+  return (
+    <div className="modal-overlay">
+      <div className="modal import-dialog">
+        <h3>Import complete</h3>
+        <div className="import-summary">
+          <div>Added: {summary.imported} new QSOs</div>
+          <div>Updated: {summary.duplicates} existing QSOs</div>
+          <div>Skipped: {summary.skipped} invalid records</div>
+        </div>
+        <button className="primary import-done" onClick={onDone}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+function ImportErrorDialog(props: { message: string; onDone: () => void }) {
+  return (
+    <div className="modal-overlay">
+      <div className="modal import-dialog">
+        <h3>Import failed</h3>
+        <div className="import-summary error">{props.message}</div>
+        <button className="primary import-done" onClick={props.onDone}>Done</button>
+      </div>
+    </div>
   );
 }
 

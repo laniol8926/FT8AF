@@ -5,9 +5,9 @@ import {
   buildQsoRecord,
   computeVirtualWindow,
   dateInputToAdif,
+  displayReport,
   filterQsos,
   formatHhmm,
-  formatImportSummary,
   formFromQso,
   isLogFiltered,
   logbookPlace,
@@ -23,7 +23,6 @@ import {
   QSO_COL_STATE,
   QSO_COL_STATUS,
   sortQsoTable,
-  syncChipLabels,
   type QsoEditForm,
 } from "./logbook";
 import type { QsoRecord } from "./ipc";
@@ -82,6 +81,19 @@ describe("formatHhmm", () => {
     expect(formatHhmm("")).toBe("");
     expect(formatHhmm("12:30")).toBe("");
     expect(formatHhmm("ab")).toBe("");
+  });
+});
+
+describe("displayReport", () => {
+  it("shows a real report unchanged", () => {
+    expect(displayReport("-12")).toBe("-12");
+    expect(displayReport("+05")).toBe("+05");
+  });
+
+  it("blanks Android's -120/-100 'no report' sentinels and a genuinely empty value", () => {
+    expect(displayReport("-120")).toBe("");
+    expect(displayReport("-100")).toBe("");
+    expect(displayReport("")).toBe("");
   });
 });
 
@@ -198,24 +210,6 @@ describe("isLogFiltered / qsoCountLabel", () => {
   });
 });
 
-describe("formatImportSummary", () => {
-  it("shows just the imported count when nothing else happened", () => {
-    expect(formatImportSummary({ imported: 5, duplicates: 0, skipped: 0 })).toBe("5 imported");
-  });
-
-  it("adds duplicates and skipped only when present", () => {
-    expect(formatImportSummary({ imported: 3, duplicates: 2, skipped: 0 })).toBe(
-      "3 imported, 2 already logged",
-    );
-    expect(formatImportSummary({ imported: 0, duplicates: 0, skipped: 1 })).toBe(
-      "0 imported, 1 skipped",
-    );
-    expect(formatImportSummary({ imported: 1, duplicates: 1, skipped: 1 })).toBe(
-      "1 imported, 1 already logged, 1 skipped",
-    );
-  });
-});
-
 describe("logbookPlace", () => {
   it("shows the logged state for a US QSO", () => {
     expect(logbookPlace(qso({ state: "CA", country: "" }))).toBe("CA");
@@ -256,30 +250,20 @@ describe("qslMarks", () => {
 });
 
 describe("qsoStatusLabel", () => {
-  it("LoTW confirmation wins as CONF over any other signal", () => {
-    expect(qsoStatusLabel(qso({ lotw_rcvd: true, confirmed: true }))).toBe("CONF");
+  // User's explicit call (2026-11-03, ported from Android): CONF only for
+  // LoTW or QRZ.com confirmation; no WORKED tier, no upload-sync chips here.
+  it("LoTW or QRZ.com confirmation shows CONF", () => {
+    expect(qsoStatusLabel(qso({ lotw_rcvd: true }))).toBe("CONF");
+    expect(qsoStatusLabel(qso({ qrz_qsl: true }))).toBe("CONF");
   });
 
-  it("any non-LoTW confirmation is WORKED", () => {
-    expect(qsoStatusLabel(qso({ confirmed: true }))).toBe("WORKED");
-    expect(qsoStatusLabel(qso({ eqsl_rcvd: true }))).toBe("WORKED");
-    expect(qsoStatusLabel(qso({ qrz_qsl: true }))).toBe("WORKED");
+  it("eQSL or paper confirmation alone shows no pill", () => {
+    expect(qsoStatusLabel(qso({ confirmed: true }))).toBeNull();
+    expect(qsoStatusLabel(qso({ eqsl_rcvd: true }))).toBeNull();
   });
 
   it("no confirmation at all is no pill", () => {
     expect(qsoStatusLabel(qso({}))).toBeNull();
-  });
-});
-
-describe("syncChipLabels", () => {
-  it("lists only the services actually synced, in a fixed order", () => {
-    expect(syncChipLabels(qso({}))).toEqual([]);
-    expect(syncChipLabels(qso({ synced_cloudlog: true }))).toEqual(["CL"]);
-    expect(syncChipLabels(qso({ synced_qrz: true }))).toEqual(["QRZ"]);
-    expect(syncChipLabels(qso({ synced_cloudlog: true, synced_qrz: true }))).toEqual([
-      "CL",
-      "QRZ",
-    ]);
   });
 });
 
@@ -318,13 +302,24 @@ describe("sortQsoTable", () => {
     expect(asc.map((r) => r.call)).toEqual(["W1AW", "K1ABC", "N0CALL"]);
   });
 
-  it("sorts by status score: CONF above WORKED above none", () => {
+  it("a -120/-100 'no report' sentinel sorts last, same as a blank report", () => {
+    const withSentinel = [
+      qso({ id: 1, call: "A", qso_date: "20260601", time_on: "100000", rst_sent: "-100" }),
+      qso({ id: 2, call: "B", qso_date: "20260601", time_on: "110000", rst_sent: "-05" }),
+    ];
+    const asc = sortQsoTable(withSentinel, QSO_COL_RST_SENT, true);
+    expect(asc.map((r) => r.call)).toEqual(["B", "A"]);
+  });
+
+  it("sorts by status score: CONF (LoTW or QRZ) above no pill, ties newest-first", () => {
     const statusRows = [
-      qso({ id: 1, call: "A", qso_date: "20260601", time_on: "100000" }),
-      qso({ id: 2, call: "B", qso_date: "20260601", time_on: "110000", confirmed: true }),
-      qso({ id: 3, call: "C", qso_date: "20260601", time_on: "120000", lotw_rcvd: true }),
+      qso({ id: 1, call: "A", qso_date: "20260601", time_on: "100000" }), // no pill
+      qso({ id: 2, call: "B", qso_date: "20260601", time_on: "110000", qrz_qsl: true }), // CONF
+      qso({ id: 3, call: "C", qso_date: "20260601", time_on: "120000", lotw_rcvd: true }), // CONF
     ];
     const desc = sortQsoTable(statusRows, QSO_COL_STATUS, false);
+    // Both B and C show CONF and tie on score; the stable sort keeps them in
+    // newest-first order (C before B), with the no-pill row A last.
     expect(desc.map((r) => r.call)).toEqual(["C", "B", "A"]);
   });
 

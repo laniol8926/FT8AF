@@ -10,6 +10,7 @@
   --tome: #b8860b;
   --tx: #c0392b;
   --ok: #3fae6a;
+  --yellow: #ffc107;
 }
 
 * { box-sizing: border-box; }
@@ -152,20 +153,23 @@ tr.clickable:hover td { background: #1d2730; }
 .logbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .logbar .search { min-width: 160px; }
 .logbar .date { width: 140px; }
-tr.confirmed td { color: #7ed492; }
 .confirm-dot { color: var(--ok); font-weight: 700; }
-.import-progress { color: var(--accent); font-weight: 600; }
-.import-done { color: var(--ok); font-weight: 600; }
-.import-error { color: var(--tx); font-weight: 600; }
 
 /* Logbook table: sortable headers, status pill + sync chips, QSL marks. */
 /* Fixed row height, enforced here rather than left to content: the Logbook
    table is virtualized (see LogScreen in App.tsx) and the windowing math
    needs an exact, known row height to compute scroll offsets and spacers. */
 .qso-table tbody tr { height: 26px; }
+/* Headers stack onto two lines on an explicit \n in the label (not ordinary
+   word-wrap, which would break at an unpredictable width) -- narrower
+   columns for the wide ones (Freq MHz, RST Sent/Rcvd), freeing up width for
+   the rest of the table. Data cells stay single-line (base `td` rule). */
+.qso-table th { white-space: pre-line; line-height: 1.25; }
 .qso-table th.sortable { cursor: pointer; user-select: none; }
 .qso-table th.sortable:hover { color: var(--text); }
-.qso-table th.sorted { color: var(--accent); background: rgba(78,161,255,0.12); }
+.qso-table th.sorted {
+  color: var(--yellow); background: rgba(255,193,7,0.16); font-weight: 700;
+}
 .qso-table .call-cell { font-weight: 700; color: var(--accent); }
 .qso-table .status-cell, .qso-table .qsl-cell {
   white-space: nowrap; display: flex; align-items: center; gap: 4px;
@@ -175,12 +179,6 @@ tr.confirmed td { color: #7ed492; }
   font-size: 10px; font-weight: 700; letter-spacing: 0.3px;
 }
 .status-pill.conf { background: rgba(63,174,106,0.18); color: var(--ok); }
-.status-pill.worked { background: rgba(78,161,255,0.16); color: var(--accent); }
-.sync-chip {
-  display: inline-block; padding: 1px 5px; border-radius: 6px; font-size: 9.5px;
-  font-weight: 700; background: rgba(78,161,255,0.12); color: var(--accent);
-  border: 1px solid rgba(78,161,255,0.3);
-}
 .qsl-mark { font-size: 10.5px; font-weight: 600; }
 .qsl-mark.rcvd { color: var(--ok); }
 .qsl-mark.sent { color: var(--accent); }
@@ -205,3 +203,18 @@ tr.confirmed td { color: #7ed492; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .modal .check { display: flex; align-items: center; gap: 6px; }
 .modal .check input { width: auto; }
+
+.import-dialog h3 { text-transform: uppercase; letter-spacing: 0.5px; }
+.import-dialog .bar {
+  width: 100%; height: 8px; background: var(--panel-2); border-radius: 4px;
+  overflow: hidden; margin-bottom: 10px;
+}
+.import-dialog .bar > div { height: 100%; background: var(--accent); transition: width 0.15s linear; }
+.import-dialog .count { color: var(--text); margin-bottom: 12px; font-variant-numeric: tabular-nums; }
+.import-dialog .working {
+  background: var(--panel-2); border-radius: 6px; padding: 10px; text-align: center;
+  font-weight: 700; color: var(--muted);
+}
+.import-dialog .import-summary { margin-bottom: 14px; line-height: 1.8; }
+.import-dialog .import-summary.error { color: var(--tx); line-height: 1.4; }
+.import-dialog button.import-done { width: 100%; }

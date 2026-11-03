@@ -324,12 +324,37 @@ for the Hamlib version workaround needed there.
   duplicate match upgrades a generic MODE to the specific submode and
   TIME_ON to whichever side is more precise (HHMM vs HHMMSS) if the other
   side has it, same "only ever add, never remove" rule as the QSL flags.
+- **LoTW-copy merge on import** (`Db::find_lotw_twin_locked`/`merge_matched_qso`
+  in `db.rs`), ported from the Android fix above: a LoTW-style record (no
+  report, `TIME_OFF` = `TIME_ON` to the minute — desktop's "no report" is a
+  genuinely empty `RST_RCVD`, not Android's literal `-120`/`-100` sentinel,
+  since that's what a real QRZ.com export actually does) that misses the
+  ordinary exact-minute match instead looks for a same call/date/band/mode
+  row within 15 minutes of the *opposite* LoTW-style-ness, nearest wins. A
+  match fills the stored row's time/reports/frequency/grid from whichever
+  side is the full record — a LoTW-style copy's `RST_SENT` can never
+  overwrite a real stored report, the same regression Android fixed in
+  `d82697f8`. Verified against the user's real files (byte-for-byte the
+  files Android was verified against): **45,712** final rows against
+  Android's validated **45,615** — the ~97 difference matches the same
+  known "band/mode-altered copies don't merge" gap Android flagged, not a
+  new bug. A new index (`qso_log_lotw_twin_idx`, schema v6) backs the twin
+  lookup; importing a large file against an already-large log is still
+  slower than a fresh import (confirmed: ~97s for the ~54,500-record QRZ.com
+  file against an already-imported ~45,600-row log, dominated by per-record
+  SQL statement overhead, not a missing index) — the live progress counter
+  keeps this visibly moving rather than looking frozen, same as before.
 - **Logbook table**: ported the table format above — sortable Date/Time/
-  Call/Grid/State/Freq/Mode/RST Sent/RST Rcvd/Status/QSL columns, the CONF/
-  WORKED status pill, CL/QRZ sync chips, and the four-mark QSL column
-  (L/E/P/Q). Schema gained per-service QSL tracking and logged STATE/COUNTRY
-  to back it. **Known gap**: State only shows what was explicitly logged or
-  imported — no grid→state lookup like Android's `UsStateLookup` yet.
+  Call/Grid/State/Freq/Mode/RST Sent/RST Rcvd/Status/QSL columns and the
+  four-mark QSL column (L/E/P/Q). Schema gained per-service QSL tracking and
+  logged STATE/COUNTRY to back it. Status pill matches the user's decision
+  above: **CONF only for LoTW or QRZ.com confirmed, otherwise blank** — no
+  WORKED tier, no upload-service chips in this cell (the QSL column already
+  shows which service confirmed it). RST shows blank (not a literal
+  `-120`/`-100`) for a "no report" value and sorts such rows last
+  (`displayReport`, `isNoReport` in `logbook.ts`). **Known gap**: State only
+  shows what was explicitly logged or imported — no grid→state lookup like
+  Android's `UsStateLookup` yet.
 - **Logbook table rendering**, confirmed necessary at this log's real size:
   removed the artificial 500-row fetch cap (sorting a capped,
   insertion-ordered window silently sorted the wrong thing once the log
@@ -337,8 +362,46 @@ for the Hamlib version workaround needed there.
   the whole table on every unrelated re-render) and real row virtualization
   (`computeVirtualWindow`) — rendering all ~54,500 rows as real `<tr>`s with
   no windowing pinned the webview's renderer at 100% CPU indefinitely.
-- **Open items**: no grid-to-state/country lookup (see above); no map, POTA,
-  QRZ photos, Bluetooth, or PSKReporter yet (desktop README).
+- **Import dialogs**, matching the Android app's own popups exactly (the
+  user supplied screenshots of both): a modal "Importing ADIF log…" dialog
+  with a progress bar and live "N of M records" count while running, and a
+  modal "Import complete" dialog with Added/Updated/Skipped lines and a
+  "Done" button, replacing the earlier inline one-line banner.
+- **Table layout bug, status/QSL columns**: `display: flex` had been set
+  directly on the `<td>` elements for the Status and QSL cells, which
+  overrides their implicit `display: table-cell` and pulls them out of the
+  table's column grid entirely in WebKit — the QSL marks visually rendered
+  stacked under the Status column instead of their own. Fixed by moving
+  `display: flex` to an inner wrapper `<div>`, leaving the `<td>` itself as a
+  normal table cell.
+- **Column header polish**: Freq/RST Sent/RST Rcvd headers stack onto two
+  lines (`white-space: pre-line`, an explicit `\n` in the label — not
+  ordinary word-wrap, which breaks at an unpredictable width) to free up
+  table width; the active sort column's header is yellow, not blue; a
+  confirmed QSO's row is no longer tinted — only the Status pill and QSL
+  checkmark carry the green, matching Android (the user's reference
+  screenshot showed call/grid/etc. in their normal colors regardless of
+  confirmation).
+- **Stale on-disk CSS, a real gotcha for this dev machine specifically**: the
+  app's customization-preserving `styles.css` (in `app_data_dir()`, see
+  `resolve_styles` in `main.rs`) predated the stamping mechanism that
+  protects genuine hand-edits, so it was never recognized as safe to refresh
+  — every CSS-only change this session was silently invisible until the
+  stale file was manually cleared. The stamping logic itself is intentional
+  and unchanged (tested, protects real user edits); this was a one-time
+  migration gap on a file older than the feature.
+- **Waterfall**: a white frequency scale (0/500/.../3500 Hz, `WaterfallScale`)
+  above the canvas, aligned with the same hz-to-pixel fraction the canvas
+  and TX marker already use; a white HH:MM:SS label (current slot's start
+  time, from the existing `cycle` tick) overlaid at the top-left, in the
+  same position each new 15 s boundary line appears; display width reduced
+  to 50% of the window (the scale ruler shrinks with it, staying aligned).
+- **Open items**: no grid-to-state/country lookup (see above); the ~97s
+  large-import-against-a-large-log case could be faster still by caching
+  prepared statements across the import loop instead of re-preparing per
+  record (not done); the same small (~48-record) band/mode-altered-copy gap
+  Android flagged; no map, POTA, QRZ photos, Bluetooth, or PSKReporter yet
+  (desktop README).
 
 ## Smaller fixes
 
