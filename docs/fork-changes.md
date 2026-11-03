@@ -261,6 +261,19 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   another band = one QSO with a wrong band). The three pairs this caused on
   the test phones were merged on 2026-11-01 (pre-merge copies in
   `Documents\FT8AF-db-backups`). (`DatabaseOpr.checkIsQSL`)
+- **LoTW-sourced copies merge into their QSO** (2026-11-03). QRZ.com keeps
+  many QSOs twice: the full record and a copy added from LoTW (no
+  RST_RCVD, usually no FREQ, TIME_OFF = TIME_ON, a few minutes off) — ~7,400
+  on the AI5II log. A copy joins the full record with the same call, date,
+  band and mode within 15 minutes, in either import order: its confirmations
+  carry over, and a full record arriving later fills in the copy's times,
+  frequency, reports and empty grid. A copy's RST_SENT (really the report
+  received) never overwrites a stored report. A LoTW-only QSO with no full
+  record (e.g. UT5MB 2024-06-07) stays a QSO of its own. The logbook shows
+  the "no report" values −120 / −100 blank. (`checkIsQSL`, `matchLotwTwin`)
+- **Import commits in batches** of 200 QSOs (yielding the database to the UI
+  when it waits), instead of one flash write per statement: minutes became
+  much faster on the phones. The file is streamed one record at a time.
 - **Mode is not compared either** (2026-11-02, made on the Quadra with the
   desktop fix, built and tested on Windows). A log re-exported by one
   program can carry FT8/FT4 as generic `MFSK` with no `SUBMODE`, while a
@@ -364,6 +377,12 @@ for the Hamlib version workaround needed there.
   Motorola flags: LoTW sent 52,902 / rcvd 40,931, eQSL sent 52,937 / rcvd
   30,753, QRZ confirmed 47,336, COUNTRY on every row, STATE on 45,543.
   Pre-wipe databases: `Documents\FT8AF-db-backups\*-20261102-before-log-wipe.db`.
+  With the LoTW-copy merge (2026-11-03) the QRZ.com export alone gives
+  45,567 QSOs (no exact duplicates, QRZ confirmations unchanged). Backups
+  before that re-import: `*-before-lotw-twin-reimport.db`.
+- **Logbook table sort/search** run off the main thread with keys computed
+  once per record; sorting 52,951 QSOs by RST on the main thread had given
+  "FT8AF isn't responding".
 
 ## Open items
 
@@ -375,14 +394,31 @@ for the Hamlib version workaround needed there.
 - Other `ToastMessage` notices (e.g. late start) still go only to the debug
   list, which the Compose UI doesn't show.
 - The voice-command mic button covers the QSO sheet's close button.
-- **5,204 near-duplicate QSOs in the source logs.** Same call, date, band
-  and mode with TIME_ON 1–2 minutes apart, mostly 2015–2022. The second copy
-  has no FREQ, `TIME_ON` = `TIME_OFF`, RST 599 / no report received, and was
-  uploaded to QRZ.com around May 2022. They are in the QRZ.com and CQRLOG
-  exports themselves, so the import (and the desktop) keeps them. Not decided
-  yet: leave them, merge them on import, or clean them up at the source.
-- **Android ADIF import is slow** (many minutes for ~53k QSOs, slower on a
-  busy phone): each QSO is several separately committed writes. Committing
-  in batches of ~500–1,000 (as the desktop now does in one transaction) would
-  make it seconds. Also check that the 82 MB QRZ.com export isn't read into
-  memory whole.
+- **Desktop import needs the LoTW-copy merge** (Android `d4f3796d` /
+  `d82697f8`), or its count stays ~7,400 above the phones'.
+
+### Future enhancements: logbook import/export
+
+Wanted, not started (2026-11-03). AI5II's setup: QRZ.com is the master log
+(it only imports LoTW confirmations and won't delete confirmed QSOs); CQRLOG
+on the Quadra exchanges with LoTW, eQSL, HamQTH, ClubLog and HRDLog.net.
+
+- **eQSL upload and download.** Upload each logged QSO to eQSL (ADIF posted
+  to eQSL's import page, as the QRZ upload works) with a catch-up "send all
+  not sent", and download the eQSL inbox to mark QSOs eQSL-received (like
+  the LoTW confirmations download; never adds QSOs). Settings → Logging
+  section with login / QTH nickname. Decide first which program uploads
+  FT8AF's QSOs, since CQRLOG already does.
+- **LoTW report reconciliation.** LoTW holds 82,597 QSO records and 39,300
+  QSLs for ~45,500 real QSOs. Read the LoTW report ADIF (never import it into
+  the logbook: no TIME_OFF, so the copy merge wouldn't catch it) to count
+  duplicate uploads, match each confirmation to a QSO, and use each record's
+  upload date (`APP_LoTW_RXQSO`) to judge LoTW-only QSOs such as UT5MB.
+- **Suspect LoTW-only QSOs.** From the QRZ export: 108 LoTW-style records
+  confirmed only after our own (re-)upload (e.g. N8KYX, K6HN, sent May 2022,
+  matched 2026), and 1,394 uploaded but never matched. Review list, not
+  automatic deletion.
+- **Optional CQRLOG cleanup** on the Quadra: back up, move each copy's
+  confirmations onto its full record, delete only copies that have one
+  (never standalone LoTW QSOs), then export a clean ADIF (e.g. for a new
+  QRZ.com logbook).
