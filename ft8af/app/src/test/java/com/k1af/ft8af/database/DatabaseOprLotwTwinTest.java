@@ -72,8 +72,20 @@ public class DatabaseOprLotwTwinTest {
 
         assertThat(rows("K3JOS")).isEqualTo(1);
         assertThat(field("K3JOS", "time_on")).isEqualTo("0113");
+        // The copy's RST_SENT (-21, really the report received) must not overwrite ours.
+        assertThat(field("K3JOS", "rst_sent")).isEqualTo("-06");
         assertThat(field("K3JOS", "rst_rcvd")).isEqualTo("-21");
         assertThat(field("K3JOS", "isLotW_QSL")).isEqualTo("1");
+    }
+
+    @Test
+    public void lotwCopyInTheSameMinute_keepsTheFullRecordsReports() {
+        opr.doInsertQSLData(k3josFull(), null, false);
+        opr.doInsertQSLData(adif("CALL", "K3JOS", "QSO_DATE", "20190617", "TIME_ON", "0113",
+                "TIME_OFF", "0113", "BAND", "40m", "MODE", "FT8", "RST_SENT", "-21"), null, false);
+
+        assertThat(rows("K3JOS")).isEqualTo(1);
+        assertThat(field("K3JOS", "rst_sent")).isEqualTo("-06");
     }
 
     @Test

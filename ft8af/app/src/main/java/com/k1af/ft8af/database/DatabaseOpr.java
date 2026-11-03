@@ -1952,6 +1952,8 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         }
 
 
+        // Fork: decided before checkIsQSL, which can move the record onto its twin's time.
+        boolean incomingLotw = isLotwStyle(record);
         if (!checkIsQSL(record)) {//If log data doesn't exist, add it
             fillPlace(record);
             querySQL = "INSERT INTO QSLTable(call, isQSL,isLotW_import,isLotW_QSL,gridsquare, mode, rst_sent, rst_rcvd, qso_date, " +
@@ -2086,7 +2088,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                                 , record.getTime_on()
                                 , record.getMode()});
             }
-            if (record.getSendReport() > -100) {
+            // A LoTW-style record's RST_SENT is the other station's report (LoTW keeps
+            // none), so it never overwrites the stored reports (fork).
+            if (record.getSendReport() > -100 && !incomingLotw) {
                 db.execSQL("UPDATE  QSLTable  SET rst_sent=? " +
                                 " WHERE (call=?) and (qso_date=?) and(time_on=?) and(mode=?)"
                         , new Object[]{AdifFormat.formatReport(record.getMode(), record.getSendReport()), record.getToCallsign()
