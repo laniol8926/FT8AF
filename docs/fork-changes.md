@@ -408,7 +408,11 @@ on the Quadra exchanges with LoTW, eQSL, HamQTH, ClubLog and HRDLog.net.
   not sent", and download the eQSL inbox to mark QSOs eQSL-received (like
   the LoTW confirmations download; never adds QSOs). Settings → Logging
   section with login / QTH nickname. Decide first which program uploads
-  FT8AF's QSOs, since CQRLOG already does.
+  FT8AF's QSOs, since CQRLOG already does. Offline / site down: use the
+  mechanism QRZ, Cloudlog and WRL already have — a per-QSO sent flag
+  (`eqsl_sent` exists, schema v25), `QsoAutoSync` sending everything not yet
+  sent at app start and when the network returns (15 s debounce), and the
+  Logbook header's catch-up sync button for "send all not sent".
 - **LoTW report reconciliation.** LoTW holds 82,597 QSO records and 39,300
   QSLs for ~45,500 real QSOs. Read the LoTW report ADIF (never import it into
   the logbook: no TIME_OFF, so the copy merge wouldn't catch it) to count
