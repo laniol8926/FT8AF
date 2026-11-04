@@ -62,8 +62,15 @@ const LOG_FETCH_ALL = Number.MAX_SAFE_INTEGER;
 const GAIN_DEBOUNCE_MS = 120;
 
 // The live waterfall draws imperatively to a canvas (registered by WaterfallView)
-// so per-row spectrum events never go through React state.
-const WF_HEIGHT = 160;
+// so per-row spectrum events never go through React state. Backing-buffer
+// height, in rows -- one row is emitted per ~100ms tick (see engine.rs's
+// emit_waterfall_row), so a 15s FT8 cycle is ~150 rows (plus the boundary
+// band's extra few px once per cycle). 500 rows keeps at least 3 full cycles
+// of history visible before the oldest row scrolls off (the previous 160
+// barely held one cycle). The canvas's on-screen CSS size is independent of
+// this (it fills its panel -- see WaterfallView), so a taller buffer just
+// packs more history into the same screen space.
+const WF_HEIGHT = 500;
 const WF_TICK_STEP_HZ = 500;
 // Top of the displayed audio band; matches the backend's WF_MAX_HZ.
 const WF_TOP_HZ = 3500;
@@ -136,6 +143,17 @@ export default function App() {
   const [rigLabel, setRigLabel] = useState(""); // optional display-name override
   const [bands, setBands] = useState<BandInfo[]>([]);
   const [dialHz, setDialHz] = useState<number>(14074000);
+  // Calls already worked on the current band (upper-cased), for the Decode
+  // list's worked-station strikethrough. Desktop only ever logs "FT8" today
+  // (see qso.rs), so that's the only mode checked for now.
+  const [workedCalls, setWorkedCalls] = useState<Set<string>>(new Set());
+
+  function refreshWorkedCalls() {
+    api.workedCalls("FT8").then((calls) => setWorkedCalls(new Set(calls)));
+  }
+  // Re-fetch whenever the tuned band changes -- "worked" is always
+  // relative to the band currently being operated.
+  useEffect(refreshWorkedCalls, [dialHz]);
 
   // keep latest decoding flag for the toggle without stale closure
   const decodingRef = useRef(decoding);
@@ -250,6 +268,7 @@ export default function App() {
         break;
       case "qso_completed":
         setStatus(`QSO logged: ${e.data.call} ${e.data.rst_sent}/${e.data.rst_rcvd}`);
+        refreshWorkedCalls();
         break;
       case "info":
         setStatus(e.data);
@@ -312,6 +331,7 @@ export default function App() {
             messages={visible}
             filter={filter}
             setFilter={setFilter}
+            workedCalls={workedCalls}
             txFreq={txFreq}
             onSelectFreq={(hz) => {
               setTxFreq(hz);
@@ -344,6 +364,7 @@ export default function App() {
         onCq={() => api.startCq()}
         onStage={(s) => api.setStage(s)}
         onStop={() => api.stopTx()}
+        onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
       />
       <div className="status-line">{status}</div>
     </>
@@ -525,12 +546,21 @@ function WaterfallView({
 
   return (
     <div
-      // Half the window width, per the user's explicit request -- the scale
-      // ruler and the TX marker below are positioned as percentages of this
-      // same box, so they stay aligned at any width. The slot-time label is
-      // baked into the canvas itself (drawWaterfallRow), not a DOM overlay
-      // here -- it needs to scroll down with its own boundary line.
-      style={{ position: "relative", width: "50%", marginBottom: 8, cursor: "crosshair" }}
+      // Fills its parent (`.decode-waterfall`, itself 50% of the window --
+      // see DecodeScreen's left/right split), both horizontally and now
+      // vertically too: the canvas flex-grows to the full panel height
+      // (its backing pixel buffer stays WF_HEIGHT rows -- only the CSS
+      // display size changes, so the canvas just scales up like any other
+      // image). The scale ruler and the TX marker below are positioned as
+      // percentages of this same box, so they stay aligned at any size. The
+      // slot-time label is baked into the canvas itself (drawWaterfallRow),
+      // not a DOM overlay here -- it needs to scroll down with its own
+      // boundary line.
+      style={{
+        position: "relative", width: "100%", height: "100%",
+        display: "flex", flexDirection: "column",
+        marginBottom: 8, cursor: "crosshair",
+      }}
       onClick={handleClick}
       title="Click to set TX frequency"
     >
@@ -539,7 +569,8 @@ function WaterfallView({
         ref={ref}
         style={{
           width: "100%",
-          height: WF_HEIGHT,
+          flex: "1 1 auto",
+          minHeight: 0,
           imageRendering: "pixelated",
           background: "#000",
           borderRadius: 6,
@@ -589,16 +620,19 @@ function DecodeScreen(props: {
   messages: UiMessage[];
   filter: Filter;
   setFilter: (f: Filter) => void;
+  workedCalls: Set<string>;
   txFreq: number;
   onSelectFreq: (hz: number) => void;
   onAnswer: (m: UiMessage) => void;
   inputGain: number;
   onInputGain: (v: number) => void;
 }) {
-  const { messages, filter, setFilter, txFreq, onSelectFreq, onAnswer, inputGain, onInputGain } = props;
+  const { messages, filter, setFilter, workedCalls, txFreq, onSelectFreq, onAnswer, inputGain, onInputGain } = props;
   return (
     <>
-      <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} />
+      {/* Full-width, above the split: keeps the table and the waterfall
+          starting at the same height below it (the waterfall used to start
+          flush with this row instead of with the table). */}
       <div className="chips">
         {(["all", "cq", "tome"] as Filter[]).map((f) => (
           <div key={f} className={"chip" + (filter === f ? " active" : "")} onClick={() => setFilter(f)}>
@@ -626,26 +660,30 @@ function DecodeScreen(props: {
           </span>
         </span>
       </div>
+      <div className="decode-split">
+      <div className="decode-detail">
       <div className="decode-list">
       <table>
         <thead>
           <tr>
-            <th>UTC</th>
+            <th className="msg-col">Message</th>
             <th>dB</th>
-            <th>DT</th>
             <th>Hz</th>
-            <th>Message</th>
-            <th></th>
+            <th>DT</th>
+            <th>Status</th>
           </tr>
         </thead>
         <tbody>
           {messages.map((m, i) => {
-            const newBlock = i > 0 && messages[i - 1].utc_ms !== m.utc_ms;
+            // i === 0 also starts a new block: messages are prepended newest-first,
+            // so the current decode period is always at the top of the list, and
+            // Android always shows that period's header there too.
+            const newBlock = i === 0 || messages[i - 1].utc_ms !== m.utc_ms;
             return (
               <Fragment key={i}>
                 {newBlock && (
                   <tr className="time-sep">
-                    <td colSpan={6}>{new Date(m.utc_ms).toISOString().substring(11, 19)} UTC</td>
+                    <td colSpan={5}>{new Date(m.utc_ms).toISOString().substring(11, 19)} UTC</td>
                   </tr>
                 )}
                 <tr
@@ -657,25 +695,34 @@ function DecodeScreen(props: {
                   onClick={() => (m.is_cq || m.to_me) && onAnswer(m)}
                   title={m.is_cq || m.to_me ? "Click to answer" : ""}
                 >
-                  <td>{new Date(m.utc_ms).toISOString().substring(11, 19)}</td>
+                  <td className={"msg-col" + (workedCalls.has(m.call_from.toUpperCase()) ? " worked" : "")}>
+                    {m.text}
+                  </td>
                   <td>{m.snr}</td>
-                  <td>{m.time_sec.toFixed(1)}</td>
                   <td>{Math.round(m.freq_hz)}</td>
-                  <td>{m.text}</td>
-                  <td>{m.is_cq || m.to_me ? "↩ answer" : ""}</td>
+                  <td>{m.time_sec.toFixed(1)}</td>
+                  {/* New-DXCC/zone status pill needs more than a worked-call lookup
+                      (country/zone data per call) -- not yet wired up, reserved for
+                      a later increment. */}
+                  <td></td>
                 </tr>
               </Fragment>
             );
           })}
           {messages.length === 0 && (
             <tr>
-              <td colSpan={6} className="muted">
+              <td colSpan={5} className="muted">
                 No decodes yet — set your callsign in Settings, pick an audio input, and Start decode.
               </td>
             </tr>
           )}
         </tbody>
       </table>
+      </div>
+      </div>
+      <div className="decode-waterfall">
+        <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} />
+      </div>
       </div>
     </>
   );
@@ -1515,6 +1562,19 @@ function SettingsScreen(props: {
       <div className="panel">
         <h3>Audio</h3>
         <div className="col">
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="muted" style={{ fontSize: 12 }}>
+              Plugged in a device after opening Settings? Re-scan below.
+            </span>
+            <button
+              onClick={() => {
+                api.listAudioInputs().then(setInputs);
+                api.listAudioOutputs().then(setOutputs);
+              }}
+            >
+              ↻ Refresh audio devices
+            </button>
+          </div>
           <div className="field">
             <label>Input device (RX)</label>
             <select
@@ -1888,9 +1948,11 @@ function TxBar(props: {
   onCq: () => void;
   onStage: (s: TxStage) => void;
   onStop: () => void;
+  onToggleTune: () => void;
 }) {
-  const { txState, decoding, onCq, onStage, onStop } = props;
+  const { txState, decoding, onCq, onStage, onStop, onToggleTune } = props;
   const tx = txState?.transmitting;
+  const tuning = txState?.tuning ?? false;
   const stage = txState?.status.stage ?? "idle";
   const target = txState?.status.target ?? null;
   // Outside a QSO the auto-sequencer stage is "idle", which reads as "nothing
@@ -1903,12 +1965,20 @@ function TxBar(props: {
       {target && <span className="muted">→ {target}</span>}
       <span className="msg">{txState?.message ?? ""}</span>
       <div className="spacer" style={{ flex: 1 }} />
+      <button
+        className={"tune-toggle" + (tuning ? " active" : "")}
+        disabled={!tuning && tx}
+        title="Transmit a steady carrier to tune the antenna, without calling CQ"
+        onClick={onToggleTune}
+      >
+        Tune
+      </button>
       <div className="stage-picker" title={target ? "" : "Pick a station first"}>
         {TX_STAGES.map((s) => (
           <button
             key={s.stage}
             className={stage === s.stage ? "active" : ""}
-            disabled={!target}
+            disabled={!target || tuning}
             title={s.title}
             onClick={() => onStage(s.stage)}
           >
@@ -1916,7 +1986,7 @@ function TxBar(props: {
           </button>
         ))}
       </div>
-      <button className="primary" onClick={onCq}>Call CQ</button>
+      <button className="primary" onClick={onCq} disabled={tuning}>Call CQ</button>
       <button className="danger" onClick={onStop}>Stop TX</button>
     </div>
   );

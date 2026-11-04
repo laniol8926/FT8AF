@@ -13,6 +13,11 @@
 //! simply dropped to stop audio immediately (dropping the stream halts the cpal
 //! callback). The `cpal::Stream` is `!Send` on Windows, so the handle must live
 //! on the thread that created it (the engine thread).
+//!
+//! [`prepare_tune`]/[`TunePlayback`] are the simpler sibling for TUNE: no FT8
+//! waveform, no two-phase split (nothing expensive to hide before PTT) --
+//! just a looping steady tone, built and started in one call, stopped by
+//! dropping the handle.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -110,14 +115,39 @@ fn apply_gain_and_clip(data: &mut [f32], gain: f32) {
     }
 }
 
+/// Write one output frame (one sample per channel) from a mono `sample`.
+///
+/// When `left_channel_only` is false (the historical default), the same
+/// sample fans out to every channel. When true -- needed to fully drive the
+/// QRP Labs QMX's modulator, see [`crate::rig::needs_left_channel_tx_audio`]
+/// -- only channel 0 carries the signal and every other channel is silenced,
+/// instead of leaving the mono-to-stereo upmix to the USB Audio Class device.
+/// A mono (`frame.len() == 1`) device has no second channel to silence, so
+/// the flag has no effect there.
+fn write_frame<T: SizedSample + FromSample<f32>>(frame: &mut [T], sample: f32, left_channel_only: bool) {
+    if left_channel_only && frame.len() > 1 {
+        frame[0] = T::from_sample(sample);
+        for s in &mut frame[1..] {
+            *s = T::from_sample(0.0f32);
+        }
+    } else {
+        let v = T::from_sample(sample);
+        for s in frame.iter_mut() {
+            *s = v;
+        }
+    }
+}
+
 /// Render a 12 kHz mono buffer for `device_name`, applying `gain`, and build the
 /// (paused) output stream. Does NOT key audio — call [`PreparedTx::start`] to
 /// begin. This is the slow phase (device open + full-buffer resample); run it
-/// before raising PTT.
+/// before raising PTT. `left_channel_only` confines the signal to channel 0 on
+/// a multi-channel device (see [`write_frame`]).
 pub fn prepare(
     device_name: Option<&str>,
     samples_12k: &[f32],
     gain: f32,
+    left_channel_only: bool,
 ) -> anyhow::Result<PreparedTx> {
     let device = find_output_device(device_name)
         .ok_or_else(|| anyhow::anyhow!("no output audio device available"))?;
@@ -138,9 +168,9 @@ pub fn prepare(
     let err_fn = |e| log::error!("audio output stream error: {e}");
 
     let stream = match sample_format {
-        SampleFormat::F32 => build_output::<f32>(&device, &config, channels, &buffer, &cursor, &done, &abort, err_fn)?,
-        SampleFormat::I16 => build_output::<i16>(&device, &config, channels, &buffer, &cursor, &done, &abort, err_fn)?,
-        SampleFormat::U16 => build_output::<u16>(&device, &config, channels, &buffer, &cursor, &done, &abort, err_fn)?,
+        SampleFormat::F32 => build_output::<f32>(&device, &config, channels, &buffer, &cursor, &done, &abort, left_channel_only, err_fn)?,
+        SampleFormat::I16 => build_output::<i16>(&device, &config, channels, &buffer, &cursor, &done, &abort, left_channel_only, err_fn)?,
+        SampleFormat::U16 => build_output::<u16>(&device, &config, channels, &buffer, &cursor, &done, &abort, left_channel_only, err_fn)?,
         other => anyhow::bail!("unsupported output sample format: {other:?}"),
     };
 
@@ -164,6 +194,7 @@ fn build_output<T>(
     cursor: &Arc<AtomicUsize>,
     done: &Arc<AtomicBool>,
     abort: &Arc<AtomicBool>,
+    left_channel_only: bool,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> anyhow::Result<cpal::Stream>
 where
@@ -191,10 +222,102 @@ where
                     done.store(true, Ordering::Relaxed);
                     0.0
                 };
-                let v = T::from_sample(sample);
-                for s in frame.iter_mut() {
-                    *s = v;
-                }
+                write_frame(frame, sample, left_channel_only);
+            }
+        },
+        err_fn,
+        None,
+    )?;
+    Ok(stream)
+}
+
+/// A live TUNE transmission: a steady tone looped indefinitely until this
+/// handle is dropped, which halts the cpal stream immediately (the same way
+/// dropping a [`PreparedTx`] does). No `is_done`/`abort`/timeout here --
+/// unlike a normal over there's nothing to finish or get stuck on; the
+/// operator (or the engine's `finalize_tx`) decides when to stop.
+pub struct TunePlayback {
+    _stream: cpal::Stream,
+}
+
+/// Build and immediately start a continuous steady-tone output stream at
+/// `tone_hz`, for antenna tuning (no FT8 message, no auto-release).
+/// `gain`/`left_channel_only` mirror [`prepare`]'s. Synthesized directly at
+/// the device's own sample rate -- no resampling, unlike the FT8 waveform
+/// path, since there's no fixed-rate source to match -- and trimmed to a
+/// whole number of tone cycles so the loop point has no phase discontinuity
+/// (an audible click every wrap otherwise).
+pub fn prepare_tune(
+    device_name: Option<&str>,
+    tone_hz: f32,
+    gain: f32,
+    left_channel_only: bool,
+) -> anyhow::Result<TunePlayback> {
+    let device = find_output_device(device_name)
+        .ok_or_else(|| anyhow::anyhow!("no output audio device available"))?;
+    let supported = device.default_output_config()?;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.config();
+    let channels = config.channels as usize;
+    let device_rate = config.sample_rate.0;
+
+    let mut data = tune_loop_buffer(tone_hz.max(1.0), device_rate);
+    apply_gain_and_clip(&mut data, gain);
+    let buffer = Arc::new(data);
+    let cursor = Arc::new(AtomicUsize::new(0));
+
+    let err_fn = |e| log::error!("audio output stream error: {e}");
+    let stream = match sample_format {
+        SampleFormat::F32 => {
+            build_tune_output::<f32>(&device, &config, channels, &buffer, &cursor, left_channel_only, err_fn)?
+        }
+        SampleFormat::I16 => {
+            build_tune_output::<i16>(&device, &config, channels, &buffer, &cursor, left_channel_only, err_fn)?
+        }
+        SampleFormat::U16 => {
+            build_tune_output::<u16>(&device, &config, channels, &buffer, &cursor, left_channel_only, err_fn)?
+        }
+        other => anyhow::bail!("unsupported output sample format: {other:?}"),
+    };
+    stream.play()?;
+    Ok(TunePlayback { _stream: stream })
+}
+
+/// A buffer of whole tone cycles at `device_rate`, ~100 ms long: it loops
+/// smoothly because it holds an exact integer number of periods of
+/// `tone_hz`, so the sample at the end flows straight into the sample at the
+/// start with no phase jump.
+fn tune_loop_buffer(tone_hz: f32, device_rate: u32) -> Vec<f32> {
+    let target_cycles = (tone_hz * 0.1).round().max(1.0);
+    let n = ((target_cycles / tone_hz) * device_rate as f32).round().max(1.0) as usize;
+    (0..n)
+        .map(|i| (2.0 * std::f32::consts::PI * tone_hz * i as f32 / device_rate as f32).sin())
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_tune_output<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    buffer: &Arc<Vec<f32>>,
+    cursor: &Arc<AtomicUsize>,
+    left_channel_only: bool,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> anyhow::Result<cpal::Stream>
+where
+    T: SizedSample + FromSample<f32>,
+{
+    let buffer = buffer.clone();
+    let cursor = cursor.clone();
+    let stream = device.build_output_stream(
+        config,
+        move |out: &mut [T], _| {
+            for frame in out.chunks_mut(channels) {
+                let idx = cursor.load(Ordering::Relaxed);
+                let sample = buffer[idx];
+                cursor.store((idx + 1) % buffer.len(), Ordering::Relaxed);
+                write_frame(frame, sample, left_channel_only);
             }
         },
         err_fn,
@@ -206,6 +329,55 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tune_loop_buffer_holds_a_whole_number_of_cycles() {
+        // The load-bearing property: a seamless loop needs the buffer to end
+        // exactly where a fresh cycle would start, i.e. its length in
+        // samples divided by the samples-per-cycle is (very nearly) a whole
+        // number -- any fractional remainder is where an audible click would
+        // come from.
+        for &(tone_hz, device_rate) in &[(1500.0f32, 48_000u32), (200.0, 44_100), (2900.0, 48_000)] {
+            let buf = tune_loop_buffer(tone_hz, device_rate);
+            let samples_per_cycle = device_rate as f32 / tone_hz;
+            let cycles = buf.len() as f32 / samples_per_cycle;
+            assert!(
+                (cycles - cycles.round()).abs() < 1e-3,
+                "tone_hz={tone_hz} device_rate={device_rate}: {} buffered samples is {cycles} cycles, not a whole number",
+                buf.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn tune_loop_buffer_is_never_empty() {
+        // A zero-length buffer would make the cpal callback's `% buffer.len()`
+        // divide by zero -- even a pathologically low tone must still
+        // produce at least one sample.
+        assert!(!tune_loop_buffer(1.0, 8_000).is_empty());
+    }
+
+    #[test]
+    fn write_frame_fans_to_every_channel_by_default() {
+        let mut frame = [0.0f32, 0.0, 0.0];
+        write_frame(&mut frame, 0.5, false);
+        assert_eq!(frame, [0.5, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn write_frame_confines_to_left_channel_when_requested() {
+        let mut frame = [0.0f32, 0.0, 0.0];
+        write_frame(&mut frame, 0.5, true);
+        assert_eq!(frame, [0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn write_frame_left_channel_only_is_a_no_op_on_mono() {
+        // No second channel to silence -- behaves the same as the fan-out path.
+        let mut frame = [0.0f32];
+        write_frame(&mut frame, 0.5, true);
+        assert_eq!(frame, [0.5]);
+    }
 
     #[test]
     fn skip_cursor_converts_ms_to_device_samples() {

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::audio::{output, AudioInput, SlotAccumulator};
 use crate::bands;
 use crate::db::{Db, QsoRecord};
+use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
+use crate::qmx_cat_tones as cat_tones;
 use crate::qso::{QsoEngine, QsoOutcome, QsoStatus};
 use crate::rig::{RigConfig, RigConnection};
 use crate::util;
@@ -22,6 +24,12 @@ use crate::wf::{WfConfig, WfProcessor, WfWindow};
 const CYCLE_MS: i64 = 15_000;
 const TX_SLACK_MS: i64 = 2_360; // 12.64 s audio in a 15 s slot
 const PTT_DELAY_MS: u64 = 100;
+// Run-loop tick while a QMX CAT-tone transmission is in flight (see
+// `service_cat_tx`): short enough that each 160 ms-spaced symbol goes out
+// close to on time despite being polled rather than slept-to directly (no
+// separate timer thread touches the rig -- see CatToneTx's doc comment for
+// why), long enough not to burn the CPU busy-polling for ~12.64 s.
+const TX_CAT_TICK_MS: u64 = 10;
 // Latest point into the cycle we can still key up and have the full 12.64 s
 // waveform (plus the PTT lead) land before the next slot boundary. Start later
 // than this and the leading Costas array gets clipped — audible but undecodable.
@@ -127,6 +135,16 @@ fn tx_slot_eligible(
 /// [`Engine::pending_decodes`].
 fn awaiting_any_decode(pending_decodes: usize) -> bool {
     pending_decodes > 0
+}
+
+/// Whether the run loop should emit a new waterfall row this tick. The
+/// display freezes while transmitting (covers both the audio and CAT-tone TX
+/// paths, since both key `ptt`): during a CAT-tone over there's no audio
+/// signal at all to show, and during an audio over the mic/line input is
+/// usually TX leakage or silence either way, not anything useful to scroll
+/// into view.
+fn waterfall_row_due(decoding: bool, ptt: bool) -> bool {
+    decoding && !ptt
 }
 
 /// Whether the run loop should key a queued transmission at this tick. Unlike an
@@ -246,6 +264,12 @@ pub enum EngineCommand {
     /// Operator manually selects which QSO message to transmit next.
     SetStage(crate::qso::TxStage),
     StopTx,
+    /// Transmit a steady carrier at the TX offset for antenna tuning, with no
+    /// FT8 message involved — see [`Engine::start_tune`].
+    StartTune,
+    /// Stop an in-flight tune (or any other transmission — shares
+    /// [`Engine::finalize_tx`] with Stop TX).
+    StopTune,
     FreeText(String),
     /// Re-emit the current rig + TX status. Lets a freshly-loaded UI sync up with
     /// state set before its event listener existed (e.g. the startup auto-reconnect).
@@ -291,6 +315,9 @@ pub struct TxStateEvent {
     pub transmitting: bool,
     pub message: Option<String>,
     pub status: QsoStatus,
+    /// Whether a TUNE (steady carrier, no FT8 message) is in flight — see
+    /// [`Engine::start_tune`]. Drives the Tune button's on/off look.
+    pub tuning: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -390,6 +417,60 @@ pub fn spawn(db: Arc<Db>) -> (EngineHandle, Receiver<EngineEvent>) {
     (EngineHandle { tx: parking_lot::Mutex::new(cmd_tx) }, evt_rx)
 }
 
+/// An in-flight QMX CAT-tone transmission: the 79 FT8 channel symbols plus
+/// enough state to drive them out one `TA` command per symbol period,
+/// serviced by [`Engine::service_cat_tx`] from the run loop's own tick
+/// rather than a dedicated timer thread.
+///
+/// Why no separate thread (unlike the audio path's cpal stream, which does
+/// run on its own realtime thread): `Hamlib`'s `RIG*` and loaded function
+/// pointers are only ever touched from the engine thread (see the
+/// `unsafe impl Send for Hamlib` comment in rig.rs) -- nothing in rig.rs
+/// synchronizes concurrent access. Driving the CAT sends from a second
+/// thread would need `self.rig` behind a lock shared across threads, a much
+/// larger change for a feature whose timing tolerance doesn't actually need
+/// it: FT8 tone spacing is 6.25 Hz over a 160 ms symbol period, and a
+/// `TX_CAT_TICK_MS`-granularity poll keeps symbol lateness well under what
+/// meaningfully hurts decodability (Android's own sleep-and-spin
+/// implementation measured 0.3 ms worst case; polling at 10 ms trades a
+/// little of that precision for keeping the existing single-threaded-rig
+/// invariant intact).
+///
+/// `Copy` so `service_cat_tx` can take a plain owned local out of
+/// `Engine::tx_cat`, mutate it, and make `self.rig`/`self.emit` calls
+/// in between without fighting the borrow checker over a live reference
+/// into `self`.
+#[derive(Debug, Clone, Copy)]
+struct CatToneTx {
+    tones: [u8; encode::FT8_NN],
+    /// TX audio offset in Hz (`tx_audio_hz`, same number the audio path
+    /// centers its waveform on) -- tone 0's CAT frequency.
+    base_hz: f64,
+    /// When this transmission's clock reference started (right after PTT
+    /// settled) -- `Instant::now().elapsed()` since this maps directly to
+    /// symbol position, the same way the audio path treats "now" as the
+    /// start of whatever's left of the waveform after a late-start clip.
+    start: Instant,
+    /// Index of the next not-yet-sent symbol into `tones`.
+    sent_through: usize,
+    /// Symbols below this index were clipped by a late start (see
+    /// [`cat_tones::symbols_to_skip`]) and are never sent -- `sent_through`
+    /// starts here, not at 0.
+    skip_until: usize,
+}
+
+/// A live TUNE transmission (steady carrier at the TX offset, for antenna
+/// tuning — no FT8 message, no auto-release). One or the other depending on
+/// [`Engine::tx_via_cat_tones`], same split as a normal over.
+enum TuneHandle {
+    /// Looping steady-tone cpal stream; dropping it halts the carrier. Never
+    /// read -- held purely for this `Drop` side effect, hence `allow(dead_code)`.
+    Audio(#[allow(dead_code)] output::TunePlayback),
+    /// A single CAT `TA` command already sent; nothing more to do until
+    /// key-up (`TA0;`), unlike a normal CAT-tone over's per-symbol clock.
+    Cat,
+}
+
 struct Engine {
     db: Arc<Db>,
     evt: Sender<EngineEvent>,
@@ -407,6 +488,23 @@ struct Engine {
     tx_audio_hz: i32,
     /// TX output level (0.0–1.0) applied to the waveform before playback.
     tx_gain: f32,
+    /// Whether the connected rig needs TX audio confined to the left channel
+    /// to fully drive its modulator (currently just the QRP Labs QMX -- see
+    /// [`crate::rig::needs_left_channel_tx_audio`]). Recomputed on every
+    /// `select_rig`.
+    tx_left_channel_only: bool,
+    /// Whether TX should go out as CAT tone commands instead of audio at all
+    /// (currently just the QRP Labs QMX -- see
+    /// [`crate::rig::needs_cat_tone_tx`]). Recomputed on every `select_rig`.
+    tx_via_cat_tones: bool,
+    /// The in-flight CAT-tone transmission, if `tx_via_cat_tones` started one.
+    /// Mutually exclusive with `tx_playback` -- `start_transmit` uses one path
+    /// or the other. Serviced from the run loop (`service_cat_tx`), never from
+    /// a second thread: see [`CatToneTx`]'s doc comment for why that matters.
+    tx_cat: Option<CatToneTx>,
+    /// The in-flight TUNE transmission, if any. Mutually exclusive with both
+    /// `tx_playback` and `tx_cat` — see [`Engine::start_tune`].
+    tx_tune: Option<TuneHandle>,
     /// RX input gain (0.0–1.0), applied live inside the capture callback.
     rx_gain: f32,
     /// UTC slot id most recently handed to the decode worker.
@@ -551,6 +649,10 @@ impl Engine {
             dial_hz,
             tx_audio_hz,
             tx_gain,
+            tx_left_channel_only: false,
+            tx_via_cat_tones: false,
+            tx_cat: None,
+            tx_tune: None,
             rx_gain,
             last_decoded_slot: -1,
             pending_decodes: 0,
@@ -724,12 +826,21 @@ impl Engine {
                 }
             }
 
-            // Live scrolling waterfall: one spectrum row per ~100 ms tick.
-            if self.decoding {
+            // QMX CAT-tone TX: send any symbols now due, finish the over once
+            // the last one has held its full period. No-op when not active.
+            self.service_cat_tx();
+
+            // Live scrolling waterfall: one spectrum row per ~100 ms tick,
+            // frozen while transmitting -- see waterfall_row_due.
+            if waterfall_row_due(self.decoding, self.ptt) {
                 self.emit_waterfall_row();
             }
 
-            std::thread::sleep(Duration::from_millis(100));
+            // A CAT-tone transmission needs a tighter tick so its 160 ms-spaced
+            // symbols go out close to on time (see TX_CAT_TICK_MS and
+            // CatToneTx's doc comment); otherwise the normal, cheaper cadence.
+            let tick_ms = if self.tx_cat.is_some() { TX_CAT_TICK_MS } else { 100 };
+            std::thread::sleep(Duration::from_millis(tick_ms));
         }
     }
 
@@ -806,9 +917,12 @@ impl Engine {
     /// device / playback error). The caller uses this to tell the sequencer the
     /// message really went out.
     fn start_transmit(&mut self, message: &str) -> bool {
-        // Never key a second transmission over a live one.
-        if self.tx_playback.is_some() {
+        // Never key a second transmission over a live one, or over an active tune.
+        if self.tx_playback.is_some() || self.tx_cat.is_some() || self.tx_tune.is_some() {
             return false;
+        }
+        if self.tx_via_cat_tones {
+            return self.start_transmit_cat_tones(message);
         }
         let signal = match crate::dsp::encode::generate_ft8(message, self.tx_audio_hz as f32, SAMPLE_RATE) {
             Some(s) => s,
@@ -822,7 +936,12 @@ impl Engine {
         // the rig, so PTT isn't held through it. On a weak CPU this resample is
         // hundreds of ms; running it after PTT is what produced the long
         // keyed-but-silent gap reported on the Inovato Quadra.
-        let mut prepared = match output::prepare(self.output_device.as_deref(), &signal, self.tx_gain) {
+        let mut prepared = match output::prepare(
+            self.output_device.as_deref(),
+            &signal,
+            self.tx_gain,
+            self.tx_left_channel_only,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 self.emit(EngineEvent::Error(format!("playback failed: {e}")));
@@ -851,10 +970,136 @@ impl Engine {
         true
     }
 
-    /// Stop the in-flight transmission (if any): dropping the handle halts the
-    /// cpal stream immediately, then PTT goes down. Safe to call when not TXing.
+    /// The QMX CAT-tone TX path: no audio at all, just a `TA` command per FT8
+    /// symbol sent from [`Engine::service_cat_tx`] on the run loop's own
+    /// tick. See [`CatToneTx`] and [`crate::qmx_cat_tones`].
+    fn start_transmit_cat_tones(&mut self, message: &str) -> bool {
+        let payload = match encode::pack77(message) {
+            Some(p) => p,
+            None => {
+                self.emit(EngineEvent::Error(format!("cannot encode '{message}'")));
+                return false;
+            }
+        };
+        let tones = encode::encode_tones(&payload);
+
+        // Key up, let the rig's T/R relay settle -- same as the audio path.
+        self.set_ptt(true);
+        std::thread::sleep(Duration::from_millis(PTT_DELAY_MS));
+
+        // Same lateness math as the audio path (AGENTS.md gotcha: ms_late =
+        // max(0, into_cycle - 2360), NOT into_cycle % 15000), just converted
+        // to whole symbols instead of samples.
+        let into_cycle = self.now().rem_euclid(CYCLE_MS);
+        let ms_late = (into_cycle - TX_SLACK_MS).max(0);
+        let skip_until = cat_tones::symbols_to_skip(ms_late, encode::FT8_SYMBOL_PERIOD, tones.len());
+
+        self.tx_cat = Some(CatToneTx {
+            tones,
+            base_hz: self.tx_audio_hz as f64,
+            start: Instant::now(),
+            sent_through: skip_until,
+            skip_until,
+        });
+        self.publish_tx_state();
+        true
+    }
+
+    /// Start transmitting a steady carrier at the TX offset for antenna
+    /// tuning — no FT8 message, no auto-release; the operator (or the Tune
+    /// button going off) stops it explicitly via `finalize_tx`. Refuses to
+    /// start over a live transmission or an already-active tune, the same
+    /// reentrancy rule `start_transmit` applies to itself.
+    fn start_tune(&mut self) {
+        if self.tx_playback.is_some() || self.tx_cat.is_some() || self.tx_tune.is_some() {
+            return;
+        }
+        self.set_ptt(true);
+        std::thread::sleep(Duration::from_millis(PTT_DELAY_MS));
+        if self.tx_via_cat_tones {
+            if let Some(rig) = self.rig.as_mut() {
+                if let Err(e) = rig.send_raw_cat(&cat_tones::ta_command(self.tx_audio_hz as f64)) {
+                    self.emit(EngineEvent::Error(format!("tune failed: {e}")));
+                    self.set_ptt(false);
+                    return;
+                }
+            }
+            self.tx_tune = Some(TuneHandle::Cat);
+        } else {
+            match output::prepare_tune(
+                self.output_device.as_deref(),
+                self.tx_audio_hz as f32,
+                self.tx_gain,
+                self.tx_left_channel_only,
+            ) {
+                Ok(h) => self.tx_tune = Some(TuneHandle::Audio(h)),
+                Err(e) => {
+                    self.emit(EngineEvent::Error(format!("tune failed: {e}")));
+                    self.set_ptt(false);
+                    return;
+                }
+            }
+        }
+        self.publish_tx_state();
+    }
+
+    /// Send any CAT-tone symbols whose scheduled time has arrived, and finish
+    /// the over (key up, release PTT) once the last one has been held for its
+    /// full period. A no-op when no CAT-tone transmission is in flight. Called
+    /// every run-loop tick; see [`CatToneTx`]'s doc comment for why this runs
+    /// here rather than on a dedicated timer thread.
+    fn service_cat_tx(&mut self) {
+        let Some(mut cat) = self.tx_cat else { return };
+        let elapsed = cat.start.elapsed();
+        while cat.sent_through < cat.tones.len() {
+            let since_start = cat.sent_through - cat.skip_until;
+            let due_at = Duration::from_secs_f32(encode::FT8_SYMBOL_PERIOD) * since_start as u32;
+            if elapsed < due_at {
+                break;
+            }
+            let idx = cat.sent_through;
+            cat.sent_through += 1;
+            let hz = cat_tones::tone_hz(cat.base_hz, cat.tones[idx], encode::FT8_SYMBOL_PERIOD);
+            if let Some(rig) = self.rig.as_mut() {
+                if let Err(e) = rig.send_raw_cat(&cat_tones::ta_command(hz)) {
+                    self.emit(EngineEvent::Error(format!("CAT tone send failed: {e}")));
+                }
+            }
+        }
+        // Hold the final tone for its full symbol period before keying up,
+        // instead of cutting it short the instant it's sent -- matches the
+        // audio path, whose waveform already ends with a full-length symbol.
+        let total_since_start =
+            Duration::from_secs_f32(encode::FT8_SYMBOL_PERIOD) * (cat.tones.len() - cat.skip_until) as u32;
+        let finished = cat.sent_through >= cat.tones.len() && elapsed >= total_since_start;
+        self.tx_cat = Some(cat);
+        if finished {
+            self.finalize_tx();
+        }
+    }
+
+    /// Stop whatever's transmitting (if anything) — a normal over (audio or
+    /// CAT-tone) or a TUNE: dropping an audio handle halts its cpal stream
+    /// immediately; a CAT-tone over or a CAT tune gets an explicit key-up
+    /// (`TA0;`) since there's no stream to drop. PTT goes down either way.
+    /// Safe to call when nothing is transmitting. Shared by Stop TX and the
+    /// Tune button's "off" side.
     fn finalize_tx(&mut self) {
-        if self.tx_playback.take().is_some() {
+        let had_audio = self.tx_playback.take().is_some();
+        let had_cat = self.tx_cat.take().is_some();
+        let had_tune = self.tx_tune.take();
+        let tune_was_cat = matches!(had_tune, Some(TuneHandle::Cat));
+        if had_cat || tune_was_cat {
+            if let Some(rig) = self.rig.as_mut() {
+                // Best-effort: a failed key-up here has already failed every
+                // other CAT call this over (send_raw_cat marks the rig
+                // disconnected on error), so there's nothing more to retry.
+                let _ = rig.send_raw_cat(cat_tones::KEY_UP);
+            }
+        }
+        // had_tune, if TuneHandle::Audio, drops its TunePlayback here (end of
+        // scope), halting the looping carrier.
+        if had_audio || had_cat || had_tune.is_some() {
             self.set_ptt(false);
             self.publish_tx_state();
         }
@@ -1032,11 +1277,13 @@ impl Engine {
 
     fn publish_tx_state(&self) {
         self.emit(EngineEvent::TxState(TxStateEvent {
-            // Derived from the live playback handle so the badge can't get stuck:
-            // it's TX exactly while a transmission is clocking out.
-            transmitting: self.tx_playback.is_some(),
+            // Derived from the live handles so the badge can't get stuck:
+            // it's TX exactly while a transmission (any kind, including a
+            // tune) is in flight.
+            transmitting: self.tx_playback.is_some() || self.tx_cat.is_some() || self.tx_tune.is_some(),
             message: self.qso.tx_message().map(|s| s.to_string()),
             status: self.qso.status(),
+            tuning: self.tx_tune.is_some(),
         }));
         // Mirror the state change out over WSJT-X UDP so companion apps see TX
         // start/stop and QSO progress without waiting for the next 1 Hz tick.
@@ -1259,6 +1506,8 @@ impl Engine {
                 self.finalize_tx();
                 self.publish_tx_state();
             }
+            EngineCommand::StartTune => self.start_tune(),
+            EngineCommand::StopTune => self.finalize_tx(),
             EngineCommand::FreeText(text) => {
                 self.tx_parity = None;
                 self.qso.set_free_text(&text);
@@ -1306,12 +1555,26 @@ impl Engine {
         // the old one is still open makes the new handshake time out. Dropping
         // here runs the old rig's close/cleanup before we reconnect.
         self.rig = None;
+        self.tx_left_channel_only = crate::rig::needs_left_channel_tx_audio(cfg.backend, cfg.hamlib_model);
+        self.tx_via_cat_tones = crate::rig::needs_cat_tone_tx(cfg.backend, cfg.hamlib_model);
         match RigConnection::connect(&cfg) {
             Ok(mut rig) => {
                 let _ = rig.set_frequency(self.dial_hz);
                 let name = rig.name();
                 self.rig = Some(rig);
                 self.emit(EngineEvent::Info(format!("rig connected: {name}")));
+                if self.tx_via_cat_tones {
+                    // CAT tones replace audio outright, so the left-channel fix
+                    // (an audio-path workaround) wouldn't do anything -- only
+                    // announce whichever one is actually in effect.
+                    self.emit(EngineEvent::Info(
+                        "QMX: TX via CAT tone commands (no audio) for full drive".into(),
+                    ));
+                } else if self.tx_left_channel_only {
+                    self.emit(EngineEvent::Info(
+                        "QMX: TX audio confined to the left channel for full drive".into(),
+                    ));
+                }
             }
             Err(e) => {
                 self.rig = None;
@@ -1326,8 +1589,8 @@ impl Engine {
 mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, should_refresh_ptt,
-        wf_boundary_row, Engine, CYCLE_MS, DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, MAX_TX_AUDIO_HZ,
-        MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
+        waterfall_row_due, wf_boundary_row, Engine, CYCLE_MS, DEFAULT_RX_GAIN, DEFAULT_TX_GAIN,
+        MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::db::Db;
     use crate::dsp::DecodedMessage;
@@ -1505,6 +1768,15 @@ mod tests {
         assert!(!wf_boundary_row(CYCLE_MS + 500, &mut last));
         // And again at the following boundary.
         assert!(wf_boundary_row(2 * CYCLE_MS + 10, &mut last));
+    }
+
+    #[test]
+    fn waterfall_row_due_freezes_during_tx() {
+        assert!(waterfall_row_due(true, false));
+        assert!(!waterfall_row_due(true, true));
+        // Not decoding at all: never due, PTT state is irrelevant.
+        assert!(!waterfall_row_due(false, false));
+        assert!(!waterfall_row_due(false, true));
     }
 
     #[test]

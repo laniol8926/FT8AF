@@ -110,9 +110,13 @@ select option {
 
 .content { flex: 1; overflow: auto; padding: 14px; }
 
-/* Decode tab: keep the waterfall + filter chips pinned, scroll only the table. */
+/* Decode tab: left panel (filter chips + scrolling table), right panel
+   (waterfall), each half the window width. */
 .content.decode { overflow: hidden; display: flex; flex-direction: column; }
-.content.decode .decode-list { flex: 1; overflow: auto; min-height: 0; }
+.decode-split { flex: 1; display: flex; flex-direction: row; gap: 14px; min-height: 0; }
+.decode-detail { width: 50%; min-width: 0; display: flex; flex-direction: column; }
+.decode-waterfall { width: 50%; min-width: 0; display: flex; flex-direction: column; }
+.decode-detail .decode-list { flex: 1; overflow: auto; min-height: 0; }
 
 .row { display: flex; align-items: center; gap: 10px; }
 .col { display: flex; flex-direction: column; gap: 8px; }
@@ -124,6 +128,12 @@ select option {
 
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+/* Decode table's Message column: fixed-width monospace so callsign/grid
+   text lines up column-to-column between rows, matching the Android app. */
+.msg-col { font-family: "Cascadia Code", monospace; width: 30ch; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; }
+/* Already-worked station (this band + mode): struck through in red, matching
+   the Android app's worked-station highlighting. */
+.msg-col.worked { text-decoration: line-through; color: var(--tx); }
 th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
 tr.time-sep td { border-top: 2px solid #34618f; color: var(--muted); font-size: 11px; padding: 2px 8px; background: #131a21; font-variant-numeric: tabular-nums; }
 tr.cq td { color: #7ed492; }
@@ -140,6 +150,12 @@ tr.clickable:hover td { background: #1d2730; }
 .stage-picker button { padding: 4px 10px; font-size: 12px; font-weight: 600; }
 .stage-picker button.active { background: var(--tx); color: #fff; border-color: var(--tx); }
 .stage-picker button:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Tune toggle: steady carrier for antenna tuning, no CQ/QSO involved. Red
+   background while on is a deliberate "RF is live" warning, same color as
+   the TX badge and the stage-picker's active pill. */
+.tune-toggle { padding: 4px 10px; font-size: 12px; font-weight: 600; }
+.tune-toggle.active { background: var(--tx); color: #fff; border-color: var(--tx); }
+.tune-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
 .badge.tx { background: var(--tx); color: #fff; }
 .badge.rx { background: var(--panel); color: var(--muted); }

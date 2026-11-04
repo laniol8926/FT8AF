@@ -40,6 +40,8 @@ export interface TxStateEvent {
   transmitting: boolean;
   message: string | null;
   status: QsoStatus;
+  /** A TUNE (steady carrier, no FT8 message) is in flight — drives the Tune button's on/off look. */
+  tuning: boolean;
 }
 
 export interface RigStatusEvent {
@@ -235,6 +237,8 @@ export const api = {
   setStage: (stage: TxStage) => invoke("set_stage", { stage }),
   stopTx: () => invoke("stop_tx"),
   freeText: (text: string) => invoke("free_text", { text }),
+  startTune: () => invoke("start_tune"),
+  stopTune: () => invoke("stop_tune"),
 
   listLog: (limit: number, offset: number) =>
     invoke<QsoRecord[]>("list_log", { limit, offset }),
@@ -246,6 +250,8 @@ export const api = {
     offset: number,
   ) => invoke<QsoRecord[]>("search_log", { callsign, filter, limit, offset }),
   logCount: () => invoke<number>("log_count"),
+  /** Calls already worked on the currently-tuned band, for Decode-list strikethrough. */
+  workedCalls: (mode: string) => invoke<string[]>("worked_calls", { mode }),
   deleteQso: (id: number) => invoke("delete_qso", { id }),
   saveQso: (record: QsoRecord) => invoke<number>("save_qso", { record }),
   /** Export ADIF, optionally restricted to an inclusive YYYYMMDD date range. */

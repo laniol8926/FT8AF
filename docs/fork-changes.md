@@ -396,12 +396,93 @@ for the Hamlib version workaround needed there.
   time, from the existing `cycle` tick) overlaid at the top-left, in the
   same position each new 15 s boundary line appears; display width reduced
   to 50% of the window (the scale ruler shrinks with it, staying aligned).
+- **Decode screen reformatted toward the Android layout** (`App.tsx`'s
+  `DecodeScreen`): columns reordered to Message (fixed 30ch monospace,
+  `.msg-col`) / dB / Hz / DT / Status; the per-row UTC column and the
+  meaningless "↩ answer" action column removed (the per-cycle time-separator
+  row already shows the timestamp once, and the row itself is already
+  clickable to answer); the time-separator for the *current* (topmost, since
+  decodes are prepended newest-first) cycle now renders too — the original
+  `i > 0` check skipped exactly that one. Waterfall moved from a stacked
+  block above the table to its own right-hand panel (`decode-split` /
+  `decode-detail` / `decode-waterfall`, each ~50% width), sized to fill the
+  panel's full height (CSS-only — the canvas's backing pixel buffer,
+  `WF_HEIGHT`, was separately bumped from 160 to 500 rows so at least 3 full
+  15 s cycles of history stay visible before scrolling off, not just one).
+  Status column is a placeholder (no cell content yet) — a real WORKED/NEW
+  PFX/NEW BAND pill needs a DXCC/zone lookup per call, not just the worked
+  lookup below.
+- **Worked-station strikethrough** (`Db::worked_calls` in `db.rs`, `worked_calls`
+  command, `api.workedCalls` in `ipc.ts`): the Message cell is struck through
+  in red when `call_from` has already been worked on the currently-tuned band
+  (`bands::band_for_freq_hz(dial_hz)`, the same function `engine.rs` uses when
+  stamping a logged QSO's own `band`) and mode (desktop only ever logs "FT8"
+  today). Mirrors Android's `GetAllQSLCallsign` "worked on this band [and
+  mode]" query — any past logged QSO counts, not just a QSL-confirmed one.
+  Refetched on band change and after every `qso_completed` event.
+- **QMX TX-audio-level fixes**, ported from the Android investigation
+  documented in [qmx-transmit.md](qmx-transmit.md) (the "took a lot of
+  effort to figure out what worked" one):
+  - **Left-channel TX audio** (`rig::needs_left_channel_tx_audio`,
+    `audio/output.rs`'s `write_frame`): for a Hamlib QMX, the waveform goes
+    out on channel 0 only, with every other channel silenced, instead of
+    fanning the same sample to all channels. Real-hardware finding
+    (confirmed on three independent apps, Android included): the QMX's
+    mono-to-stereo upmix when every channel carries the same sample
+    underdrives its modulator with no app-side control over the per-channel
+    gain that upmix applies; an explicit single-channel signal reaches full
+    scale instead.
+  - **CAT-tone TX** (new `qmx_cat_tones.rs`; `rig::needs_cat_tone_tx`,
+    `Hamlib::send_raw_cat` via the public `rig_send_raw` Hamlib API;
+    `Engine::service_cat_tx`/`start_transmit_cat_tones`/`CatToneTx` in
+    `engine.rs`): when even the left-channel fix isn't enough to reach the
+    QMX's 3-bar input-level threshold, TX goes out as one `TAnnnn.nn;` CAT
+    command per FT8 symbol instead of audio at all — the QMX synthesizes the
+    FSK tones itself, so there's no audio chain left to underdrive. Both
+    fixes currently auto-enable together for any Hamlib QMX (desktop has no
+    per-setting UI toggle yet, unlike Android's two independent Settings
+    switches). Deliberately **not** run on a second timer thread: Hamlib's
+    `RIG*` here is only ever touched from the engine thread (see the
+    `unsafe impl Send for Hamlib` note in `rig.rs`), so `service_cat_tx` is
+    just another per-tick action on the existing run loop, polled at a
+    tighter `TX_CAT_TICK_MS` (10 ms) while a CAT-tone transmission is in
+    flight so the 160 ms-spaced symbols stay close to on time without a
+    second thread needing synchronized access to the rig connection.
+    **Confirmed on real hardware** (2026-11-04): calling CQ over CAT tones
+    reaches full RF output on a QMX that audio alone (left-channel included)
+    only drove to partial output.
+- **Waterfall freezes during TX** (`waterfall_row_due` in `engine.rs`, gated
+  on `self.ptt` so it covers both the audio and CAT-tone TX paths the same
+  way): a transmitting QMX has no RX signal worth scrolling into view either
+  way — silence/leakage for an audio over, nothing at all for a CAT-tone
+  one — so new rows stop until PTT drops, instead of scrolling in whatever
+  the mic/line input happened to be picking up mid-transmission.
+- **Tune button** (`EngineCommand::StartTune`/`StopTune`, `Engine::start_tune`,
+  `TuneHandle`, `output::prepare_tune`/`TunePlayback` in `audio/output.rs`):
+  a single on/off toggle next to Grid in the bottom bar, for driving a
+  steady carrier to tune the antenna without calling CQ. Keys PTT the same
+  way a normal over does, then either loops a steady tone (synthesized
+  directly at the output device's sample rate, trimmed to a whole number of
+  cycles so the loop point has no audible click — no FT8 waveform, no
+  resampling) or, on a CAT-tone QMX, sends one steady `TAnnnn.nn;` with
+  nothing further until key-up. Red background while on (`.tune-toggle.active`,
+  same color as the TX badge); mutually exclusive with a normal
+  transmission in both directions (`start_transmit` and `start_tune` each
+  refuse to start over the other); Call CQ and the Tx1–Tx5 stage buttons
+  disable while tuning. Shares `finalize_tx`'s teardown with Stop TX, so
+  Stop TX (and rig disconnect/reconnect) also ends an active tune safely.
 - **Open items**: no grid-to-state/country lookup (see above); the ~97s
   large-import-against-a-large-log case could be faster still by caching
   prepared statements across the import loop instead of re-preparing per
   record (not done); the same small (~48-record) band/mode-altered-copy gap
   Android flagged; no map, POTA, QRZ photos, Bluetooth, or PSKReporter yet
-  (desktop README).
+  (desktop README); no manual odd/even TX-slot picker, no FT4/FT2 mode (the
+  shared decoder core already has FT4 wired into the Rust FFI bindings, just
+  hardcoded off — TX encode and the 15 s slot-cycle timing are FT8-only
+  throughout `engine.rs`); Status column has no WORKED/NEW PFX/NEW BAND pill
+  yet, just the worked-call strikethrough; no per-setting UI toggle for the
+  two QMX TX-audio fixes or for Tune's TUNE level (unlike Android, both are
+  an unconditional auto-on/rig's-own-power-setting for any Hamlib QMX).
 
 ## Smaller fixes
 

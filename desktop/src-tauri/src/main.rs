@@ -175,6 +175,16 @@ fn stop_tx(state: State<AppState>) {
 }
 
 #[tauri::command]
+fn start_tune(state: State<AppState>) {
+    state.engine.send(EngineCommand::StartTune);
+}
+
+#[tauri::command]
+fn stop_tune(state: State<AppState>) {
+    state.engine.send(EngineCommand::StopTune);
+}
+
+#[tauri::command]
 fn free_text(state: State<AppState>, text: String) {
     state.engine.send(EngineCommand::FreeText(text));
 }
@@ -207,6 +217,21 @@ fn search_log(
 #[tauri::command]
 fn log_count(state: State<AppState>) -> i64 {
     state.db.count()
+}
+
+/// Calls already worked on the currently-tuned band, for the Decode list to
+/// strike through. Reads the same `dial_hz` config engine.rs itself uses when
+/// stamping a logged QSO's `band`, so this always matches whatever band a
+/// freshly-worked QSO would actually be filed under. `mode` is passed in by
+/// the caller (desktop only ever logs "FT8" today -- see qso.rs).
+#[tauri::command]
+fn worked_calls(state: State<AppState>, mode: String) -> Vec<String> {
+    let dial_hz: u64 = state
+        .db
+        .get_config("dial_hz")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(bands::default_band().dial_hz);
+    state.db.worked_calls(bands::band_for_freq_hz(dial_hz), &mode)
 }
 
 #[tauri::command]
@@ -535,10 +560,13 @@ fn main() {
             answer,
             set_stage,
             stop_tx,
+            start_tune,
+            stop_tune,
             free_text,
             list_log,
             search_log,
             log_count,
+            worked_calls,
             delete_qso,
             save_qso,
             export_adif,

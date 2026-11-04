@@ -62,6 +62,52 @@ pub struct RigConfig {
     pub hamlib_address: String,
 }
 
+/// Hamlib model id for the QRP Labs QMX: `RIG_MAKE_MODEL(RIG_KENWOOD, 57)` =
+/// `1000*2 + 57` (`MAX_MODELS_PER_BACKEND`=1000, `RIG_KENWOOD`=2 in
+/// hamlib/riglist.h). Used by [`needs_left_channel_tx_audio`] and
+/// [`needs_cat_tone_tx`].
+pub const QRPLABS_QMX_HAMLIB_MODEL: i32 = 2057;
+
+/// Is this rig a QRP Labs QMX connected via Hamlib? Shared gate behind the
+/// QMX-specific TX workarounds below.
+fn is_qmx(backend: RigBackend, hamlib_model: i32) -> bool {
+    backend == RigBackend::Hamlib && hamlib_model == QRPLABS_QMX_HAMLIB_MODEL
+}
+
+/// Does this rig need its TX audio confined to the left channel to fully
+/// drive its modulator?
+///
+/// Real-hardware finding (ported from the Android app, which found and fixed
+/// the same issue): the QRP Labs QMX needs mono/left-channel TX audio to
+/// reach full drive, confirmed across three independent apps on this exact
+/// radio (WSJT-X, QFT8, and FT8AF's own Android client). Fanning the same
+/// sample out to every channel (this app's -- and FT8AF Android's historical
+/// -- default) leaves the mono-to-stereo upmix to the USB Audio Class device
+/// with no control over how much gain it applies per channel, and
+/// underdrives the QMX either way.
+pub fn needs_left_channel_tx_audio(backend: RigBackend, hamlib_model: i32) -> bool {
+    is_qmx(backend, hamlib_model)
+}
+
+/// Should TX go out as Hamlib CAT `TA` tone commands instead of audio at all
+/// (see [`crate::qmx_cat_tones`])?
+///
+/// Real-hardware finding (ported from the Android app): even with the
+/// left-channel fix above, some QMX/interface combinations still can't be
+/// driven to the 3 bars of input level the radio needs to produce RF --
+/// audio alone has a hard ceiling here regardless of software gain. The QMX
+/// can synthesize the FT8/FT4 signal itself from one CAT tone command per
+/// symbol, which reaches full power because it never goes through an audio
+/// chain at all. Currently the same QMX gate as
+/// [`needs_left_channel_tx_audio`] (both auto-enable together for the QMX,
+/// like Android's `applyQmxTxChannelDefaultIfApplicable` /
+/// `applyQmxCatTonesDefaultIfApplicable`), kept as a separate function since
+/// they are conceptually independent settings that could diverge later --
+/// e.g. a per-setting UI toggle, which Android has and desktop doesn't yet.
+pub fn needs_cat_tone_tx(backend: RigBackend, hamlib_model: i32) -> bool {
+    is_qmx(backend, hamlib_model)
+}
+
 fn default_backend() -> RigBackend {
     RigBackend::None
 }
@@ -130,6 +176,16 @@ trait RigTransport: Send {
     fn ptt_off_required_on_connect(&self) -> bool {
         false
     }
+    /// Send a raw CAT command, fire-and-forget (no reply expected). Only
+    /// meaningful for backends that both speak a documented ASCII CAT
+    /// protocol and expose a way to send outside their structured API --
+    /// currently just Hamlib's `rig_send_raw`, used for QMX CAT tones (see
+    /// [`crate::qmx_cat_tones`] and [`crate::rig::needs_cat_tone_tx`]). The
+    /// default errors out so every other backend is explicitly unsupported
+    /// rather than silently doing nothing.
+    fn send_raw_cat(&mut self, _cmd: &str) -> anyhow::Result<()> {
+        anyhow::bail!("raw CAT commands are not supported by this rig backend")
+    }
 }
 
 /// The engine's handle to whatever backend is configured.
@@ -165,6 +221,9 @@ impl RigConnection {
     }
     pub fn requires_ptt_keepalive(&self) -> bool {
         self.inner.requires_ptt_keepalive()
+    }
+    pub fn send_raw_cat(&mut self, cmd: &str) -> anyhow::Result<()> {
+        self.inner.send_raw_cat(cmd)
     }
 }
 
@@ -451,6 +510,13 @@ struct HamlibFns {
     rig_set_ptt: unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int,
     rig_token_lookup: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_long,
     rig_set_conf: unsafe extern "C" fn(*mut c_void, c_long, *const c_char) -> c_int,
+    /// `int rig_send_raw(RIG*, const unsigned char* send, int send_len,
+    /// unsigned char* reply, int reply_len, unsigned char* term)` -- a raw
+    /// passthrough on the rig's own synchronized CAT connection, used for
+    /// QMX CAT tones (see [`Hamlib::send_raw_cat`]). `reply`/`term` are left
+    /// null and `reply_len` 0 here: every caller is fire-and-forget, with no
+    /// reply to wait for or parse.
+    rig_send_raw: unsafe extern "C" fn(*mut c_void, *const u8, c_int, *mut u8, c_int, *const u8) -> c_int,
 }
 
 struct Hamlib {
@@ -579,6 +645,7 @@ impl Hamlib {
                 rig_set_ptt: *lib.get(b"rig_set_ptt\0")?,
                 rig_token_lookup: *lib.get(b"rig_token_lookup\0")?,
                 rig_set_conf: *lib.get(b"rig_set_conf\0")?,
+                rig_send_raw: *lib.get(b"rig_send_raw\0")?,
             }
         };
 
@@ -657,6 +724,24 @@ impl RigTransport for Hamlib {
     fn connected(&self) -> bool {
         self.connected
     }
+    fn send_raw_cat(&mut self, cmd: &str) -> anyhow::Result<()> {
+        let bytes = cmd.as_bytes();
+        let rc = unsafe {
+            (self.fns.rig_send_raw)(
+                self.rig,
+                bytes.as_ptr(),
+                bytes.len() as c_int,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if rc < 0 {
+            self.connected = false;
+            anyhow::bail!("rig_send_raw failed (Hamlib error {rc}) for {cmd:?}");
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Hamlib {
@@ -674,6 +759,25 @@ impl Drop for Hamlib {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn needs_left_channel_tx_audio_only_for_hamlib_qmx() {
+        assert!(needs_left_channel_tx_audio(RigBackend::Hamlib, QRPLABS_QMX_HAMLIB_MODEL));
+        // Same numeric id under a different backend doesn't count -- it isn't
+        // actually a Hamlib model id there.
+        assert!(!needs_left_channel_tx_audio(RigBackend::Flrig, QRPLABS_QMX_HAMLIB_MODEL));
+        assert!(!needs_left_channel_tx_audio(RigBackend::None, QRPLABS_QMX_HAMLIB_MODEL));
+        // Some other Hamlib rig.
+        assert!(!needs_left_channel_tx_audio(RigBackend::Hamlib, 1036));
+    }
+
+    #[test]
+    fn needs_cat_tone_tx_only_for_hamlib_qmx() {
+        assert!(needs_cat_tone_tx(RigBackend::Hamlib, QRPLABS_QMX_HAMLIB_MODEL));
+        assert!(!needs_cat_tone_tx(RigBackend::Flrig, QRPLABS_QMX_HAMLIB_MODEL));
+        assert!(!needs_cat_tone_tx(RigBackend::None, QRPLABS_QMX_HAMLIB_MODEL));
+        assert!(!needs_cat_tone_tx(RigBackend::Hamlib, 1036));
+    }
 
     #[derive(Default)]
     struct RecordingLines {
