@@ -57,6 +57,7 @@ import {
 } from "./hunt";
 import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
 import { wpxPrefixOf } from "./wpxPrefix";
+import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
 
 type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
 type Filter = "all" | "cq" | "pota" | "dxcc" | "zone" | "state" | "grid" | "prefix" | "needed" | "tome";
@@ -200,6 +201,9 @@ export default function App() {
   // list's worked-station strikethrough. Desktop only ever logs "FT8" today
   // (see qso.rs), so that's the only mode checked for now.
   const [workedCalls, setWorkedCalls] = useState<Set<string>>(new Set());
+  // Calls already worked on FT8, any band, for the decode-row status pill's
+  // New Band tier (worked elsewhere, but not the currently-tuned band).
+  const [workedCallsAnyBand, setWorkedCallsAnyBand] = useState<Set<string>>(new Set());
   // Grid squares already worked (any band/mode), for the New Grid filter chip
   // and Hunt's new_grid_first priority.
   const [workedGrids, setWorkedGrids] = useState<Set<string>>(new Set());
@@ -216,6 +220,11 @@ export default function App() {
   // State filter chip.
   const [workedStates, setWorkedStates] = useState<Set<string>>(new Set());
   const [myGrid, setMyGrid] = useState("");
+  const [myCall, setMyCall] = useState("");
+  // Last custom CQ free-text message sent, persisted so it survives a
+  // restart -- matches Android's CqOptionsSheet "SAVED" quick-select chip
+  // (CqOptionsSheet.kt's savedFreeText/onArmSavedCq/onRemoveSavedCq).
+  const [savedFreeText, setSavedFreeText] = useState("");
   // Last QMX SWR/power meter reading (see qmx_meters.rs); null until a rig
   // that supports the query has reported one, matching Android's chips only
   // appearing once a reading exists.
@@ -236,6 +245,11 @@ export default function App() {
   // Re-fetch whenever the tuned band changes -- "worked" is always
   // relative to the band currently being operated.
   useEffect(refreshWorkedCalls, [dialHz]);
+
+  function refreshWorkedCallsAnyBand() {
+    api.workedCallsAnyBand("FT8").then((calls) => setWorkedCallsAnyBand(new Set(calls)));
+  }
+  useEffect(refreshWorkedCallsAnyBand, []);
 
   function refreshWorkedGrids() {
     api.workedGrids().then((grids) => setWorkedGrids(new Set(grids)));
@@ -360,6 +374,12 @@ export default function App() {
     api.getConfig("my_grid").then((v) => {
       if (v) setMyGrid(v);
     });
+    api.getConfig("my_call").then((v) => {
+      if (v) setMyCall(v);
+    });
+    api.getConfig("cq_saved_free_text").then((v) => {
+      if (v) setSavedFreeText(v);
+    });
     api.getConfig("hunt_enabled").then((v) => setHuntEnabled(v === "true"));
     api.getConfig("hunt_priority").then((v) => setHuntPriorityState(huntPriorityFromConfig(v)));
     api.getConfig("hunt_avoid_pileups").then((v) => setHuntAvoidPileups(v === "true"));
@@ -417,6 +437,7 @@ export default function App() {
         refreshWorkedDxccPrefixes();
         refreshWorkedCqZones();
         refreshWorkedStates();
+        refreshWorkedCallsAnyBand();
         break;
       case "meter":
         setMeter(e.data);
@@ -484,6 +505,7 @@ export default function App() {
     if (decodingRef.current) return;
     const call = known?.call ?? (await api.getConfig("my_call"));
     if (!call) return;
+    setMyCall(call);
     let backend = known?.rigBackend;
     if (backend == null) {
       const rigJson = await api.getConfig("rig_config");
@@ -541,12 +563,20 @@ export default function App() {
         bands={bands}
         dialHz={dialHz}
         onBand={onBand}
+        myCall={myCall}
+        myGrid={myGrid}
+        savedFreeText={savedFreeText}
+        onSaveFreeText={(text) => {
+          setSavedFreeText(text);
+          api.setConfig("cq_saved_free_text", text);
+        }}
         rig={rig}
         clock={clock}
         rigLabel={rigLabel}
         txState={txState}
         meter={meter}
         onCq={() => api.startCq()}
+        onStop={() => api.stopTx()}
         onFreeText={(text) => api.freeText(text)}
         onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
         huntEnabled={huntEnabled}
@@ -569,22 +599,18 @@ export default function App() {
             filter={filter}
             setFilter={setFilter}
             workedCalls={workedCalls}
+            workedCallsAnyBand={workedCallsAnyBand}
+            workedGrids={workedGrids}
+            workedPrefixes={workedPrefixes}
+            workedDxccPrefixes={workedDxccPrefixes}
+            workedCqZones={workedCqZones}
+            workedStates={workedStates}
             txFreq={txFreq}
             onSelectFreq={(hz) => {
               setTxFreq(hz);
               api.setBaseFreq(hz);
             }}
             onAnswer={(m) => api.answer({ call_from: m.call_from, grid: m.grid, snr: m.snr })}
-            inputGain={inputGain}
-            onInputGain={(v) => {
-              setInputGain(v);
-              debouncedSetRxGain(v);
-            }}
-            txGain={txGain}
-            onTxGain={(v) => {
-              setTxGain(v);
-              debouncedSetTxGain(v);
-            }}
             decoding={decoding}
             audio={audio}
           />
@@ -622,6 +648,16 @@ export default function App() {
             onHuntMinSnr={(v) => {
               setHuntMinSnr(v);
               api.setConfig("hunt_min_snr", v == null ? "" : String(v));
+            }}
+            inputGain={inputGain}
+            onInputGain={(v) => {
+              setInputGain(v);
+              debouncedSetRxGain(v);
+            }}
+            txGain={txGain}
+            onTxGain={(v) => {
+              setTxGain(v);
+              debouncedSetTxGain(v);
             }}
           />
         )}
@@ -717,12 +753,17 @@ function TopBar(props: {
   bands: BandInfo[];
   dialHz: number;
   onBand: (hz: number) => void;
+  myCall: string;
+  myGrid: string;
+  savedFreeText: string;
+  onSaveFreeText: (text: string) => void;
   rig: RigStatusEvent | null;
   clock: ClockSyncEvent | null;
   rigLabel: string;
   txState: TxStateEvent | null;
   meter: { swr_ratio: number | null; power_watts: number | null } | null;
   onCq: () => void;
+  onStop: () => void;
   onFreeText: (text: string) => void;
   onToggleTune: () => void;
   huntEnabled: boolean;
@@ -731,10 +772,13 @@ function TopBar(props: {
   onRefresh: () => void;
 }) {
   const {
-    cycle, bands, dialHz, onBand, rig, clock, rigLabel, txState, meter,
-    onCq, onFreeText, onToggleTune, huntEnabled, onToggleHunt, onClearDecodes, onRefresh,
+    cycle, bands, dialHz, onBand, myCall, myGrid, savedFreeText, onSaveFreeText,
+    rig, clock, rigLabel, txState, meter,
+    onCq, onStop, onFreeText, onToggleTune, huntEnabled, onToggleHunt, onClearDecodes, onRefresh,
   } = props;
-  const [cqMoreOpen, setCqMoreOpen] = useState(false);
+  const [cqOptionsOpen, setCqOptionsOpen] = useState(false);
+  const [cqModifier, setCqModifier] = useState(""); // "" = plain CQ, else e.g. "DX" or a custom 1-4 letter code
+  const [customModifierDraft, setCustomModifierDraft] = useState("");
   const [freeTextDraft, setFreeTextDraft] = useState("");
 
   const band = bands.find((b) => b.dial_hz === dialHz);
@@ -742,12 +786,22 @@ function TopBar(props: {
   const pct = cycle ? (cycle.ms_into_cycle / 15000) * 100 : 0;
   const transmitting = txState?.transmitting ?? false;
   const tuning = txState?.tuning ?? false;
+  // The CQ/QSO auto-sequencer is running (whether keyed up right now or just
+  // listening between slots for a reply) -- matches Android's TxStrip.kt
+  // cqIsStop, which turns the Call CQ button into a red STOP button for the
+  // whole time it's armed, not only while actually transmitting. Without
+  // this, clicking Call CQ again while it's active just restarts CQ (the
+  // previous behavior here), with no way to stop from the primary button --
+  // confirmed live: it left the rig cycling CQ on the air with no obvious
+  // way to stop it short of the separate More panel's Stop TX button.
+  const cqActive = txState?.status.active ?? false;
   // Which half of the 15s cycle this slot falls in -- purely informational
   // (desktop has no manual slot-parity override), matching WSJT-X/Android's
   // "Odd"/"Even" slot readout.
   const slotParity = cycle ? (cycle.sequential % 2 === 0 ? "Even" : "Odd") : null;
 
   return (
+    <>
     <div className="topbar-android">
       <div className="topbar-row">
         <div className="band-picker">
@@ -767,41 +821,21 @@ function TopBar(props: {
           </select>
         </div>
 
-        <div className="cq-pill-wrap">
-          <button className="pill pill-cq" onClick={onCq} disabled={tuning}>
-            <span className="pill-label-2line">Call<br />CQ</span>
-          </button>
-          <button
-            className="pill-more-badge"
-            title="More: send a free-text message"
-            onClick={() => setCqMoreOpen((v) => !v)}
-          >
-            MORE
-          </button>
-          {cqMoreOpen && (
-            <div className="cq-more-popover">
-              <label>Free-text message</label>
-              <input
-                value={freeTextDraft}
-                onChange={(e) => setFreeTextDraft(e.target.value.toUpperCase())}
-                placeholder="FIELD DAY K1ABC FN42"
-                maxLength={13}
-              />
-              <div className="row">
-                <button
-                  className="primary"
-                  onClick={() => {
-                    if (freeTextDraft.trim()) onFreeText(freeTextDraft.trim());
-                    setCqMoreOpen(false);
-                  }}
-                >
-                  Send
-                </button>
-                <button onClick={() => setCqMoreOpen(false)}>Close</button>
-              </div>
-            </div>
-          )}
-        </div>
+        <button
+          className={"pill pill-cq" + (cqActive ? " pill-cq-stop" : "")}
+          onClick={cqActive ? onStop : onCq}
+          disabled={tuning}
+          title={cqActive ? "Stop calling CQ" : "Call CQ"}
+        >
+          {cqActive ? "STOP" : <span className="pill-label-2line">Call<br />CQ</span>}
+        </button>
+        <button
+          className="pill pill-dark"
+          title="More: CQ DX/NA/EU/... variants or a free-text message"
+          onClick={() => setCqOptionsOpen(true)}
+        >
+          More
+        </button>
 
         <button
           className={"pill pill-dark" + (huntEnabled ? " pill-hunt-active" : "")}
@@ -883,6 +917,188 @@ function TopBar(props: {
           <div style={{ width: `${pct}%` }} />
         </div>
         <span className="seq muted">{secondsLeft != null ? `${secondsLeft}s` : "--"}</span>
+      </div>
+    </div>
+    {cqOptionsOpen && (
+      <CqOptionsModal
+        myCall={myCall}
+        cqModifier={cqModifier}
+        onCqModifier={setCqModifier}
+        customModifierDraft={customModifierDraft}
+        onCustomModifierDraft={setCustomModifierDraft}
+        freeTextDraft={freeTextDraft}
+        onFreeTextDraft={setFreeTextDraft}
+        savedFreeText={savedFreeText}
+        onArmSaved={() => setFreeTextDraft(savedFreeText)}
+        onRemoveSaved={() => onSaveFreeText("")}
+        onClose={() => setCqOptionsOpen(false)}
+        onSubmit={() => {
+          const text = freeTextDraft.trim();
+          if (text) {
+            onFreeText(text);
+            // Persist only on an explicit send, and only when it actually
+            // changed -- matches Android's shouldPersistFreeText (a saved
+            // value is never clobbered by a blank, and an unchanged value
+            // skips a redundant write).
+            if (text !== savedFreeText) onSaveFreeText(text);
+          } else if (cqModifier) {
+            onFreeText(buildDirectedCq(cqModifier, myCall, myGrid));
+          } else {
+            onCq();
+          }
+          setCqOptionsOpen(false);
+        }}
+      />
+    )}
+    </>
+  );
+}
+
+// Which other-direction/custom CQ variant the operator picked, matching
+// Android's CqOptionsSheet.kt presets (CQ/CQ DX/CQ NA/CQ EU/CQ SA/CQ AS/
+// CQ OC/CQ AF) plus a free-typed 1-4 letter custom code.
+const CQ_PRESETS = ["", "DX", "NA", "EU", "SA", "AS", "OC", "AF"];
+
+function presetLabel(modifier: string): string {
+  return modifier ? `CQ ${modifier}` : "CQ";
+}
+
+// 1-4 letters, matching CqOptionsSheet.kt's isValidModifier (digits are
+// stripped by the input's own sanitizer, so this only needs to reject
+// anything the UI can't produce in the first place).
+function isValidModifier(text: string): boolean {
+  return /^[A-Z]{0,4}$/.test(text);
+}
+
+/** Assemble "CQ <modifier> <call>", trimmed and whitespace-collapsed so a
+ *  blank modifier yields a plain "CQ <call>" rather than "CQ  <call>" --
+ *  ported from CqOptionsSheet.kt's buildDirectedCq. myGrid is appended the
+ *  same way plain CQ already does (api.startCq's own "CQ <call> <grid>"). */
+function buildDirectedCq(modifier: string, call: string, grid: string): string {
+  return `CQ ${modifier} ${call} ${grid}`.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * CQ variant picker, opened from the Call CQ pill's MORE badge -- matches
+ * Android's CqOptionsSheet.kt (screenshots/07_callcq_more.png): directional
+ * presets, a custom 1-4 letter modifier, and a free-text field as a
+ * separate alternative. Field Day is NOT ported: it needs the pack77_fd
+ * binary exchange-packing format (ARRL/RAC section index etc.) desktop's
+ * TX encoder doesn't implement, and faking the toggle without it would
+ * silently send a wrong/garbled exchange -- left out rather than guessed
+ * at, consistent with this branch's other documented gaps (hunt.ts,
+ * docs/desktop-decode-android-parity.md).
+ *
+ * A preset/custom modifier is sent via the same repeating free-text path as
+ * the Free Text field (api.freeText), not through the CQ auto-sequencer's
+ * own state machine -- it transmits and repeats correctly, and the Call CQ
+ * pill still turns into STOP while it's running, but an incoming reply
+ * isn't auto-detected/advanced the way a plain CQ's replies are; the
+ * operator answers it by clicking the decoded row, same as any other
+ * station. Plain "CQ" (blank modifier, no free text) uses the real onCq
+ * path instead, which does get full auto-sequencing.
+ */
+// Free-text charset, matching CqOptionsSheet.kt's sanitizeFreeText exactly
+// (space, digits, A-Z, and the FT8 free-text punctuation set).
+const FREE_TEXT_CHARSET = /[^ 0-9A-Z+\-./?]/g;
+
+function CqOptionsModal(props: {
+  myCall: string;
+  cqModifier: string;
+  onCqModifier: (m: string) => void;
+  customModifierDraft: string;
+  onCustomModifierDraft: (v: string) => void;
+  freeTextDraft: string;
+  onFreeTextDraft: (v: string) => void;
+  savedFreeText: string;
+  onArmSaved: () => void;
+  onRemoveSaved: () => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const {
+    myCall, cqModifier, onCqModifier, customModifierDraft, onCustomModifierDraft,
+    freeTextDraft, onFreeTextDraft, savedFreeText, onArmSaved, onRemoveSaved, onClose, onSubmit,
+  } = props;
+
+  const buttonLabel = freeTextDraft.trim()
+    ? "Send free text"
+    : presetLabel(cqModifier) + " " + myCall;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>CQ Message</h3>
+        <div className="col">
+          <label className="muted" style={{ fontSize: 12 }}>CQ MESSAGE</label>
+          <div className="chips">
+            {CQ_PRESETS.map((p) => (
+              <div
+                key={p}
+                className={"chip" + (cqModifier === p ? " active" : "")}
+                onClick={() => {
+                  onCqModifier(p);
+                  onCustomModifierDraft(p);
+                }}
+              >
+                {presetLabel(p)}
+              </div>
+            ))}
+          </div>
+          <input
+            value={customModifierDraft}
+            onChange={(e) => {
+              const v = e.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
+              onCustomModifierDraft(v);
+              if (isValidModifier(v)) onCqModifier(v);
+            }}
+            placeholder="Custom (1-4 letters, e.g. POTA)"
+            maxLength={4}
+          />
+
+          <div className="row" style={{ margin: "8px 0", color: "var(--muted)", fontSize: 11 }}>
+            <div style={{ flex: 1, borderTop: "1px solid var(--border)" }} />
+            or
+            <div style={{ flex: 1, borderTop: "1px solid var(--border)" }} />
+          </div>
+
+          <label className="muted" style={{ fontSize: 12 }}>FREE TEXT (13 characters max)</label>
+          <input
+            value={freeTextDraft}
+            onChange={(e) => onFreeTextDraft(e.target.value.toUpperCase().replace(FREE_TEXT_CHARSET, ""))}
+            placeholder="FIELD DAY K1ABC FN42"
+            maxLength={13}
+          />
+
+          {savedFreeText && (
+            <div className="row" style={{ marginTop: 8 }}>
+              <span className="muted" style={{ fontSize: 11 }}>SAVED</span>
+              <div
+                className={"chip" + (freeTextDraft === savedFreeText ? " active" : "")}
+                onClick={onArmSaved}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+              >
+                {savedFreeText}
+                <span
+                  title="Remove saved message"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveSaved();
+                  }}
+                >
+                  ✕
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div className="actions" style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+            <button onClick={onClose}>Cancel</button>
+            <button className="primary" onClick={onSubmit}>
+              {buttonLabel}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1090,29 +1306,23 @@ function DecodeScreen(props: {
   filter: Filter;
   setFilter: (f: Filter) => void;
   workedCalls: Set<string>;
+  workedCallsAnyBand: Set<string>;
+  workedGrids: Set<string>;
+  workedPrefixes: Set<string>;
+  workedDxccPrefixes: Set<string>;
+  workedCqZones: Set<number>;
+  workedStates: Set<string>;
   txFreq: number;
   onSelectFreq: (hz: number) => void;
   onAnswer: (m: UiMessage) => void;
-  inputGain: number;
-  onInputGain: (v: number) => void;
-  txGain: number;
-  onTxGain: (v: number) => void;
   decoding: boolean;
   audio: { db: number; silent: boolean } | null;
 }) {
   const {
-    messages, filter, setFilter, workedCalls, txFreq, onSelectFreq, onAnswer,
-    inputGain, onInputGain, txGain, onTxGain, decoding, audio,
+    messages, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids, workedPrefixes,
+    workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
+    decoding, audio,
   } = props;
-
-  // "065815 UTC · 16 stations" header, matching the Android app: the current
-  // (topmost) decode period's timestamp and how many distinct callers are in
-  // the visible (filtered) list.
-  const stationCount = new Set(messages.map((m) => m.call_from.toUpperCase())).size;
-  const latestUtc =
-    messages.length > 0
-      ? new Date(messages[0].utc_ms).toISOString().substring(11, 19).replace(/:/g, "")
-      : null;
 
   return (
     <>
@@ -1128,66 +1338,62 @@ function DecodeScreen(props: {
             {f.label}
           </div>
         ))}
-        {/* Real controls the Android reference screen doesn't need (it has no
-            drive sliders) but desktop does -- kept here, next to what they
-            affect, rather than invented away. Decode itself has no manual
-            start/stop control here, matching Android: it starts on its own
-            once a callsign + rig are configured (see maybeAutoStartDecode
-            in App()). */}
-        <div className="decode-controls" style={{ marginLeft: "auto" }}>
-          <span className="tx-level" title="RX input gain — some bands are noisier than others">
-            <span className="muted">RX</span>
-            <input
-              type="range"
-              aria-label="RX input gain, percent"
-              min={0}
-              max={100}
-              step={1}
-              value={inputGain}
-              onChange={(e) => onInputGain(parseInt(e.target.value, 10))}
-              style={{ width: 70 }}
-            />
-            <span className="muted" style={{ fontVariantNumeric: "tabular-nums", minWidth: 30, textAlign: "right" }}>
-              {inputGain}%
-            </span>
-          </span>
-          <span className="tx-level" title="TX output level (drive) — lower until ALC stops pinning">
-            <span className="muted">TX</span>
-            <input
-              type="range"
-              aria-label="TX output level (drive), percent"
-              min={0}
-              max={100}
-              step={1}
-              value={txGain}
-              onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
-              style={{ width: 70 }}
-            />
-            <span className="muted" style={{ fontVariantNumeric: "tabular-nums", minWidth: 30, textAlign: "right" }}>
-              {txGain}%
-            </span>
-          </span>
-        </div>
       </div>
-      {latestUtc && (
-        <div className="decode-list-header muted">
-          {latestUtc} UTC · {stationCount} station{stationCount === 1 ? "" : "s"}
-        </div>
-      )}
       <div className="decode-split">
         <div className="decode-detail">
+          {/* Column order matches Android's landscape compact row exactly
+              (docs/landscape-layout.md: "the compact row's message slot is
+              30 characters ... so SNR / Hz / DT and the badge follow right
+              after the message"): the callsign lives in the message text,
+              same as Android's compact row -- there's no separate Call
+              column there, and no per-row Time column either (the
+              time-group header above each block is Android's only "time"
+              per decode period, in both layouts). */}
+          <div className="decode-row-header muted">
+            <span className="decode-row-msg">Message</span>
+            <span className="decode-row-snr">SNR</span>
+            <span className="decode-row-freq">Freq</span>
+            <span className="decode-row-dt">Δt</span>
+          </div>
           <div className="decode-list">
             {messages.map((m, i) => {
               // i === 0 also starts a new block: messages are prepended newest-first,
               // so the current decode period is always at the top of the list, and
               // Android always shows that period's header there too.
               const newBlock = i === 0 || messages[i - 1].utc_ms !== m.utc_ms;
-              const worked = workedCalls.has(m.call_from.toUpperCase());
+              // Distinct callers decoded in this slot, for the centered
+              // divider -- matches Android's "UTC : 16:15:52 · 8 decoded
+              // this cycle" header, just per-group instead of once for the
+              // newest batch only (every group gets its own count here).
+              let groupStationCount = 0;
+              if (newBlock) {
+                const seen = new Set<string>();
+                for (let j = i; j < messages.length && messages[j].utc_ms === m.utc_ms; j++) {
+                  seen.add(messages[j].call_from.toUpperCase());
+                }
+                groupStationCount = seen.size;
+              }
+              const callUpper = m.call_from.toUpperCase();
+              const worked = workedCalls.has(callUpper);
+              const rowTime = new Date(m.utc_ms).toISOString().substring(11, 19);
+              const prefix = wpxPrefixOf(m.call_from);
+              const status = resolveQsoStatus({
+                isCq: m.is_cq,
+                isToMe: m.to_me,
+                isPota: isPotaCq(m.is_cq, m.text),
+                isNewDxcc: m.dxcc_prefix != null && !workedDxccPrefixes.has(m.dxcc_prefix),
+                isNewZone: m.cq_zone != null && !workedCqZones.has(m.cq_zone),
+                isNewState: m.state != null && !workedStates.has(m.state),
+                isNewGrid: m.grid.length >= 4 && !workedGrids.has(m.grid.toUpperCase()),
+                isNewPrefix: prefix != null && !workedPrefixes.has(prefix),
+                isWorkedOtherBand: !worked && workedCallsAnyBand.has(callUpper),
+                isWorked: worked,
+              });
               return (
                 <Fragment key={i}>
                   {newBlock && (
                     <div className="time-sep">
-                      {new Date(m.utc_ms).toISOString().substring(11, 19)} UTC
+                      {rowTime} UTC · {groupStationCount} station{groupStationCount === 1 ? "" : "s"}
                     </div>
                   )}
                   <div
@@ -1209,10 +1415,23 @@ function DecodeScreen(props: {
                       {m.time_sec >= 0 ? "+" : ""}
                       {m.time_sec.toFixed(1)}
                     </span>
-                    {m.is_cq && (
-                      <span className="cq-badge">
-                        <span className="cq-badge-dot" />
-                        CQ
+                    {/* Status pill, matching Android's StatusPill.kt (compact
+                        variant): colored background + border + a small dot +
+                        the status label -- resolveQsoStatus's full
+                        priority-ordered classification (calling me, POTA,
+                        new DXCC/zone/state/grid/prefix/band, worked, plain
+                        CQ), not just a binary CQ indicator. */}
+                    {status && (
+                      <span
+                        className="status-pill-row"
+                        style={{
+                          color: QSO_STATUS_META[status].color,
+                          background: QSO_STATUS_META[status].bg,
+                          borderColor: QSO_STATUS_META[status].border,
+                        }}
+                      >
+                        <span className="status-pill-row-dot" style={{ background: QSO_STATUS_META[status].color }} />
+                        {QSO_STATUS_META[status].label}
                       </span>
                     )}
                   </div>
@@ -1830,10 +2049,15 @@ function SettingsScreen(props: {
   onHuntAvoidPileups: (v: boolean) => void;
   huntMinSnr: number | null;
   onHuntMinSnr: (v: number | null) => void;
+  inputGain: number;
+  onInputGain: (v: number) => void;
+  txGain: number;
+  onTxGain: (v: number) => void;
 }) {
   const {
     onStatus, clock, onSettingsSaved, onRigLabel, onBandsChanged,
     huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
+    inputGain, onInputGain, txGain, onTxGain,
   } = props;
   const [call, setCall] = useState("");
   const [rigLabel, setRigLabel] = useState("");
@@ -2226,6 +2450,36 @@ function SettingsScreen(props: {
                 api.setBaseFreq(v);
               }}
             />
+          </div>
+          <div className="field">
+            <label>RX input gain: {inputGain}%</label>
+            <input
+              type="range"
+              aria-label="RX input gain, percent"
+              min={0}
+              max={100}
+              step={1}
+              value={inputGain}
+              onChange={(e) => onInputGain(parseInt(e.target.value, 10))}
+            />
+            <span className="muted" style={{ fontSize: 12 }}>
+              Post-ADC software trim — some bands are noisier than others.
+            </span>
+          </div>
+          <div className="field">
+            <label>TX output level (drive): {txGain}%</label>
+            <input
+              type="range"
+              aria-label="TX output level (drive), percent"
+              min={0}
+              max={100}
+              step={1}
+              value={txGain}
+              onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
+            />
+            <span className="muted" style={{ fontSize: 12 }}>
+              Lower until ALC stops pinning.
+            </span>
           </div>
         </div>
       </div>

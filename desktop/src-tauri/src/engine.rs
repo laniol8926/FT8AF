@@ -1255,9 +1255,8 @@ impl Engine {
                     freq_hz: m.freq_hz,
                     time_sec: m.time_sec,
                     text: decode_text(m),
-                    is_cq: m.call_to.eq_ignore_ascii_case("CQ"),
-                    to_me: !self.qso.my_call.is_empty()
-                        && m.call_to.eq_ignore_ascii_case(&self.qso.my_call),
+                    is_cq: crate::callsign::is_cq_callsign(&m.call_to),
+                    to_me: crate::callsign::is_my_callsign(&m.call_to, &self.qso.my_call),
                     dxcc_prefix: dxcc.as_ref().map(|d| d.dxcc_prefix.clone()),
                     cq_zone: dxcc.as_ref().map(|d| d.cq_zone),
                     state: crate::us_states::state_for_grid(&m.grid),

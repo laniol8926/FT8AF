@@ -225,8 +225,12 @@ impl QsoEngine {
         }
 
         // Find a message addressed to us, from our target if we have one.
+        // crate::callsign::is_my_callsign (not a plain equality) so a
+        // portable/compound call_to (e.g. "W1AW/P" when my_call is "W1AW")
+        // is still recognized mid-QSO, matching Android's
+        // GeneralVariables.checkIsMyCallsign.
         let mine = messages.iter().find(|m| {
-            m.call_to.eq_ignore_ascii_case(&self.my_call)
+            crate::callsign::is_my_callsign(&m.call_to, &self.my_call)
                 && match &self.target {
                     Some(t) => m.call_from.eq_ignore_ascii_case(t),
                     None => true,

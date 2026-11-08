@@ -234,6 +234,13 @@ fn worked_calls(state: State<AppState>, mode: String) -> Vec<String> {
     state.db.worked_calls(bands::band_for_freq_hz(dial_hz), &mode)
 }
 
+/// Calls already worked on `mode`, any band -- for the Decode list's
+/// New-Band status (worked elsewhere, but not the currently-tuned band).
+#[tauri::command]
+fn worked_calls_any_band(state: State<AppState>, mode: String) -> Vec<String> {
+    state.db.worked_calls_any_band(&mode)
+}
+
 /// Grid squares already logged (any band/mode), for the Decode list's Hunt
 /// "new grid" priority and New-Grid filter.
 #[tauri::command]
@@ -608,6 +615,7 @@ fn main() {
             search_log,
             log_count,
             worked_calls,
+            worked_calls_any_band,
             worked_grids,
             worked_prefixes,
             worked_dxcc_prefixes,

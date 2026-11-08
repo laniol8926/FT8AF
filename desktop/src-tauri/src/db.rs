@@ -467,6 +467,24 @@ impl Db {
             .unwrap_or_default()
     }
 
+    /// Distinct calls already logged on `mode`, any band -- mirrors Android's
+    /// `QSL_Callsign_list_other_band` (`checkQSLCallsign_OtherBand`), used by
+    /// the Decode list's New-Band status (worked on some other band, but not
+    /// this one -- the caller combines this with [Self::worked_calls] on the
+    /// current band to get "other band only").
+    pub fn worked_calls_any_band(&self, mode: &str) -> Vec<String> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn
+            .prepare("SELECT DISTINCT UPPER(call) FROM qso_log WHERE UPPER(mode) = UPPER(?1)")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![mode], |row| row.get::<_, String>(0))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     /// Distinct 4+ character grid squares already logged, any band/mode --
     /// mirrors Android's "Worked Grids" check (`GeneralVariables.checkQSLGrid`,
     /// which is not band/mode-scoped, unlike [Self::worked_calls]) for the
@@ -1317,6 +1335,42 @@ mod tests {
         assert_eq!(worked, vec!["K1ABC".to_string(), "W1AW".to_string()]);
 
         assert!(db.worked_calls("30m", "FT8").is_empty());
+    }
+
+    #[test]
+    fn worked_calls_any_band_matches_mode_only_case_insensitively() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "w1aw".into(), // lower-case call, other band: both still counted
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "ft8".into(), // differently-cased mode: still matches "FT8"
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1QRS".into(), // other mode -- excluded
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT4".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let mut worked = db.worked_calls_any_band("FT8");
+        worked.sort();
+        assert_eq!(worked, vec!["K1ABC".to_string(), "W1AW".to_string()]);
     }
 
     #[test]

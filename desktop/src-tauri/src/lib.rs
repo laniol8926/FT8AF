@@ -7,6 +7,7 @@
 pub mod adif;
 pub mod audio;
 pub mod bands;
+pub mod callsign;
 // Build-time arch-selection helpers, shared with `build.rs` via `include!`.
 // Unused by the library itself (only build.rs calls them), so silence dead_code;
 // they exist here purely so `cargo test` runs their unit tests.

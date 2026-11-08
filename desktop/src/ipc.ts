@@ -262,6 +262,8 @@ export const api = {
   logCount: () => invoke<number>("log_count"),
   /** Calls already worked on the currently-tuned band, for Decode-list strikethrough. */
   workedCalls: (mode: string) => invoke<string[]>("worked_calls", { mode }),
+  /** Calls already worked on mode, any band -- for the New Band status. */
+  workedCallsAnyBand: (mode: string) => invoke<string[]>("worked_calls_any_band", { mode }),
   /** Grid squares already worked (any band/mode), for Hunt's new-grid priority
    *  and the New Grid filter chip. */
   workedGrids: () => invoke<string[]>("worked_grids"),

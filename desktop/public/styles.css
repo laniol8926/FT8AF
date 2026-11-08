@@ -166,30 +166,17 @@ select option {
 .meter-chip-label { font-size: 9px; color: var(--muted); line-height: 1.2; }
 .meter-chip-value { font-size: 12px; font-weight: 700; line-height: 1.2; color: inherit; font-variant-numeric: tabular-nums; }
 
-/* Call CQ pill + its MORE badge/popover. Widened (min-width + extra right
-   padding) so the MORE badge -- positioned past the pill's own right edge --
-   has room to sit beside the "CQ" text instead of over it; at the base
-   .pill padding the two-line "Call/CQ" label left the pill exactly as wide
-   as its text, with nothing to its right for the badge to occupy. */
-.cq-pill-wrap { position: relative; }
+/* Call CQ pill. MORE used to be a badge overlaid on this pill's corner
+   (cramped, and overlapped the "CQ" label at some sizes) -- it's now a
+   plain separate pill-dark button next to this one instead, so no special
+   width/padding accommodation is needed here any more. */
 .pill-cq {
   background: var(--accent); border: 1px solid var(--accent); color: #1a0f00;
-  min-width: 76px; padding-right: 22px;
+  min-width: 64px;
 }
-.pill-more-badge {
-  position: absolute; top: -6px; right: -8px;
-  background: var(--panel-3); color: var(--text); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); font-size: 9px; font-weight: 700;
-  padding: 2px 5px; cursor: pointer;
-}
-.cq-more-popover {
-  position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 40;
-  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-md);
-  padding: 10px; width: 220px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-}
-.cq-more-popover label { display: block; color: var(--muted); margin-bottom: 4px; font-size: 11px; }
-.cq-more-popover input { width: 100%; margin-bottom: 8px; }
-.cq-more-popover .row { gap: 6px; }
+/* While the CQ/QSO sequencer is active, matching Android's TxStrip.kt
+   turning the same button into a red STOP. */
+.pill-cq-stop { background: var(--tx); border-color: var(--tx); color: #fff; }
 
 /* RX/TX status + countdown. */
 .rx-tx-indicator { display: inline-flex; align-items: center; gap: 8px; }
@@ -244,11 +231,6 @@ select option {
 .decode-detail .decode-list { flex: 1; overflow: auto; min-height: 0; }
 .waterfall-tab { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
-.decode-controls { display: flex; align-items: center; gap: 10px; }
-.tx-level { display: inline-flex; align-items: center; gap: 6px; }
-.tx-level input[type="range"] { margin: 0; }
-.decode-list-header { font-size: 11px; padding: 2px 0 6px; }
-
 .row { display: flex; align-items: center; gap: 10px; }
 .col { display: flex; flex-direction: column; gap: 8px; }
 .field label { display: block; color: var(--muted); margin-bottom: 3px; }
@@ -273,6 +255,15 @@ select option {
 .decode-row.tome { background: var(--signal-soft); }
 .decode-row.clickable { cursor: pointer; }
 .decode-row.clickable:hover { background: var(--panel-2); }
+/* Column header row, same widths/gap as a data row so everything lines up.
+   A sibling of .decode-list (the scrolling element), not a child, so it
+   naturally stays put above the list without needing its own scroll
+   handling. */
+.decode-row-header {
+  display: flex; align-items: center; gap: 12px; padding: 2px 10px 4px 8px;
+  border-left: 3px solid transparent; font-family: "Geist Mono", "Cascadia Code", monospace;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px;
+}
 .decode-row-msg { width: 30ch; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 /* Already-worked station (this band + mode): struck through in red, matching
    the Android app's worked-station highlighting. */
@@ -280,12 +271,18 @@ select option {
 .decode-row-snr, .decode-row-freq { width: 42px; text-align: right; color: var(--muted); }
 .decode-row-dt { width: 48px; text-align: right; color: var(--muted); }
 .decode-row-dt.warn { color: var(--yellow); font-weight: 700; }
-.cq-badge {
-  display: inline-flex; align-items: center; gap: 4px;
-  background: var(--accent-soft); border: 1px solid var(--border-amber); color: var(--accent);
-  border-radius: var(--radius-pill); padding: 2px 8px; font-size: 10px; font-weight: 700;
+.decode-row-header .decode-row-snr,
+.decode-row-header .decode-row-freq,
+.decode-row-header .decode-row-dt { color: var(--muted); }
+/* Status pill (see qsoStatus.ts), matching Android's compact StatusPill.kt:
+   colored background/border (set inline per status) + a small dot + label. */
+.status-pill-row {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  height: 18px; padding: 0 6px; border-radius: var(--radius-pill);
+  border: 1px solid; font-size: 10px; font-weight: 700; letter-spacing: 0.2px;
+  white-space: nowrap;
 }
-.cq-badge-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+.status-pill-row-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .decode-row-empty { padding: 10px 8px; }
 
 .time-sep {

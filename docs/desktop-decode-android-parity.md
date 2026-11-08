@@ -7,8 +7,11 @@ this branch. Not pushed or PR'd yet — still changing.
 
 ## Done this round
 
-- **Call CQ / MORE button**: widened (`min-width` + right padding on
-  `.pill-cq`) so the MORE badge no longer overlaps the "CQ" text.
+- **Call CQ / MORE button**: initially widened (`min-width` + right padding
+  on `.pill-cq`) so the MORE badge stopped overlapping the "CQ" text; later
+  this round MORE became its own separate `pill-dark` button next to Call
+  CQ instead of an overlaid badge at all (see part 4 below) — the widening
+  was reverted along with it.
 - **Persistent bottom message bar removed**: `TxBar` (TX stage picker +
   Stop TX) is no longer always visible. It's now behind a "More" toggle
   button appended to the tab bar, matching Android's `TabBar.kt` "More
@@ -84,14 +87,105 @@ entry below for this doc's own earlier state) is now ported:
   (`DecodeScreen.kt`'s `filterOptions`): All, CQ Calls, CQ POTA, New DXCC,
   New Zone, New State, New Grid, New Prefix, Needed, For Me.
 
-## Deliberately not done yet
+## Done this round, part 3: message-logic parity audit + fixes
 
-- **Decode row header / column restructuring** (Time | Call | SNR | Δt).
-  Each row currently renders the full decoded message as one text field
-  (`.decode-row-msg`) plus separate SNR/Freq/Δt fields — there's no isolated
-  "Call" column to label. Needed: pull the callsign out of the message text
-  into its own field, then add the header row above `.decode-list`. Not
-  started.
+A direct source comparison against `dev` (fetched fresh, confirmed zero
+drift — see the audit at the top of this round) found two real divergences
+in application-layer logic built on top of the shared decode core, both
+fixed in `src-tauri/src/callsign.rs` (new, with its own unit tests) and
+wired into both `engine.rs` (`UiMessage.is_cq`/`to_me`) and `qso.rs`
+(`process_rx`'s reply matching):
+
+- **CQ detection**: Android's `Ft8Message.checkIsCQ()` also treats `DE` and
+  `QRZ` as CQ-equivalent `call_to` values, not just `CQ`. Desktop only
+  checked `"CQ"` — `callsign::is_cq_callsign` now matches all three.
+- **"Addressed to me" matching**: Android's `checkIsMyCallsign` does
+  substring-containment against the *longest `/`-segment* of the operator's
+  own callsign (handles `W1AW` matching a decoded `"W1AW/P"`). Desktop did a
+  strict exact match — in **both** the UI highlight and `qso.rs`'s actual
+  auto-sequencer reply recognition, so a portable/compound `call_to` could
+  go unrecognized mid-QSO. `callsign::is_my_callsign` now matches Android.
+
+Also fixed: a second stale-cache class of bug, separate from the
+styles.css-seeding issue earlier on this branch — WebKitGTK's own disk
+cache (`~/.local/share/radio.ks3ckc.ft8af.desktop/WebKitCache`) served an
+old build's JS bundle after a rebuild. Cleared locally for testing; **not
+yet fixed at the root** (would need explicit no-cache headers on the custom
+protocol responses) — flagged since a real user updating the app could hit
+the same thing.
+
+And a real desktop-only bug: WebKitGTK's window goes solid light-grey and
+stops repainting (process stays alive, not a crash) after the window loses
+focus, on this board's software/embedded GL driver — a known WebKitGTK
+class of issue, not Android-related. Fixed in `linux/run-ft8af.sh` by
+setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` before exec'ing the binary;
+confirmed via an unfocus/refocus screenshot test.
+
+## Done this round, part 4: decode row rebuilt to match the real Android layout
+
+The first pass at Time/Call/SNR/Δt columns was **wrong** — built from
+reading `DecodeRow.kt`'s Kotlin without checking the actual rendered
+output. Found real reference screenshots in `screenshots/` (`01_decode.png`
+portrait card view, `01b_decode_compact.png` portrait compact view) plus
+`docs/landscape-layout.md`'s explicit spec for the layout desktop actually
+mirrors (split-view/landscape): the compact row is **Message (30 chars) →
+SNR → Freq(Hz) → DT → a status badge**, with the callsign embedded in the
+message text, not a separate column — exactly what this branch had before
+today. Reverted the Time/Call columns; kept Message/SNR/Freq/Δt.
+
+Replaced the old binary "is this a CQ" dot with a real multi-state status
+pill, ported from Android's `resolveQsoStatus`/`StatusPill.kt`:
+
+- **`src/qsoStatus.ts`** (+ tests): `resolveQsoStatus(flags)`, the exact
+  priority chain (calling me → POTA → new DXCC → new zone → new state →
+  new grid → new prefix → new band → worked → plain CQ), gated by the same
+  *default* highlight toggles Android ships (DXCC/zone/band/worked/POTA on,
+  state/grid/prefix off — there's no Settings UI yet to change these, so
+  the gates are hardcoded for now, ready to wire up when that screen
+  exists). `QSO_STATUS_META` carries Android's exact `StatusPill.kt`
+  colors (hardcoded hex/rgba, not reusing the app's CSS tokens, since
+  several alpha values don't map to any existing one).
+- **New Band** needed one more backend piece: `Db::worked_calls_any_band`
+  (+ Tauri command, `api.workedCallsAnyBand`) — any-band worked calls,
+  mirroring `checkQSLCallsign_OtherBand`, combined with the existing
+  current-band `workedCalls` to get "worked elsewhere, not here."
+- Two tiers left out rather than faked: **SOTA** (needs a parsed CQ
+  "modifier" field the decoder doesn't extract) and **NEW_POTA** (an
+  unhunted park specifically, vs. plain POTA — needs a live pota.app spot
+  feed, same gap `hunt.ts` already documents for Hunt's `pota_first`).
+
+Also this round: time-group dividers now show `HH:MM:SS UTC · N stations`
+**per slot** (was a one-time header for just the newest batch), centered;
+the RX/TX gain sliders moved from the Decode chips row to Settings → Audio
+(alongside Input/Output device and TX audio offset — functionality kept,
+just relocated, not deleted); and the CQ "MORE" badge became a proper
+`CqOptionsModal` (a real modal, not a cramped popover, and no longer an
+absolutely-positioned badge overlapping the Call CQ pill — it's a plain
+separate button next to it now) with Android's actual CQ-variant options
+(`screenshots/07_callcq_more.png`, `CqOptionsSheet.kt`): the 8 directional
+presets (CQ/DX/NA/EU/SA/AS/OC/AF), a custom 1-4 letter modifier, free text
+with Android's exact allowed charset, and a persisted "SAVED" quick-select
+chip for the last-sent free text. A preset/custom modifier transmits via
+the existing free-text repeat path (`api.freeText`), not a new engine-level
+CQ-modifier state machine — it sends and repeats correctly, and Call CQ
+still turns into STOP while it's running, but an incoming reply isn't
+auto-advanced the way a plain CQ's is; the operator clicks the decoded row
+to answer, same as any other station. Documented inline in `App.tsx`.
+
+**Field Day was asked for and is still missing** (Class A-F, transmitter
+count, ARRL/RAC section). Investigated: Android's Field Day message isn't
+packed by the shared `ft8_lib` `pack77()` both apps otherwise call through
+FFI — `FT8Package.generatePack77_fd` is a hand-rolled bit-packer specific
+to Android (exact bit layout documented in its own doc comment: two
+adjacent c28 callsign fields + R1 + transmitter count + class + section
+index + n3/i3, 77 bits total), separate from the standard message path.
+Porting it means a bit-exact Rust equivalent of that packer (plus the
+86-entry ARRL section table) feeding into the *already-shared*
+`encode_tones`/`synth_gfsk` waveform pipeline — feasible, but real
+on-air-correctness-critical work (wrong bits either fail to decode
+anywhere, harmless, or worse, decode to a *wrong* exchange on someone
+else's screen), not something to rush. Not started; needs a deliberate
+go-ahead given the stakes.
 
 ## Build note
 

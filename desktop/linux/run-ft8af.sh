@@ -35,4 +35,20 @@ else
 	exit 1
 fi
 
+# WebKitGTK's DMABUF renderer can lose its framebuffer when the window loses
+# focus (or is unmapped/restored) on some GPU drivers -- confirmed directly
+# on this board's software/embedded GL: the webview goes solid light-grey
+# (GTK's own background showing through, not a crash -- the process stays
+# alive) and never repaints itself, even after refocusing or clicking back
+# into it. This is a known WebKitGTK/Tauri issue, most commonly reported on
+# NVIDIA but not specific to it; the standard workaround is to disable just
+# the DMABUF path (see https://v2.tauri.app/develop/debug/linux-graphics/),
+# which keeps most of accelerated compositing and fixed it here. Set
+# unconditionally rather than gated on hardware detection -- it's a no-op
+# correctness cost on setups that were never hitting the bug, and the
+# alternative (WEBKIT_DISABLE_COMPOSITING_MODE, disabling acceleration
+# entirely) is a strictly bigger hammer to reach for only if this stops
+# being enough on some other GPU/driver combination.
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
 exec "$BIN" "$@"
