@@ -16,6 +16,12 @@ export interface UiMessage {
   text: string;
   is_cq: boolean;
   to_me: boolean;
+  /** The sender's DXCC entity prefix, or null for an unresolvable callsign -- see dxcc.rs. */
+  dxcc_prefix: string | null;
+  /** The sender's CQ zone, alongside dxcc_prefix. */
+  cq_zone: number | null;
+  /** The sender's US state, derived from its grid (grid-only, no callsign fallback -- see us_states.rs). */
+  state: string | null;
 }
 
 export interface CycleTick {
@@ -261,6 +267,12 @@ export const api = {
   workedGrids: () => invoke<string[]>("worked_grids"),
   /** CQ WPX prefixes already worked (any band/mode), for the New Prefix filter chip. */
   workedPrefixes: () => invoke<string[]>("worked_prefixes"),
+  /** DXCC entity prefixes already worked (any band/mode), for the New DXCC filter chip. */
+  workedDxccPrefixes: () => invoke<string[]>("worked_dxcc_prefixes"),
+  /** CQ zones already worked (any band/mode), for the New Zone filter chip. */
+  workedCqZones: () => invoke<number[]>("worked_cq_zones"),
+  /** US states already worked on the currently-tuned band/mode, for the New State filter chip. */
+  workedStates: (mode: string) => invoke<string[]>("worked_states", { mode }),
   deleteQso: (id: number) => invoke("delete_qso", { id }),
   saveQso: (record: QsoRecord) => invoke<number>("save_qso", { record }),
   /** Export ADIF, optionally restricted to an inclusive YYYYMMDD date range. */

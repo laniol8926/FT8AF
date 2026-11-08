@@ -248,6 +248,33 @@ fn worked_prefixes(state: State<AppState>) -> Vec<String> {
     state.db.worked_prefixes()
 }
 
+/// DXCC entity prefixes already logged (any band/mode), for the Decode
+/// list's New-DXCC filter.
+#[tauri::command]
+fn worked_dxcc_prefixes(state: State<AppState>) -> Vec<String> {
+    state.db.worked_dxcc_prefixes()
+}
+
+/// CQ zones already logged (any band/mode), for the Decode list's New-Zone
+/// filter.
+#[tauri::command]
+fn worked_cq_zones(state: State<AppState>) -> Vec<i64> {
+    state.db.worked_cq_zones()
+}
+
+/// US states already logged on the currently-tuned band/mode (WAS is per
+/// band and mode -- see `Db::worked_states`), for the Decode list's
+/// New-State filter.
+#[tauri::command]
+fn worked_states(state: State<AppState>, mode: String) -> Vec<String> {
+    let dial_hz: u64 = state
+        .db
+        .get_config("dial_hz")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(bands::default_band().dial_hz);
+    state.db.worked_states(bands::band_for_freq_hz(dial_hz), &mode)
+}
+
 #[tauri::command]
 fn delete_qso(state: State<AppState>, id: i64) -> Result<(), String> {
     state.db.delete_qso(id).map_err(|e| e.to_string())
@@ -583,6 +610,9 @@ fn main() {
             worked_calls,
             worked_grids,
             worked_prefixes,
+            worked_dxcc_prefixes,
+            worked_cq_zones,
+            worked_states,
             delete_qso,
             save_qso,
             export_adif,

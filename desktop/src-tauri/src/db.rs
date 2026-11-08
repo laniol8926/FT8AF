@@ -492,22 +492,98 @@ impl Db {
     /// New-Prefix filter. Derived from the worked calls rather than stored as
     /// its own column, same as grid/call aggregation above.
     pub fn worked_prefixes(&self) -> Vec<String> {
-        let conn = self.conn.lock();
-        let mut stmt = match conn.prepare("SELECT DISTINCT UPPER(call) FROM qso_log") {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let calls: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map(|it| it.filter_map(Result::ok).collect())
-            .unwrap_or_default();
-        let mut prefixes: Vec<String> = calls
+        let mut prefixes: Vec<String> = self
+            .distinct_calls()
             .iter()
             .filter_map(|c| crate::wpx_prefix::of(c))
             .collect();
         prefixes.sort_unstable();
         prefixes.dedup();
         prefixes
+    }
+
+    /// Distinct DXCC entity prefixes (see `crate::dxcc`) already logged, any
+    /// band/mode -- mirrors Android's `GeneralVariables.dxccMap`, populated
+    /// by `DatabaseOpr.getQslDxccToMap` from every distinct logged call, for
+    /// the Decode list's New-DXCC filter.
+    pub fn worked_dxcc_prefixes(&self) -> Vec<String> {
+        let mut prefixes: Vec<String> = self
+            .distinct_calls()
+            .iter()
+            .filter_map(|c| crate::dxcc::lookup(c))
+            .map(|m| m.dxcc_prefix)
+            .collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        prefixes
+    }
+
+    /// Distinct CQ zones already logged, any band/mode -- mirrors Android's
+    /// `GeneralVariables.cqMap`, for the Decode list's New-Zone filter.
+    pub fn worked_cq_zones(&self) -> Vec<i64> {
+        let mut zones: Vec<i64> = self
+            .distinct_calls()
+            .iter()
+            .filter_map(|c| crate::dxcc::lookup(c))
+            .map(|m| m.cq_zone)
+            .collect();
+        zones.sort_unstable();
+        zones.dedup();
+        zones
+    }
+
+    /// Distinct US states worked on `band`/`mode` (both matched
+    /// case-insensitively), each resolved the same way a live decode's state
+    /// is (`crate::us_states::worked_state_for`: the logged ADIF `STATE`
+    /// when it's trustworthy, else the grid) -- mirrors Android's WAS
+    /// tracking (`DatabaseOpr.getQslDxccToMap`'s state pass,
+    /// `workedStateBandModes`), which is per band *and* mode unlike
+    /// DXCC/Zone above. Backs the Decode list's New-State filter.
+    pub fn worked_states(&self, band: &str, mode: &str) -> Vec<String> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT call, gridsquare, state FROM qso_log \
+             WHERE UPPER(band) = UPPER(?1) AND UPPER(mode) = UPPER(?2)",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map(params![band, mode], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        drop(stmt);
+        drop(conn);
+
+        let mut states: Vec<String> = rows
+            .iter()
+            .filter_map(|(call, grid, state)| {
+                let logged = if state.trim().is_empty() { None } else { Some(state.as_str()) };
+                let grid = if grid.is_empty() { None } else { Some(grid.as_str()) };
+                let call = if call.is_empty() { None } else { Some(call.as_str()) };
+                crate::us_states::worked_state_for(logged, grid, call)
+            })
+            .collect();
+        states.sort_unstable();
+        states.dedup();
+        states
+    }
+
+    /// Distinct calls already logged, any band/mode -- shared helper behind
+    /// [Self::worked_dxcc_prefixes]/[Self::worked_cq_zones], which both
+    /// derive their sets from the same any-band call list via
+    /// `crate::dxcc::lookup`.
+    fn distinct_calls(&self) -> Vec<String> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT DISTINCT UPPER(call) FROM qso_log") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
     }
 
     /// Flag a QSO as synced to an online service so re-runs are idempotent.
@@ -1334,6 +1410,140 @@ mod tests {
 
         let prefixes = db.worked_prefixes();
         assert_eq!(prefixes, vec!["K1".to_string(), "VE3".to_string(), "W1".to_string()]);
+    }
+
+    #[test]
+    fn worked_dxcc_prefixes_derives_and_dedupes_across_bands() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "w1aw".into(), // lower-case: still resolves/upper-cases fine
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(), // different band, same DXCC entity ("K") as W1AW -- dedupes
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "JA1ABC".into(),
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            // Not a callsign, but prefix matching can't tell: "FN42" starts
+            // with "F" (France's single-letter DXCC prefix), so it resolves
+            // the same way the original SQL/Java would -- a known, faithful
+            // quirk of longest-prefix matching, not something to special-case.
+            call: "FN42".into(),
+            qso_date: "20260604".into(),
+            time_on: "123000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let prefixes = db.worked_dxcc_prefixes();
+        assert_eq!(prefixes, vec!["F".to_string(), "JA".to_string(), "K".to_string()]);
+    }
+
+    #[test]
+    fn worked_cq_zones_derives_and_dedupes_across_bands() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), // United States -- CQ zone 5
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(), // also zone 5 -- dedupes with W1AW
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "JA1ABC".into(), // Japan -- CQ zone 25
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let zones = db.worked_cq_zones();
+        assert_eq!(zones, vec![5, 25]);
+    }
+
+    #[test]
+    fn worked_states_matches_band_and_mode_and_resolves_grid_and_logged_state() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            gridsquare: "FN42".into(), // resolves to MA via us_grid_states.json
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), // US call, no grid: trusts the logged STATE
+            state: "ct".into(),  // lower-case: result is still upper-cased
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "VK6ABC".into(), // non-US call, no grid, "WA" isn't trustworthy here
+            state: "WA".into(),    // Western Australia, not Washington
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1QRS".into(), // different band -- excluded
+            gridsquare: "EM12".into(),
+            qso_date: "20260604".into(),
+            time_on: "123000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let mut states = db.worked_states("20m", "FT8");
+        states.sort();
+        assert_eq!(states, vec!["CT".to_string(), "MA".to_string()]);
+
+        assert!(db.worked_states("30m", "FT8").is_empty());
     }
 
     #[test]

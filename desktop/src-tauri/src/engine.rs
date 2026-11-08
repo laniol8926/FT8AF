@@ -302,6 +302,19 @@ pub struct UiMessage {
     pub text: String,
     pub is_cq: bool,
     pub to_me: bool,
+    /// The sender's DXCC entity prefix (`crate::dxcc`), or `None` for an
+    /// unresolvable callsign -- computed once at decode time, matching
+    /// Android's `CallsignDatabase.getMessagesLocation` stamping `fromDxcc`
+    /// etc. onto each message rather than re-deriving it per render.
+    pub dxcc_prefix: Option<String>,
+    /// The sender's CQ zone, or `None` alongside `dxcc_prefix`.
+    pub cq_zone: Option<i64>,
+    /// The sender's US state, derived from its grid square (no callsign
+    /// fallback here -- that richer logic is for worked-set aggregation
+    /// from the log, see `crate::us_states::worked_state_for`; a live
+    /// decode only ever has a grid to go on, matching Android's
+    /// `CallsignDatabase` live-decode path).
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1230,19 +1243,25 @@ impl Engine {
         let now = self.now();
         let ui: Vec<UiMessage> = decoded
             .iter()
-            .map(|m| UiMessage {
-                utc_ms: now,
-                call_to: m.call_to.clone(),
-                call_from: m.call_from.clone(),
-                extra: m.extra.clone(),
-                grid: m.grid.clone(),
-                snr: m.snr,
-                freq_hz: m.freq_hz,
-                time_sec: m.time_sec,
-                text: decode_text(m),
-                is_cq: m.call_to.eq_ignore_ascii_case("CQ"),
-                to_me: !self.qso.my_call.is_empty()
-                    && m.call_to.eq_ignore_ascii_case(&self.qso.my_call),
+            .map(|m| {
+                let dxcc = crate::dxcc::lookup(&m.call_from);
+                UiMessage {
+                    utc_ms: now,
+                    call_to: m.call_to.clone(),
+                    call_from: m.call_from.clone(),
+                    extra: m.extra.clone(),
+                    grid: m.grid.clone(),
+                    snr: m.snr,
+                    freq_hz: m.freq_hz,
+                    time_sec: m.time_sec,
+                    text: decode_text(m),
+                    is_cq: m.call_to.eq_ignore_ascii_case("CQ"),
+                    to_me: !self.qso.my_call.is_empty()
+                        && m.call_to.eq_ignore_ascii_case(&self.qso.my_call),
+                    dxcc_prefix: dxcc.as_ref().map(|d| d.dxcc_prefix.clone()),
+                    cq_zone: dxcc.as_ref().map(|d| d.cq_zone),
+                    state: crate::us_states::state_for_grid(&m.grid),
+                }
             })
             .collect();
         self.emit(EngineEvent::Decoded(ui));

@@ -59,7 +59,7 @@ import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
 import { wpxPrefixOf } from "./wpxPrefix";
 
 type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
-type Filter = "all" | "cq" | "pota" | "grid" | "prefix" | "needed" | "tome";
+type Filter = "all" | "cq" | "pota" | "dxcc" | "zone" | "state" | "grid" | "prefix" | "needed" | "tome";
 const MAX_MESSAGES = 800;
 
 // "No limit" for the Logbook fetch: Number.MAX_SAFE_INTEGER round-trips
@@ -206,6 +206,15 @@ export default function App() {
   // CQ WPX prefixes already worked (any band/mode, see wpxPrefix.ts), for the
   // New Prefix filter chip.
   const [workedPrefixes, setWorkedPrefixes] = useState<Set<string>>(new Set());
+  // DXCC entity prefixes already worked (any band/mode, see dxcc.rs), for
+  // the New DXCC filter chip.
+  const [workedDxccPrefixes, setWorkedDxccPrefixes] = useState<Set<string>>(new Set());
+  // CQ zones already worked (any band/mode), for the New Zone filter chip.
+  const [workedCqZones, setWorkedCqZones] = useState<Set<number>>(new Set());
+  // US states already worked on the current band/mode (WAS is per band and
+  // mode, unlike DXCC/Zone above -- see db.rs's worked_states), for the New
+  // State filter chip.
+  const [workedStates, setWorkedStates] = useState<Set<string>>(new Set());
   const [myGrid, setMyGrid] = useState("");
   // Last QMX SWR/power meter reading (see qmx_meters.rs); null until a rig
   // that supports the query has reported one, matching Android's chips only
@@ -237,6 +246,23 @@ export default function App() {
     api.workedPrefixes().then((prefixes) => setWorkedPrefixes(new Set(prefixes)));
   }
   useEffect(refreshWorkedPrefixes, []);
+
+  function refreshWorkedDxccPrefixes() {
+    api.workedDxccPrefixes().then((prefixes) => setWorkedDxccPrefixes(new Set(prefixes)));
+  }
+  useEffect(refreshWorkedDxccPrefixes, []);
+
+  function refreshWorkedCqZones() {
+    api.workedCqZones().then((zones) => setWorkedCqZones(new Set(zones)));
+  }
+  useEffect(refreshWorkedCqZones, []);
+
+  function refreshWorkedStates() {
+    api.workedStates("FT8").then((states) => setWorkedStates(new Set(states)));
+  }
+  // Re-fetch whenever the tuned band changes -- WAS is per band/mode, same
+  // reason refreshWorkedCalls re-fetches on dialHz.
+  useEffect(refreshWorkedStates, [dialHz]);
 
   // keep latest decoding flag for the toggle without stale closure
   const decodingRef = useRef(decoding);
@@ -388,6 +414,9 @@ export default function App() {
         refreshWorkedCalls();
         refreshWorkedGrids();
         refreshWorkedPrefixes();
+        refreshWorkedDxccPrefixes();
+        refreshWorkedCqZones();
+        refreshWorkedStates();
         break;
       case "meter":
         setMeter(e.data);
@@ -482,6 +511,9 @@ export default function App() {
       case "all": return true;
       case "cq": return m.is_cq;
       case "pota": return isPotaCq(m.is_cq, m.text);
+      case "dxcc": return m.is_cq && m.dxcc_prefix != null && !workedDxccPrefixes.has(m.dxcc_prefix);
+      case "zone": return m.is_cq && m.cq_zone != null && !workedCqZones.has(m.cq_zone);
+      case "state": return m.is_cq && m.state != null && !workedStates.has(m.state);
       case "grid": return m.is_cq && m.grid.length >= 4 && !workedGrids.has(m.grid.toUpperCase());
       case "prefix": {
         if (!m.is_cq) return false;
@@ -1039,15 +1071,14 @@ function colormap(v: number): [number, number, number] {
   return [255, Math.round(230 + (t - 0.75) * 4 * 25), Math.round((t - 0.75) * 4 * 200)];
 }
 
-// New DXCC / New Zone / New State aren't here: those need a DXCC-entity,
-// CQ-zone, and US-state-from-callsign reference database desktop doesn't
-// have yet (same gap hunt.ts's new_dxcc_first priority already documents) --
-// left out rather than faked, unlike New Prefix/Needed below, which only
-// need data desktop already has (worked_prefixes, workedCalls).
+// Same order as Android's DecodeScreen.kt filterOptions.
 const DECODE_FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "cq", label: "CQ Calls" },
   { id: "pota", label: "CQ POTA" },
+  { id: "dxcc", label: "New DXCC" },
+  { id: "zone", label: "New Zone" },
+  { id: "state", label: "New State" },
   { id: "grid", label: "New Grid" },
   { id: "prefix", label: "New Prefix" },
   { id: "needed", label: "Needed" },

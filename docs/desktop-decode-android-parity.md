@@ -36,31 +36,55 @@ this branch. Not pushed or PR'd yet — still changing.
     QSL-confirmed list, matching Android's actual "Needed" filter
     (`DecodeScreen.kt`).
 
-## Deliberately not done yet
+## Done this round, part 2: New DXCC / New Zone / New State
 
-- **New DXCC / New Zone / New State filter chips.** Scoped but not started:
-  - A Rust port of `CallsignDatabase.java`/`CallsignFileOperation.java`:
-    parse the AD1C "big" `cty.dat` country file (`ft8af/app/src/main/assets/cty.dat`,
-    embedded as an Android asset) into entity records (country name, CQ
-    zone, DXCC-identifying prefix) plus an alias-to-entity map, with
-    longest-prefix-match lookup (`SUBSTR(call,1,LEN(alias))=alias`, or an
-    exact `=CALL` alias) — see `CallsignDatabase.getCallsignInfo`'s SQL for
-    the exact matching rule to replicate.
-  - Worked-set aggregation: `worked_dxcc_prefixes()` / `worked_cq_zones()`
-    (any-band, mirroring `GeneralVariables.dxccMap`/`cqMap`, populated in
-    `DatabaseOpr.getQslDxccToMap`).
-  - **New State** needs a second, smaller port: `us_grid_states.json`
-    (grid4 → USPS state code, 713 entries) for `stateForGrid`, plus
-    `GeneralVariables.workedStateFor`'s fallback chain (logged ADIF `STATE`
-    when it's a plausible US state *and* the QSO is identifiably a US
-    station, else grid-derived) and `isStateWorkedOn` (WAS is per band
-    **and** mode, unlike DXCC/Zone). Desktop's `QsoRecord.state` already
-    exists (`db.rs`) but its doc comment notes grid-derivation doesn't
-    exist yet — this would close that gap.
-  - None of this is faked in the meantime: the three chips are simply left
-    out of `DECODE_FILTERS` rather than added as no-ops, consistent with
-    how `hunt.ts` already documents the same gap for Hunt's
-    `new_dxcc_first` priority.
+Fully real, not stubs -- the DXCC-entity, CQ-zone, and US-state reference
+data this previously depended on (hunt.ts's `new_dxcc_first` gap, and the
+entry below for this doc's own earlier state) is now ported:
+
+- **`src-tauri/src/dxcc.rs`**: a Rust port of
+  `CallsignDatabase.java`/`CallsignFileOperation.java`. Parses the AD1C
+  "big" `cty.dat` country file (copied in at
+  `src-tauri/resources/cty.dat`, same bytes as the Android asset) into
+  entity records (country name, CQ zone, DXCC-identifying prefix) plus an
+  alias-to-entity map, with the same longest-prefix-match lookup
+  (`SUBSTR(call,1,LEN(alias))=alias`, or an exact `=CALL` alias) as
+  `CallsignDatabase.getCallsignInfo`'s SQL. `lookup(call)` is a pure
+  function over a `once_cell::Lazy`-parsed table, unit-tested including a
+  sanity check on the embedded resource's own size (catches a
+  truncated/corrupt `cty.dat` at test time, not at runtime). Note a
+  faithful quirk carried over from the original: prefix matching can't
+  tell a real callsign from a grid square that happens to start with a
+  valid single-letter prefix (e.g. `"FN42"` resolves to France's `"F"`) --
+  not a bug, see the `worked_dxcc_prefixes` test's comment.
+- **`src-tauri/src/us_states.rs`**: `state_for_grid` (grid4 → USPS code via
+  `resources/us_grid_states.json`, 713 entries, same bytes as the Android
+  asset) plus `worked_state_for`, a full port of
+  `GeneralVariables.workedStateFor`'s fallback chain (logged ADIF `STATE`
+  when it's a plausible US state *and* the QSO is identifiably a US
+  station -- via grid, or a hand-rolled `US_CALL` pattern when the grid's
+  too short/missing -- else grid-derived). `QsoRecord.state` already
+  existed in `db.rs`; its doc comment used to note grid-derivation didn't
+  exist yet -- that gap is now closed.
+- **Worked-set aggregation** in `db.rs`: `worked_dxcc_prefixes()` /
+  `worked_cq_zones()` (any-band, mirroring `GeneralVariables.dxccMap`/
+  `cqMap`) and `worked_states(band, mode)` (per band **and** mode, unlike
+  DXCC/Zone -- WAS is earned per band/mode, mirroring
+  `workedStateBandModes`), each with a unit test, plus matching Tauri
+  commands and `api.*` wrappers.
+- **Live enrichment**: `engine.rs`'s `publish_decodes` now stamps
+  `dxcc_prefix`/`cq_zone`/`state` onto every `UiMessage` at decode time
+  (one `dxcc::lookup` + `us_states::state_for_grid` call per message),
+  matching Android's `CallsignDatabase.getMessagesLocation` doing the same
+  stamping rather than the frontend re-deriving it per render. The live
+  per-message state check is grid-only (no callsign fallback), matching
+  Android's live-decode path -- the richer logged-state fallback in
+  `worked_state_for` is only for aggregating the *worked* set from the log.
+- All three chips are now in `DECODE_FILTERS`, in Android's own order
+  (`DecodeScreen.kt`'s `filterOptions`): All, CQ Calls, CQ POTA, New DXCC,
+  New Zone, New State, New Grid, New Prefix, Needed, For Me.
+
+## Deliberately not done yet
 
 - **Decode row header / column restructuring** (Time | Call | SNR | Δt).
   Each row currently renders the full decoded message as one text field
