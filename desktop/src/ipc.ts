@@ -259,6 +259,8 @@ export const api = {
   /** Grid squares already worked (any band/mode), for Hunt's new-grid priority
    *  and the New Grid filter chip. */
   workedGrids: () => invoke<string[]>("worked_grids"),
+  /** CQ WPX prefixes already worked (any band/mode), for the New Prefix filter chip. */
+  workedPrefixes: () => invoke<string[]>("worked_prefixes"),
   deleteQso: (id: number) => invoke("delete_qso", { id }),
   saveQso: (record: QsoRecord) => invoke<number>("save_qso", { record }),
   /** Export ADIF, optionally restricted to an inclusive YYYYMMDD date range. */

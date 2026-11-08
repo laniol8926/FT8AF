@@ -487,6 +487,29 @@ impl Db {
             .unwrap_or_default()
     }
 
+    /// Distinct CQ WPX prefixes (see `crate::wpx_prefix`) already logged, any
+    /// band/mode -- mirrors Android's `QSL_Prefix_list` for the Decode list's
+    /// New-Prefix filter. Derived from the worked calls rather than stored as
+    /// its own column, same as grid/call aggregation above.
+    pub fn worked_prefixes(&self) -> Vec<String> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT DISTINCT UPPER(call) FROM qso_log") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let calls: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        let mut prefixes: Vec<String> = calls
+            .iter()
+            .filter_map(|c| crate::wpx_prefix::of(c))
+            .collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        prefixes
+    }
+
     /// Flag a QSO as synced to an online service so re-runs are idempotent.
     /// `service` is `"cloudlog"` or `"qrz"`; unknown services are a no-op.
     pub fn mark_synced(&self, id: i64, service: &str) -> anyhow::Result<()> {
@@ -1267,6 +1290,50 @@ mod tests {
         let mut grids = db.worked_grids();
         grids.sort();
         assert_eq!(grids, vec!["EM12".to_string(), "FN31".to_string()]);
+    }
+
+    #[test]
+    fn worked_prefixes_derives_and_dedupes_across_bands() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "w1aw".into(), // lower-case: result is still upper-cased
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(), // different band: still counts (not scoped)
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "VE3ABC".into(),
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "FN42".into(), // not a callsign -- yields no prefix, excluded
+            qso_date: "20260604".into(),
+            time_on: "123000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let prefixes = db.worked_prefixes();
+        assert_eq!(prefixes, vec!["K1".to_string(), "VE3".to_string(), "W1".to_string()]);
     }
 
     #[test]

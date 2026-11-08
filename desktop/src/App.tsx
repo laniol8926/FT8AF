@@ -55,9 +55,11 @@ import {
   type HuntCandidate,
   type HuntPriority,
 } from "./hunt";
+import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
+import { wpxPrefixOf } from "./wpxPrefix";
 
 type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
-type Filter = "all" | "cq" | "pota" | "grid" | "tome";
+type Filter = "all" | "cq" | "pota" | "grid" | "prefix" | "needed" | "tome";
 const MAX_MESSAGES = 800;
 
 // "No limit" for the Logbook fetch: Number.MAX_SAFE_INTEGER round-trips
@@ -183,6 +185,11 @@ export default function App() {
   const [audio, setAudio] = useState<{ db: number; silent: boolean } | null>(null);
   const [status, setStatus] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  // Whether the "More" controls panel (Tx stage picker + Stop TX, see TxBar)
+  // is open -- off by default, matching Android's operate-controls drawer
+  // starting collapsed. Toggled from the tab bar's More button rather than
+  // shown as a persistent bar, which is what it replaced.
+  const [moreOpen, setMoreOpen] = useState(false);
   const [txFreq, setTxFreq] = useState(1500);
   const [txGain, setTxGain] = useState(90); // TX level as a percentage (0–100)
   const [inputGain, setInputGain] = useState(100); // RX input gain as a percentage (0–100)
@@ -196,7 +203,16 @@ export default function App() {
   // Grid squares already worked (any band/mode), for the New Grid filter chip
   // and Hunt's new_grid_first priority.
   const [workedGrids, setWorkedGrids] = useState<Set<string>>(new Set());
+  // CQ WPX prefixes already worked (any band/mode, see wpxPrefix.ts), for the
+  // New Prefix filter chip.
+  const [workedPrefixes, setWorkedPrefixes] = useState<Set<string>>(new Set());
   const [myGrid, setMyGrid] = useState("");
+  // Last QMX SWR/power meter reading (see qmx_meters.rs); null until a rig
+  // that supports the query has reported one, matching Android's chips only
+  // appearing once a reading exists.
+  const [meter, setMeter] = useState<{ swr_ratio: number | null; power_watts: number | null } | null>(
+    null
+  );
 
   // Hunt: auto-answer the best eligible CQ each cycle (see src/hunt.ts).
   // Persisted the same way every other sticky setting on this screen is.
@@ -216,6 +232,11 @@ export default function App() {
     api.workedGrids().then((grids) => setWorkedGrids(new Set(grids)));
   }
   useEffect(refreshWorkedGrids, []);
+
+  function refreshWorkedPrefixes() {
+    api.workedPrefixes().then((prefixes) => setWorkedPrefixes(new Set(prefixes)));
+  }
+  useEffect(refreshWorkedPrefixes, []);
 
   // keep latest decoding flag for the toggle without stale closure
   const decodingRef = useRef(decoding);
@@ -366,6 +387,10 @@ export default function App() {
         setStatus(`QSO logged: ${e.data.call} ${e.data.rst_sent}/${e.data.rst_rcvd}`);
         refreshWorkedCalls();
         refreshWorkedGrids();
+        refreshWorkedPrefixes();
+        break;
+      case "meter":
+        setMeter(e.data);
         break;
       case "info":
         setStatus(e.data);
@@ -458,6 +483,16 @@ export default function App() {
       case "cq": return m.is_cq;
       case "pota": return isPotaCq(m.is_cq, m.text);
       case "grid": return m.is_cq && m.grid.length >= 4 && !workedGrids.has(m.grid.toUpperCase());
+      case "prefix": {
+        if (!m.is_cq) return false;
+        const prefix = wpxPrefixOf(m.call_from);
+        return prefix != null && !workedPrefixes.has(prefix);
+      }
+      // Mirrors Android's "Needed" filter: any message (not just CQs) from a
+      // callsign not yet worked on the current band -- same "worked" set the
+      // Decode list already strikes through with (workedCalls), not a
+      // separate QSL-confirmed list (see db.rs's worked_calls doc comment).
+      case "needed": return !workedCalls.has(m.call_from.toUpperCase());
       case "tome": return m.to_me;
     }
   });
@@ -478,6 +513,7 @@ export default function App() {
         clock={clock}
         rigLabel={rigLabel}
         txState={txState}
+        meter={meter}
         onCq={() => api.startCq()}
         onFreeText={(text) => api.freeText(text)}
         onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
@@ -568,7 +604,7 @@ export default function App() {
           />
         )}
       </div>
-      {tab !== "waterfall" && (
+      {tab !== "waterfall" && moreOpen && (
         <TxBar
           txState={txState}
           decoding={decoding}
@@ -577,7 +613,12 @@ export default function App() {
         />
       )}
       <div className="status-line">{status}</div>
-      <TabBar tab={tab} onTab={setTab} />
+      <TabBar
+        tab={tab}
+        onTab={setTab}
+        moreOpen={moreOpen}
+        onToggleMore={() => setMoreOpen((v) => !v)}
+      />
     </>
   );
 }
@@ -593,7 +634,17 @@ function ComingSoonScreen({ title, detail }: { title: string; detail: string }) 
   );
 }
 
-function TabBar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
+function TabBar({
+  tab,
+  onTab,
+  moreOpen,
+  onToggleMore,
+}: {
+  tab: Tab;
+  onTab: (t: Tab) => void;
+  moreOpen: boolean;
+  onToggleMore: () => void;
+}) {
   const items: { id: Tab; label: string; icon: string }[] = [
     { id: "decode", label: "Decode", icon: "☰" },
     { id: "map", label: "Map", icon: "🌐" },
@@ -614,6 +665,17 @@ function TabBar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
           <span className="tabbar-label">{it.label}</span>
         </button>
       ))}
+      {/* Not a tab -- opens the Tx stage/Stop TX panel over the current
+          screen rather than switching screens, matching Android's
+          operate-controls drawer toggle ("More controls" in TabBar.kt). */}
+      <button
+        className={"tabbar-item" + (moreOpen ? " active" : "")}
+        onClick={onToggleMore}
+        title="More: TX stage picker and Stop TX"
+      >
+        <span className="tabbar-icon">🎚</span>
+        <span className="tabbar-label">More</span>
+      </button>
     </div>
   );
 }
@@ -627,6 +689,7 @@ function TopBar(props: {
   clock: ClockSyncEvent | null;
   rigLabel: string;
   txState: TxStateEvent | null;
+  meter: { swr_ratio: number | null; power_watts: number | null } | null;
   onCq: () => void;
   onFreeText: (text: string) => void;
   onToggleTune: () => void;
@@ -636,7 +699,7 @@ function TopBar(props: {
   onRefresh: () => void;
 }) {
   const {
-    cycle, bands, dialHz, onBand, rig, clock, rigLabel, txState,
+    cycle, bands, dialHz, onBand, rig, clock, rigLabel, txState, meter,
     onCq, onFreeText, onToggleTune, huntEnabled, onToggleHunt, onClearDecodes, onRefresh,
   } = props;
   const [cqMoreOpen, setCqMoreOpen] = useState(false);
@@ -744,6 +807,34 @@ function TopBar(props: {
         </button>
 
         {slotParity && <span className="pill pill-dark pill-static">{slotParity}</span>}
+
+        {/* QMX SWR/power meter chips, matching Android's CompactSwrChip/
+            CompactPowerChip -- only placed once a reading has actually come
+            back (see engine.rs's poll_meters, gated on an in-flight TX), not
+            a permanent zeroed placeholder. */}
+        {meter?.swr_ratio != null && (
+          <span
+            className="meter-chip"
+            title={`SWR ${formatSwrRatio(meter.swr_ratio)} to 1`}
+            style={{
+              color:
+                swrBand(meter.swr_ratio) === "good"
+                  ? "var(--ok)"
+                  : swrBand(meter.swr_ratio) === "caution"
+                  ? "var(--yellow)"
+                  : "var(--tx)",
+            }}
+          >
+            <span className="meter-chip-label">SWR</span>
+            <span className="meter-chip-value">{formatSwrRatio(meter.swr_ratio)}</span>
+          </span>
+        )}
+        {meter?.power_watts != null && (
+          <span className="meter-chip" title={`Output power ${formatPowerWatts(meter.power_watts)}`}>
+            <span className="meter-chip-label">PWR</span>
+            <span className="meter-chip-value">{formatPowerWatts(meter.power_watts)}</span>
+          </span>
+        )}
 
         <div className="spacer" />
 
@@ -948,11 +1039,18 @@ function colormap(v: number): [number, number, number] {
   return [255, Math.round(230 + (t - 0.75) * 4 * 25), Math.round((t - 0.75) * 4 * 200)];
 }
 
+// New DXCC / New Zone / New State aren't here: those need a DXCC-entity,
+// CQ-zone, and US-state-from-callsign reference database desktop doesn't
+// have yet (same gap hunt.ts's new_dxcc_first priority already documents) --
+// left out rather than faked, unlike New Prefix/Needed below, which only
+// need data desktop already has (worked_prefixes, workedCalls).
 const DECODE_FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "cq", label: "CQ Calls" },
   { id: "pota", label: "CQ POTA" },
   { id: "grid", label: "New Grid" },
+  { id: "prefix", label: "New Prefix" },
+  { id: "needed", label: "Needed" },
   { id: "tome", label: "For Me" },
 ];
 

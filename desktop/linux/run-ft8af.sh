@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
-# Launcher for FT8AF on Linux, working around a real Hamlib version conflict
-# (see rig.rs's load_hamlib(): a bare dlopen("libhamlib.so.4"), resolved
-# against whatever the dynamic linker finds first).
+# Launcher for FT8AF on Linux.
 #
-# QMX (and other newer rigs) need a newer Hamlib than the distro package
-# usually ships -- confirmed on this machine: the system's
-# libhamlib.so.4 is Hamlib 4.5.4 (no QMX support at all), while
-# /usr/local/lib/libhamlib.so.4 is a separately-built Hamlib 4.7.1 that does
-# have it. Both share the same soname, so whichever the linker resolves
-# first wins for any process that doesn't override the search path.
+# Historically this LD_PRELOADed a newer Hamlib build to get QRP Labs QMX
+# support (the distro's libhamlib.so.4 is 4.5.4, no QMX support at all; a
+# separately-built 4.7.1 at /usr/local/lib does have it, same soname, so
+# whichever the dynamic linker resolves first wins for any process that
+# doesn't override the search path). That env var is inherited by every
+# child process a Tauri app spawns, including WebKitGTK's own
+# out-of-process WebProcess/NetworkProcess helpers, which have nothing to do
+# with Hamlib and should never load it -- confirmed directly that this left
+# the webview rendering nothing (WebKitWebProcess alive, never painting),
+# while the exact same binary without the env var rendered fine.
 #
-# We deliberately do NOT upgrade or replace the system Hamlib package --
-# other software on this machine (CQRLOG) depends on it, and installing a
-# newer one over it would break that. Instead this script LD_PRELOADs that
-# one library into FT8AF's own process: rig.rs's dlopen("libhamlib.so.4")
-# then resolves to the already-loaded object, since the soname matches.
-#
-# LD_PRELOAD rather than prepending /usr/local/lib to LD_LIBRARY_PATH: the
-# latter redirects *every* library FT8AF resolves, so a machine that also has
-# a locally built libssl/libcurl/libstdc++ under /usr/local/lib would load
-# those instead of the distro copies the binary was linked against -- version
-# symbol errors or a crash at startup, from a script whose only job is to
-# pick a Hamlib. If no newer build exists, this is a no-op and FT8AF falls
-# back to whatever the system provides (same as running the binary directly).
+# Fixed at the root instead: rig.rs's load_hamlib() now tries
+# /usr/local/lib/libhamlib.so.4 directly as its first dlopen candidate (see
+# PREFERRED_LINUX_HAMLIB), so this script no longer needs to do anything
+# beyond finding and exec-ing the binary. Kept as a thin wrapper rather than
+# removed outright so the dev-tree-vs-PATH fallback below still has a home.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,11 +33,6 @@ else
 	echo "error: no ft8af binary found -- looked at $DEV_BIN and on PATH." >&2
 	echo "       Build it with 'npm run tauri build' or install the package." >&2
 	exit 1
-fi
-
-HAMLIB=/usr/local/lib/libhamlib.so.4
-if [ -f "$HAMLIB" ]; then
-	export LD_PRELOAD="$HAMLIB${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 
 exec "$BIN" "$@"

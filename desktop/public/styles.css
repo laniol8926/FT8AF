@@ -156,13 +156,28 @@ select option {
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); display: inline-block; }
 .status-dot.ok { background: var(--ok); }
 
-/* Call CQ pill + its MORE badge/popover. */
+/* QMX SWR/power meter chips, matching Android's CompactMeterChip: a small
+   label-over-value readout at pill height. */
+.meter-chip {
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 44px; height: 40px; border-radius: var(--radius-md);
+  background: var(--panel-3); border: 1px solid var(--border); color: var(--text);
+}
+.meter-chip-label { font-size: 9px; color: var(--muted); line-height: 1.2; }
+.meter-chip-value { font-size: 12px; font-weight: 700; line-height: 1.2; color: inherit; font-variant-numeric: tabular-nums; }
+
+/* Call CQ pill + its MORE badge/popover. Widened (min-width + extra right
+   padding) so the MORE badge -- positioned past the pill's own right edge --
+   has room to sit beside the "CQ" text instead of over it; at the base
+   .pill padding the two-line "Call/CQ" label left the pill exactly as wide
+   as its text, with nothing to its right for the badge to occupy. */
 .cq-pill-wrap { position: relative; }
 .pill-cq {
   background: var(--accent); border: 1px solid var(--accent); color: #1a0f00;
+  min-width: 76px; padding-right: 22px;
 }
 .pill-more-badge {
-  position: absolute; top: -6px; right: -10px;
+  position: absolute; top: -6px; right: -8px;
   background: var(--panel-3); color: var(--text); border: 1px solid var(--border);
   border-radius: var(--radius-sm); font-size: 9px; font-weight: 700;
   padding: 2px 5px; cursor: pointer;
@@ -258,7 +273,7 @@ select option {
 .decode-row.tome { background: var(--signal-soft); }
 .decode-row.clickable { cursor: pointer; }
 .decode-row.clickable:hover { background: var(--panel-2); }
-.decode-row-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.decode-row-msg { width: 30ch; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 /* Already-worked station (this band + mode): struck through in red, matching
    the Android app's worked-station highlighting. */
 .decode-row-msg.worked { text-decoration: line-through; color: var(--tx); opacity: 0.7; }

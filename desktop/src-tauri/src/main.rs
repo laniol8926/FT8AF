@@ -241,6 +241,13 @@ fn worked_grids(state: State<AppState>) -> Vec<String> {
     state.db.worked_grids()
 }
 
+/// CQ WPX prefixes already logged (any band/mode), for the Decode list's
+/// New-Prefix filter.
+#[tauri::command]
+fn worked_prefixes(state: State<AppState>) -> Vec<String> {
+    state.db.worked_prefixes()
+}
+
 #[tauri::command]
 fn delete_qso(state: State<AppState>, id: i64) -> Result<(), String> {
     state.db.delete_qso(id).map_err(|e| e.to_string())
@@ -575,6 +582,7 @@ fn main() {
             log_count,
             worked_calls,
             worked_grids,
+            worked_prefixes,
             delete_qso,
             save_qso,
             export_adif,
