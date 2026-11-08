@@ -16,6 +16,7 @@ use crate::db::{Db, QsoRecord};
 use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
 use crate::qmx_cat_tones as cat_tones;
+use crate::qmx_meters;
 use crate::qso::{QsoEngine, QsoOutcome, QsoStatus};
 use crate::rig::{RigConfig, RigConnection};
 use crate::util;
@@ -373,6 +374,10 @@ pub enum EngineEvent {
     /// and warn when the captured audio is silent (e.g. the source/DAX channel
     /// isn't routed) instead of leaving a mysteriously blank waterfall.
     InputLevel(InputLevelEvent),
+    /// SWR/output-power readings polled over CAT while transmitting (QMX
+    /// only — see [`crate::rig::supports_meter_query`]). Either field is
+    /// `None` when that particular query didn't return a valid reading.
+    Meter(MeterEvent),
     Info(String),
     Error(String),
 }
@@ -384,6 +389,12 @@ pub struct InputLevelEvent {
     /// True when the level is at/below the silence floor while decoding — the
     /// "no audio reaching the app" condition.
     pub silent: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MeterEvent {
+    pub swr_ratio: Option<f32>,
+    pub power_watts: Option<f32>,
 }
 
 /// Thread-safe handle for sending commands to the engine. Wraps the `Sender` in
@@ -497,6 +508,11 @@ struct Engine {
     /// (currently just the QRP Labs QMX -- see
     /// [`crate::rig::needs_cat_tone_tx`]). Recomputed on every `select_rig`.
     tx_via_cat_tones: bool,
+    /// Whether the connected rig answers the `SW;`/`PC;` SWR/power meter
+    /// queries (currently just the QRP Labs QMX -- see
+    /// [`crate::rig::supports_meter_query`]). Recomputed on every
+    /// `select_rig`, same as `tx_via_cat_tones`.
+    rig_supports_meters: bool,
     /// The in-flight CAT-tone transmission, if `tx_via_cat_tones` started one.
     /// Mutually exclusive with `tx_playback` -- `start_transmit` uses one path
     /// or the other. Serviced from the run loop (`service_cat_tx`), never from
@@ -651,6 +667,7 @@ impl Engine {
             tx_gain,
             tx_left_channel_only: false,
             tx_via_cat_tones: false,
+            rig_supports_meters: false,
             tx_cat: None,
             tx_tune: None,
             rx_gain,
@@ -750,6 +767,34 @@ impl Engine {
                         db,
                         silent: db <= SILENCE_DBFS,
                     }));
+                }
+
+                // QMX SWR/power meters, read over CAT -- ported from Android's
+                // MeterProtectionController/QmxMeterReplies polling (there,
+                // driven by the rig's own showAlert() callback; here, the
+                // same ~1/s cadence as this tick block). Only while actually
+                // keyed (there's no RF to measure otherwise) and only for a
+                // QMX, the one rig this firmware extension exists on.
+                //
+                // Deliberately excludes `tx_cat` (an in-flight CAT-tone
+                // transmission): its per-symbol `TA` commands share this same
+                // blocking serial connection on this same engine thread, paced
+                // by this run loop's own Instant-based clock (see
+                // service_cat_tx). A query+reply round-trip inserted here
+                // would add real, if brief, latency to that thread right
+                // before service_cat_tx runs later in this same iteration --
+                // a correctness risk to exact symbol timing this project has
+                // put a lot of care into (see docs/qmx-transmit.md) that
+                // isn't worth it for a once-a-second meter read. Audio-based
+                // TX and Tune (a steady, non-symbol-paced carrier) have no
+                // such timing dependency, so polling there is safe; a CAT-tone
+                // transmission instead gets one final reading right as it
+                // ends (see finalize_tx). A failed query just means no
+                // reading this tick -- the meter display simply holds its
+                // last value, same as Android's.
+                let meter_safe_to_poll = self.tx_playback.is_some() || self.tx_tune.is_some();
+                if meter_safe_to_poll && self.rig_supports_meters {
+                    self.poll_meters();
                 }
             }
 
@@ -1090,6 +1135,13 @@ impl Engine {
         let had_tune = self.tx_tune.take();
         let tune_was_cat = matches!(had_tune, Some(TuneHandle::Cat));
         if had_cat || tune_was_cat {
+            // A CAT-tone transmission doesn't get polled live (see the 1Hz
+            // tick block's comment on why) -- take one last reading here
+            // instead, while RF from the final symbol is still live, just
+            // before the key-up command below silences it.
+            if had_cat && self.rig_supports_meters {
+                self.poll_meters();
+            }
             if let Some(rig) = self.rig.as_mut() {
                 // Best-effort: a failed key-up here has already failed every
                 // other CAT call this over (send_raw_cat marks the rig
@@ -1102,6 +1154,25 @@ impl Engine {
         if had_audio || had_cat || had_tune.is_some() {
             self.set_ptt(false);
             self.publish_tx_state();
+        }
+    }
+
+    /// One SWR/power reading over CAT (QMX only -- gated by
+    /// `rig_supports_meters`, checked by callers). Emits a `Meter` event only
+    /// if at least one of the two queries returned a valid reading; a failed
+    /// or unparseable reply just means no event this call, not an error.
+    fn poll_meters(&mut self) {
+        let Some(rig) = self.rig.as_mut() else { return };
+        let swr = rig
+            .send_raw_cat_query(qmx_meters::SWR_QUERY, qmx_meters::REPLY_TERM)
+            .ok()
+            .and_then(|r| qmx_meters::parse_swr(&r));
+        let power = rig
+            .send_raw_cat_query(qmx_meters::POWER_QUERY, qmx_meters::REPLY_TERM)
+            .ok()
+            .and_then(|r| qmx_meters::parse_power_watts(&r));
+        if swr.is_some() || power.is_some() {
+            self.emit(EngineEvent::Meter(MeterEvent { swr_ratio: swr, power_watts: power }));
         }
     }
 
@@ -1557,6 +1628,7 @@ impl Engine {
         self.rig = None;
         self.tx_left_channel_only = crate::rig::needs_left_channel_tx_audio(cfg.backend, cfg.hamlib_model);
         self.tx_via_cat_tones = crate::rig::needs_cat_tone_tx(cfg.backend, cfg.hamlib_model);
+        self.rig_supports_meters = crate::rig::supports_meter_query(cfg.backend, cfg.hamlib_model);
         match RigConnection::connect(&cfg) {
             Ok(mut rig) => {
                 let _ = rig.set_frequency(self.dial_hz);

@@ -45,9 +45,19 @@ import {
 import { applySelection, configToSelection, rigName, rigOptions } from "./rig";
 import { debounce } from "./debounce";
 import { audioDeviceLabel } from "./audioDevice";
+import {
+  countRepliesTo,
+  huntPriorityFromConfig,
+  isPotaCq,
+  maidenheadDistanceKm,
+  selectHuntCandidate,
+  HUNT_PRIORITIES,
+  type HuntCandidate,
+  type HuntPriority,
+} from "./hunt";
 
-type Tab = "decode" | "log" | "settings";
-type Filter = "all" | "cq" | "tome";
+type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
+type Filter = "all" | "cq" | "pota" | "grid" | "tome";
 const MAX_MESSAGES = 800;
 
 // "No limit" for the Logbook fetch: Number.MAX_SAFE_INTEGER round-trips
@@ -126,6 +136,42 @@ function drawWaterfallRow(bins: number[], boundary = false) {
   }
 }
 
+// Olive/yellow label color for inline waterfall callsign labels -- matches
+// the Android app's look (distinct from the cyan spectral trace and the red
+// TX marker, readable against both).
+const SIGNAL_LABEL_COLOR = "#c7c04a";
+// How much vertical waterfall history (px) each label spans before it's
+// scrolled past -- long enough to stay legible for a few seconds of history,
+// short enough that two cycles' labels at a similar frequency don't fully
+// overlap.
+const SIGNAL_LABEL_HEIGHT = 120;
+
+// Bakes each CQ caller's callsign into the waterfall at its decode frequency,
+// written vertically (bottom-to-top) so it reads alongside its own signal
+// trace rather than across neighboring ones -- same "paint once, let it
+// scroll with the rest of the bitmap" technique drawWaterfallRow's boundary
+// time-label already uses, since this canvas is a persistent scrolling
+// bitmap, not redrawn from scratch each frame.
+function drawSignalLabels(messages: UiMessage[]) {
+  const cv = wfCanvas;
+  if (!cv || cv.width === 0) return;
+  const ctx = cv.getContext("2d");
+  if (!ctx) return;
+  ctx.font = "11px monospace";
+  ctx.fillStyle = SIGNAL_LABEL_COLOR;
+  ctx.textBaseline = "bottom";
+  const y = Math.min(SIGNAL_LABEL_HEIGHT, cv.height);
+  for (const m of messages) {
+    if (!m.is_cq) continue;
+    const x = Math.round((m.freq_hz / WF_TOP_HZ) * cv.width);
+    ctx.save();
+    ctx.translate(x + 4, y);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(`CQ ${m.call_from}`, 0, 0);
+    ctx.restore();
+  }
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("decode");
   const [messages, setMessages] = useState<UiMessage[]>([]);
@@ -147,6 +193,17 @@ export default function App() {
   // list's worked-station strikethrough. Desktop only ever logs "FT8" today
   // (see qso.rs), so that's the only mode checked for now.
   const [workedCalls, setWorkedCalls] = useState<Set<string>>(new Set());
+  // Grid squares already worked (any band/mode), for the New Grid filter chip
+  // and Hunt's new_grid_first priority.
+  const [workedGrids, setWorkedGrids] = useState<Set<string>>(new Set());
+  const [myGrid, setMyGrid] = useState("");
+
+  // Hunt: auto-answer the best eligible CQ each cycle (see src/hunt.ts).
+  // Persisted the same way every other sticky setting on this screen is.
+  const [huntEnabled, setHuntEnabled] = useState(false);
+  const [huntPriority, setHuntPriorityState] = useState<HuntPriority>("latest");
+  const [huntAvoidPileups, setHuntAvoidPileups] = useState(false);
+  const [huntMinSnr, setHuntMinSnr] = useState<number | null>(null);
 
   function refreshWorkedCalls() {
     api.workedCalls("FT8").then((calls) => setWorkedCalls(new Set(calls)));
@@ -155,9 +212,34 @@ export default function App() {
   // relative to the band currently being operated.
   useEffect(refreshWorkedCalls, [dialHz]);
 
+  function refreshWorkedGrids() {
+    api.workedGrids().then((grids) => setWorkedGrids(new Set(grids)));
+  }
+  useEffect(refreshWorkedGrids, []);
+
   // keep latest decoding flag for the toggle without stale closure
   const decodingRef = useRef(decoding);
   decodingRef.current = decoding;
+
+  // handleEvent below is registered once at mount (see the engine-event
+  // effect), so any state it reads directly would be frozen at its mount-time
+  // value -- these refs are the same "always current" escape hatch
+  // decodingRef already uses, kept in sync on every render.
+  const workedCallsRef = useRef(workedCalls);
+  workedCallsRef.current = workedCalls;
+  const workedGridsRef = useRef(workedGrids);
+  workedGridsRef.current = workedGrids;
+  const myGridRef = useRef(myGrid);
+  myGridRef.current = myGrid;
+  const huntEnabledRef = useRef(huntEnabled);
+  huntEnabledRef.current = huntEnabled;
+  const huntPriorityRef = useRef(huntPriority);
+  huntPriorityRef.current = huntPriority;
+  const huntAvoidPileupsRef = useRef(huntAvoidPileups);
+  huntAvoidPileupsRef.current = huntAvoidPileups;
+  const huntMinSnrRef = useRef(huntMinSnr);
+  huntMinSnrRef.current = huntMinSnr;
+  const txStateRef = useRef<TxStateEvent | null>(null);
 
   // Debounce IPC calls from the TX/RX gain sliders: a drag gesture can fire
   // dozens of onChange events (confirmed live -- "the slider is really
@@ -228,6 +310,17 @@ export default function App() {
     api.getConfig("rig_label").then((v) => {
       if (v) setRigLabel(v);
     });
+    api.getConfig("my_grid").then((v) => {
+      if (v) setMyGrid(v);
+    });
+    api.getConfig("hunt_enabled").then((v) => setHuntEnabled(v === "true"));
+    api.getConfig("hunt_priority").then((v) => setHuntPriorityState(huntPriorityFromConfig(v)));
+    api.getConfig("hunt_avoid_pileups").then((v) => setHuntAvoidPileups(v === "true"));
+    api.getConfig("hunt_min_snr").then((v) => {
+      const n = v == null || v === "" ? NaN : parseInt(v, 10);
+      setHuntMinSnr(Number.isNaN(n) ? null : n);
+    });
+    maybeAutoStartDecode();
     return () => {
       cancelled = true;
       unlisten?.();
@@ -246,12 +339,15 @@ export default function App() {
             if (fresh.length === 0) return prev;
             return [...fresh, ...prev].slice(0, MAX_MESSAGES);
           });
+          drawSignalLabels(e.data);
+          runHunt(e.data);
         }
         break;
       case "cycle":
         setCycle(e.data);
         break;
       case "tx_state":
+        txStateRef.current = e.data;
         setTxState(e.data);
         break;
       case "rig_status":
@@ -269,6 +365,7 @@ export default function App() {
       case "qso_completed":
         setStatus(`QSO logged: ${e.data.call} ${e.data.rst_sent}/${e.data.rst_rcvd}`);
         refreshWorkedCalls();
+        refreshWorkedGrids();
         break;
       case "info":
         setStatus(e.data);
@@ -279,15 +376,75 @@ export default function App() {
     }
   }
 
-  function toggleDecode() {
-    if (decodingRef.current) {
-      api.stopDecode();
-      setDecoding(false);
-      setAudio(null); // no input meter while stopped
-    } else {
-      api.startDecode();
-      setDecoding(true);
+  // Hunt: from this decode batch's CQ callers (not already worked), pick the
+  // best one per the operator's priority/avoid-pileups/min-SNR options (see
+  // src/hunt.ts) and answer it -- but never while already in a QSO, so Hunt
+  // only ever starts a new one, it doesn't step on an in-progress exchange.
+  // Reads every setting through a ref (see the comment above workedCallsRef):
+  // this function is defined fresh each render, but the *registered* listener
+  // is captured once at mount, so direct state reads here would be frozen at
+  // their mount-time (empty/default) values forever.
+  function runHunt(batch: UiMessage[]) {
+    if (!huntEnabledRef.current) return;
+    if (txStateRef.current?.status.active) return;
+    const worked = workedCallsRef.current;
+    const priority = huntPriorityRef.current;
+    const avoidPileups = huntAvoidPileupsRef.current;
+    const minSnr = huntMinSnrRef.current;
+    const workedGridsNow = workedGridsRef.current;
+    const myGridNow = myGridRef.current;
+
+    const eligible = batch.filter((m) => m.is_cq && !worked.has(m.call_from.toUpperCase()));
+    if (eligible.length === 0) return;
+
+    const candidates: HuntCandidate[] = eligible.map((m, index) => ({
+      index,
+      snr: m.snr,
+      distanceKm: priority === "farthest" ? maidenheadDistanceKm(myGridNow, m.grid) : null,
+      isActivator: priority === "pota_first" && isPotaCq(m.is_cq, m.text),
+      isNewGrid:
+        priority === "new_grid_first" &&
+        m.grid.length >= 4 &&
+        !workedGridsNow.has(m.grid.toUpperCase()),
+      pileupCalls: avoidPileups ? countRepliesTo(m.call_from, batch) : 0,
+    }));
+
+    const chosen = selectHuntCandidate(candidates, priority, avoidPileups, minSnr);
+    if (!chosen) return;
+    const target = eligible[chosen.index];
+    api.answer({ call_from: target.call_from, grid: target.grid, snr: target.snr });
+  }
+
+  // Decode starts itself once the operator has done the two things it
+  // actually needs -- a callsign and a configured rig -- instead of making
+  // "Start decode" a button someone has to remember to press every launch
+  // (matching the Android app, which has no such button at all: it just
+  // decodes once it has what it needs). Checked once at mount (persisted
+  // config from a previous session, via `getConfig`) and again right after
+  // Settings saves the station or connects a rig (via `known`, the values
+  // just submitted -- `api.setStation`/`selectRig` hand off to the engine
+  // over an async channel, so re-reading `getConfig` immediately after would
+  // race the write). A no-op once already decoding, so it's safe to call
+  // repeatedly.
+  async function maybeAutoStartDecode(known?: { call: string; rigBackend: string }) {
+    if (decodingRef.current) return;
+    const call = known?.call ?? (await api.getConfig("my_call"));
+    if (!call) return;
+    let backend = known?.rigBackend;
+    if (backend == null) {
+      const rigJson = await api.getConfig("rig_config");
+      backend = "none";
+      if (rigJson) {
+        try {
+          backend = (JSON.parse(rigJson) as { backend?: string }).backend ?? "none";
+        } catch {
+          // malformed persisted config -- treat as unconfigured, same as "none"
+        }
+      }
     }
+    if (backend === "none") return;
+    api.startDecode();
+    setDecoding(true);
   }
 
   function onBand(hz: number) {
@@ -295,37 +452,49 @@ export default function App() {
     api.setBand(hz);
   }
 
-  const visible = messages.filter((m) =>
-    filter === "all" ? true : filter === "cq" ? m.is_cq : m.to_me
-  );
+  const visible = messages.filter((m) => {
+    switch (filter) {
+      case "all": return true;
+      case "cq": return m.is_cq;
+      case "pota": return isPotaCq(m.is_cq, m.text);
+      case "grid": return m.is_cq && m.grid.length >= 4 && !workedGrids.has(m.grid.toUpperCase());
+      case "tome": return m.to_me;
+    }
+  });
+
+  function setHuntPriority(p: HuntPriority) {
+    setHuntPriorityState(p);
+    api.setConfig("hunt_priority", p);
+  }
 
   return (
     <>
       <TopBar
         cycle={cycle}
-        decoding={decoding}
-        onToggleDecode={toggleDecode}
         bands={bands}
         dialHz={dialHz}
         onBand={onBand}
         rig={rig}
         clock={clock}
-        audio={audio}
         rigLabel={rigLabel}
-        txGain={txGain}
-        onTxGain={(v) => {
-          setTxGain(v);
-          debouncedSetTxGain(v);
+        txState={txState}
+        onCq={() => api.startCq()}
+        onFreeText={(text) => api.freeText(text)}
+        onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
+        huntEnabled={huntEnabled}
+        onToggleHunt={() => {
+          const next = !huntEnabled;
+          setHuntEnabled(next);
+          api.setConfig("hunt_enabled", String(next));
         }}
+        onClearDecodes={() => setMessages([])}
+        onRefresh={() => api.refreshStatus()}
       />
-      <div className="tabs">
-        {(["decode", "log", "settings"] as Tab[]).map((t) => (
-          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-            {t === "decode" ? "Decode" : t === "log" ? "Logbook" : "Settings"}
-          </button>
-        ))}
-      </div>
-      <div className={"content" + (tab === "decode" || tab === "log" ? " decode" : "")}>
+      <div
+        className={
+          "content" + (tab === "decode" || tab === "log" || tab === "waterfall" ? " decode" : "")
+        }
+      >
         {tab === "decode" && (
           <DecodeScreen
             messages={visible}
@@ -343,92 +512,255 @@ export default function App() {
               setInputGain(v);
               debouncedSetRxGain(v);
             }}
+            txGain={txGain}
+            onTxGain={(v) => {
+              setTxGain(v);
+              debouncedSetTxGain(v);
+            }}
+            decoding={decoding}
+            audio={audio}
           />
+        )}
+        {tab === "waterfall" && (
+          <div className="waterfall-tab">
+            <WaterfallView
+              txFreq={txFreq}
+              onSelectFreq={(hz) => {
+                setTxFreq(hz);
+                api.setBaseFreq(hz);
+              }}
+            />
+          </div>
         )}
         {tab === "log" && <LogScreen />}
         {tab === "settings" && (
           <SettingsScreen
             onStatus={setStatus}
             clock={clock}
+            onSettingsSaved={maybeAutoStartDecode}
             onRigLabel={(v) => {
               setRigLabel(v);
               api.setConfig("rig_label", v);
             }}
             onBandsChanged={setBands}
+            huntPriority={huntPriority}
+            onHuntPriority={setHuntPriority}
+            huntAvoidPileups={huntAvoidPileups}
+            onHuntAvoidPileups={(v) => {
+              setHuntAvoidPileups(v);
+              api.setConfig("hunt_avoid_pileups", String(v));
+            }}
+            huntMinSnr={huntMinSnr}
+            onHuntMinSnr={(v) => {
+              setHuntMinSnr(v);
+              api.setConfig("hunt_min_snr", v == null ? "" : String(v));
+            }}
+          />
+        )}
+        {(tab === "map" || tab === "pota") && (
+          <ComingSoonScreen
+            title={tab === "map" ? "Map" : "POTA"}
+            detail={
+              tab === "map"
+                ? "A world map of decoded/worked stations, matching the Android app's map, is planned but not built yet."
+                : "Parks-on-the-Air park search, activation tracking, and self-spotting, matching the Android app's POTA tab, are planned but not built yet."
+            }
           />
         )}
       </div>
-      <TxBar
-        txState={txState}
-        decoding={decoding}
-        onCq={() => api.startCq()}
-        onStage={(s) => api.setStage(s)}
-        onStop={() => api.stopTx()}
-        onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
-      />
+      {tab !== "waterfall" && (
+        <TxBar
+          txState={txState}
+          decoding={decoding}
+          onStage={(s) => api.setStage(s)}
+          onStop={() => api.stopTx()}
+        />
+      )}
       <div className="status-line">{status}</div>
+      <TabBar tab={tab} onTab={setTab} />
     </>
+  );
+}
+
+// Honest placeholder for a tab whose real screen isn't built yet (Map, POTA)
+// -- says so plainly rather than showing fake content.
+function ComingSoonScreen({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="coming-soon">
+      <h3>{title}</h3>
+      <p className="muted">{detail}</p>
+    </div>
+  );
+}
+
+function TabBar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
+  const items: { id: Tab; label: string; icon: string }[] = [
+    { id: "decode", label: "Decode", icon: "☰" },
+    { id: "map", label: "Map", icon: "🌐" },
+    { id: "waterfall", label: "Waterfall", icon: "📶" },
+    { id: "pota", label: "POTA", icon: "🌲" },
+    { id: "log", label: "Logbook", icon: "📘" },
+    { id: "settings", label: "Settings", icon: "⚙" },
+  ];
+  return (
+    <div className="tabbar">
+      {items.map((it) => (
+        <button
+          key={it.id}
+          className={"tabbar-item" + (tab === it.id ? " active" : "")}
+          onClick={() => onTab(it.id)}
+        >
+          <span className="tabbar-icon">{it.icon}</span>
+          <span className="tabbar-label">{it.label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
 function TopBar(props: {
   cycle: CycleTick | null;
-  decoding: boolean;
-  onToggleDecode: () => void;
   bands: BandInfo[];
   dialHz: number;
   onBand: (hz: number) => void;
   rig: RigStatusEvent | null;
   clock: ClockSyncEvent | null;
-  audio: { db: number; silent: boolean } | null;
   rigLabel: string;
-  txGain: number;
-  onTxGain: (v: number) => void;
+  txState: TxStateEvent | null;
+  onCq: () => void;
+  onFreeText: (text: string) => void;
+  onToggleTune: () => void;
+  huntEnabled: boolean;
+  onToggleHunt: () => void;
+  onClearDecodes: () => void;
+  onRefresh: () => void;
 }) {
-  const { cycle, decoding, onToggleDecode, bands, dialHz, onBand, rig, clock, audio, rigLabel, txGain, onTxGain } = props;
-  const utc = cycle ? new Date(cycle.utc_ms).toISOString().substring(11, 19) : "--:--:--";
+  const {
+    cycle, bands, dialHz, onBand, rig, clock, rigLabel, txState,
+    onCq, onFreeText, onToggleTune, huntEnabled, onToggleHunt, onClearDecodes, onRefresh,
+  } = props;
+  const [cqMoreOpen, setCqMoreOpen] = useState(false);
+  const [freeTextDraft, setFreeTextDraft] = useState("");
+
+  const band = bands.find((b) => b.dial_hz === dialHz);
+  const secondsLeft = cycle ? Math.max(0, Math.ceil(15 - cycle.ms_into_cycle / 1000)) : null;
   const pct = cycle ? (cycle.ms_into_cycle / 15000) * 100 : 0;
+  const transmitting = txState?.transmitting ?? false;
+  const tuning = txState?.tuning ?? false;
+  // Which half of the 15s cycle this slot falls in -- purely informational
+  // (desktop has no manual slot-parity override), matching WSJT-X/Android's
+  // "Odd"/"Even" slot readout.
+  const slotParity = cycle ? (cycle.sequential % 2 === 0 ? "Even" : "Odd") : null;
+
   return (
-    <div className="topbar">
-      <span className="brand">FT8AF</span>
-      <span className="clock">{utc}</span>
-      <ClockSyncBadge clock={clock} />
-      <div className="cycle-bar">
-        <div style={{ width: `${pct}%` }} />
-      </div>
-      <span className="seq">seq {cycle?.sequential ?? "-"}</span>
-      <div className="spacer" />
-      <span className="tx-level" title="TX output level (drive) — lower until ALC stops pinning">
-        <span className="muted">TX</span>
-        <input
-          type="range"
-          aria-label="TX output level (drive), percent"
-          min={0}
-          max={100}
-          step={1}
-          value={txGain}
-          onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
-          style={{ width: 90 }}
-        />
-        <span className="muted" style={{ fontVariantNumeric: "tabular-nums", minWidth: 34, textAlign: "right" }}>
-          {txGain}%
+    <div className="topbar-android">
+      <div className="topbar-row">
+        <div className="band-picker">
+          <span className="band-picker-label">{band ? band.name : "--"} · FT8</span>
+          <span className="chevron">⌄</span>
+          <select
+            className="band-picker-select"
+            aria-label="Band"
+            value={dialHz}
+            onChange={(e) => onBand(parseInt(e.target.value, 10))}
+          >
+            {bands.map((b) => (
+              <option key={b.dial_hz} value={b.dial_hz}>
+                {b.custom ? "★ " : ""}{b.name} · {(b.dial_hz / 1e6).toFixed(3)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="cq-pill-wrap">
+          <button className="pill pill-cq" onClick={onCq} disabled={tuning}>
+            <span className="pill-label-2line">Call<br />CQ</span>
+          </button>
+          <button
+            className="pill-more-badge"
+            title="More: send a free-text message"
+            onClick={() => setCqMoreOpen((v) => !v)}
+          >
+            MORE
+          </button>
+          {cqMoreOpen && (
+            <div className="cq-more-popover">
+              <label>Free-text message</label>
+              <input
+                value={freeTextDraft}
+                onChange={(e) => setFreeTextDraft(e.target.value.toUpperCase())}
+                placeholder="FIELD DAY K1ABC FN42"
+                maxLength={13}
+              />
+              <div className="row">
+                <button
+                  className="primary"
+                  onClick={() => {
+                    if (freeTextDraft.trim()) onFreeText(freeTextDraft.trim());
+                    setCqMoreOpen(false);
+                  }}
+                >
+                  Send
+                </button>
+                <button onClick={() => setCqMoreOpen(false)}>Close</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <button
+          className={"pill pill-dark" + (huntEnabled ? " pill-hunt-active" : "")}
+          onClick={onToggleHunt}
+          title="Hunt: auto-answer the best eligible CQ each cycle (priority/options in Settings)"
+        >
+          Hunt
+        </button>
+
+        <span className="rx-tx-indicator">
+          <span className={"rx-tx-dot" + (transmitting ? " tx" : "")} />
+          <span className="rx-tx-main">
+            <span className="rx-tx-label">{transmitting ? "TX" : "RX"}</span>
+            {!transmitting && secondsLeft != null && (
+              <span className="rx-tx-sub">TX in {secondsLeft}s</span>
+            )}
+          </span>
         </span>
-      </span>
-      <select id="band-select" value={dialHz} onChange={(e) => onBand(parseInt(e.target.value, 10))}>
-        {bands.map((b) => (
-          <option key={b.dial_hz} value={b.dial_hz}>
-            {b.custom ? "★ " : ""}{b.name} · {(b.dial_hz / 1e6).toFixed(3)}
-          </option>
-        ))}
-      </select>
-      <span className="muted">
-        {rig?.connected ? `rig: ${rigLabel || rig.model}` : "no rig"}
-        {rig?.ptt ? " · PTT" : ""}
-      </span>
-      <AudioBadge decoding={decoding} audio={audio} />
-      <button className={decoding ? "danger" : "primary"} onClick={onToggleDecode}>
-        {decoding ? "Stop" : "Start"} decode
-      </button>
+
+        <span
+          className={"pill pill-dark pill-static" + (rig?.connected ? "" : " pill-disconnected")}
+          title={rig?.connected ? `${rigLabel || rig.model}${rig.ptt ? " · PTT" : ""}` : "No rig connected"}
+        >
+          <span className={"status-dot" + (rig?.connected ? " ok" : "")} />
+          <span className="pill-label-2line">Radio<br />{rig?.connected ? "linked" : "offline"}</span>
+        </span>
+
+        <button
+          className={"pill pill-dark" + (tuning ? " pill-tune-active" : "")}
+          onClick={onToggleTune}
+          disabled={!tuning && transmitting}
+          title="Transmit a steady carrier to tune the antenna, without calling CQ"
+        >
+          TUNE
+        </button>
+
+        {slotParity && <span className="pill pill-dark pill-static">{slotParity}</span>}
+
+        <div className="spacer" />
+
+        <span className="topbar-clock">
+          {cycle ? new Date(cycle.utc_ms).toISOString().substring(11, 19) : "--:--:--"}
+        </span>
+        <button className="icon-button" title="Refresh rig/engine status" onClick={onRefresh}>⟳</button>
+        <button className="icon-button" title="Clear the decode list" onClick={onClearDecodes}>🗑</button>
+      </div>
+
+      <div className="topbar-row sync-row">
+        <ClockSyncBadge clock={clock} />
+        <div className="cycle-bar">
+          <div style={{ width: `${pct}%` }} />
+        </div>
+        <span className="seq muted">{secondsLeft != null ? `${secondsLeft}s` : "--"}</span>
+      </div>
     </div>
   );
 }
@@ -616,6 +948,14 @@ function colormap(v: number): [number, number, number] {
   return [255, Math.round(230 + (t - 0.75) * 4 * 25), Math.round((t - 0.75) * 4 * 200)];
 }
 
+const DECODE_FILTERS: { id: Filter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "cq", label: "CQ Calls" },
+  { id: "pota", label: "CQ POTA" },
+  { id: "grid", label: "New Grid" },
+  { id: "tome", label: "For Me" },
+];
+
 function DecodeScreen(props: {
   messages: UiMessage[];
   filter: Filter;
@@ -626,105 +966,167 @@ function DecodeScreen(props: {
   onAnswer: (m: UiMessage) => void;
   inputGain: number;
   onInputGain: (v: number) => void;
+  txGain: number;
+  onTxGain: (v: number) => void;
+  decoding: boolean;
+  audio: { db: number; silent: boolean } | null;
 }) {
-  const { messages, filter, setFilter, workedCalls, txFreq, onSelectFreq, onAnswer, inputGain, onInputGain } = props;
+  const {
+    messages, filter, setFilter, workedCalls, txFreq, onSelectFreq, onAnswer,
+    inputGain, onInputGain, txGain, onTxGain, decoding, audio,
+  } = props;
+
+  // "065815 UTC · 16 stations" header, matching the Android app: the current
+  // (topmost) decode period's timestamp and how many distinct callers are in
+  // the visible (filtered) list.
+  const stationCount = new Set(messages.map((m) => m.call_from.toUpperCase())).size;
+  const latestUtc =
+    messages.length > 0
+      ? new Date(messages[0].utc_ms).toISOString().substring(11, 19).replace(/:/g, "")
+      : null;
+
   return (
     <>
-      {/* Full-width, above the split: keeps the table and the waterfall
-          starting at the same height below it (the waterfall used to start
-          flush with this row instead of with the table). */}
+      {/* Full-width, above the split: keeps the list and the waterfall
+          starting at the same height below it. */}
       <div className="chips">
-        {(["all", "cq", "tome"] as Filter[]).map((f) => (
-          <div key={f} className={"chip" + (filter === f ? " active" : "")} onClick={() => setFilter(f)}>
-            {f === "all" ? "All" : f === "cq" ? "CQ" : "To me"}
+        {DECODE_FILTERS.map((f) => (
+          <div
+            key={f.id}
+            className={"chip" + (filter === f.id ? " active" : "")}
+            onClick={() => setFilter(f.id)}
+          >
+            {f.label}
           </div>
         ))}
-        {/* Next to the filter chips, not buried in Settings -- RX gain is
-            expected to be nudged per-band (noise floor varies a lot band to
-            band), so it needs to be at hand while actually watching decodes,
-            not a few clicks away. */}
-        <span className="tx-level" title="RX input gain — some bands are noisier than others" style={{ marginLeft: "auto" }}>
-          <span className="muted">RX</span>
-          <input
-            type="range"
-            aria-label="RX input gain, percent"
-            min={0}
-            max={100}
-            step={1}
-            value={inputGain}
-            onChange={(e) => onInputGain(parseInt(e.target.value, 10))}
-            style={{ width: 90 }}
-          />
-          <span className="muted" style={{ fontVariantNumeric: "tabular-nums", minWidth: 34, textAlign: "right" }}>
-            {inputGain}%
+        {/* Real controls the Android reference screen doesn't need (it has no
+            drive sliders) but desktop does -- kept here, next to what they
+            affect, rather than invented away. Decode itself has no manual
+            start/stop control here, matching Android: it starts on its own
+            once a callsign + rig are configured (see maybeAutoStartDecode
+            in App()). */}
+        <div className="decode-controls" style={{ marginLeft: "auto" }}>
+          <span className="tx-level" title="RX input gain — some bands are noisier than others">
+            <span className="muted">RX</span>
+            <input
+              type="range"
+              aria-label="RX input gain, percent"
+              min={0}
+              max={100}
+              step={1}
+              value={inputGain}
+              onChange={(e) => onInputGain(parseInt(e.target.value, 10))}
+              style={{ width: 70 }}
+            />
+            <span className="muted" style={{ fontVariantNumeric: "tabular-nums", minWidth: 30, textAlign: "right" }}>
+              {inputGain}%
+            </span>
           </span>
-        </span>
+          <span className="tx-level" title="TX output level (drive) — lower until ALC stops pinning">
+            <span className="muted">TX</span>
+            <input
+              type="range"
+              aria-label="TX output level (drive), percent"
+              min={0}
+              max={100}
+              step={1}
+              value={txGain}
+              onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
+              style={{ width: 70 }}
+            />
+            <span className="muted" style={{ fontVariantNumeric: "tabular-nums", minWidth: 30, textAlign: "right" }}>
+              {txGain}%
+            </span>
+          </span>
+        </div>
       </div>
+      {latestUtc && (
+        <div className="decode-list-header muted">
+          {latestUtc} UTC · {stationCount} station{stationCount === 1 ? "" : "s"}
+        </div>
+      )}
       <div className="decode-split">
-      <div className="decode-detail">
-      <div className="decode-list">
-      <table>
-        <thead>
-          <tr>
-            <th className="msg-col">Message</th>
-            <th>dB</th>
-            <th>Hz</th>
-            <th>DT</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {messages.map((m, i) => {
-            // i === 0 also starts a new block: messages are prepended newest-first,
-            // so the current decode period is always at the top of the list, and
-            // Android always shows that period's header there too.
-            const newBlock = i === 0 || messages[i - 1].utc_ms !== m.utc_ms;
-            return (
-              <Fragment key={i}>
-                {newBlock && (
-                  <tr className="time-sep">
-                    <td colSpan={5}>{new Date(m.utc_ms).toISOString().substring(11, 19)} UTC</td>
-                  </tr>
-                )}
-                <tr
-                  className={
-                    (m.is_cq ? "cq " : "") +
-                    (m.to_me ? "tome " : "") +
-                    (m.is_cq || m.to_me ? "clickable" : "")
-                  }
-                  onClick={() => (m.is_cq || m.to_me) && onAnswer(m)}
-                  title={m.is_cq || m.to_me ? "Click to answer" : ""}
-                >
-                  <td className={"msg-col" + (workedCalls.has(m.call_from.toUpperCase()) ? " worked" : "")}>
-                    {m.text}
-                  </td>
-                  <td>{m.snr}</td>
-                  <td>{Math.round(m.freq_hz)}</td>
-                  <td>{m.time_sec.toFixed(1)}</td>
-                  {/* New-DXCC/zone status pill needs more than a worked-call lookup
-                      (country/zone data per call) -- not yet wired up, reserved for
-                      a later increment. */}
-                  <td></td>
-                </tr>
-              </Fragment>
-            );
-          })}
-          {messages.length === 0 && (
-            <tr>
-              <td colSpan={5} className="muted">
-                No decodes yet — set your callsign in Settings, pick an audio input, and Start decode.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-      </div>
-      </div>
-      <div className="decode-waterfall">
-        <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} />
-      </div>
+        <div className="decode-detail">
+          <div className="decode-list">
+            {messages.map((m, i) => {
+              // i === 0 also starts a new block: messages are prepended newest-first,
+              // so the current decode period is always at the top of the list, and
+              // Android always shows that period's header there too.
+              const newBlock = i === 0 || messages[i - 1].utc_ms !== m.utc_ms;
+              const worked = workedCalls.has(m.call_from.toUpperCase());
+              return (
+                <Fragment key={i}>
+                  {newBlock && (
+                    <div className="time-sep">
+                      {new Date(m.utc_ms).toISOString().substring(11, 19)} UTC
+                    </div>
+                  )}
+                  <div
+                    className={
+                      "decode-row" +
+                      (m.is_cq ? " cq" : "") +
+                      (m.to_me ? " tome" : "") +
+                      (m.is_cq || m.to_me ? " clickable" : "")
+                    }
+                    onClick={() => (m.is_cq || m.to_me) && onAnswer(m)}
+                    title={m.is_cq || m.to_me ? "Click to answer" : ""}
+                  >
+                    <span className={"decode-row-msg" + (worked ? " worked" : "")}>{m.text}</span>
+                    <span className="decode-row-snr">{m.snr}</span>
+                    <span className="decode-row-freq">{Math.round(m.freq_hz)}</span>
+                    {/* DT: a signed offset, highlighted once it's large enough to be
+                        worth the operator's attention (decode timing drifting). */}
+                    <span className={"decode-row-dt" + (Math.abs(m.time_sec) > 1 ? " warn" : "")}>
+                      {m.time_sec >= 0 ? "+" : ""}
+                      {m.time_sec.toFixed(1)}
+                    </span>
+                    {m.is_cq && (
+                      <span className="cq-badge">
+                        <span className="cq-badge-dot" />
+                        CQ
+                      </span>
+                    )}
+                  </div>
+                </Fragment>
+              );
+            })}
+            {messages.length === 0 && (
+              <div className="decode-row-empty muted">
+                No decodes yet — set your callsign and rig in Settings; decoding starts on its own.
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="decode-waterfall">
+          <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} />
+          <WaterfallStatusStrip txFreq={txFreq} decoding={decoding} audio={audio} />
+        </div>
       </div>
     </>
+  );
+}
+
+// Bottom info strip under the waterfall. Only shows data desktop actually
+// has (current TX/cursor frequency, live/idle state, the real RX input
+// level via AudioBadge) -- no Width/NR/MSG controls or a fabricated signal-
+// quality percentage, since desktop has no noise-reduction/bandwidth-filter
+// DSP or quality score to back them.
+function WaterfallStatusStrip({
+  txFreq,
+  decoding,
+  audio,
+}: {
+  txFreq: number;
+  decoding: boolean;
+  audio: { db: number; silent: boolean } | null;
+}) {
+  return (
+    <div className="wf-status-strip">
+      <AudioBadge decoding={decoding} audio={audio} />
+      <div className="spacer" />
+      <span className="wf-status-freq">{txFreq} Hz</span>
+      <span className={"wf-status-live" + (decoding ? "" : " off")}>{decoding ? "LIVE" : "IDLE"}</span>
+    </div>
   );
 }
 
@@ -1286,10 +1688,24 @@ function CustomBandsPanel(props: {
 function SettingsScreen(props: {
   onStatus: (s: string) => void;
   clock: ClockSyncEvent | null;
+  /** Re-checks whether decode can now auto-start (callsign + rig configured)
+   *  -- called right after saving the station or connecting a rig, with the
+   *  values just submitted (not yet reflected in persisted config), so
+   *  finishing setup starts decoding immediately. See maybeAutoStartDecode. */
+  onSettingsSaved: (known: { call: string; rigBackend: string }) => void;
   onRigLabel: (v: string) => void;
   onBandsChanged: (bands: BandInfo[]) => void;
+  huntPriority: HuntPriority;
+  onHuntPriority: (p: HuntPriority) => void;
+  huntAvoidPileups: boolean;
+  onHuntAvoidPileups: (v: boolean) => void;
+  huntMinSnr: number | null;
+  onHuntMinSnr: (v: number | null) => void;
 }) {
-  const { onStatus, clock, onRigLabel, onBandsChanged } = props;
+  const {
+    onStatus, clock, onSettingsSaved, onRigLabel, onBandsChanged,
+    huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
+  } = props;
   const [call, setCall] = useState("");
   const [rigLabel, setRigLabel] = useState("");
   const [grid, setGrid] = useState("");
@@ -1439,6 +1855,7 @@ function SettingsScreen(props: {
   function saveStation() {
     api.setStation(call, grid);
     onStatus(`Station set: ${call} ${grid}`);
+    onSettingsSaved({ call, rigBackend: rigCfg.backend });
   }
 
   // Persist the opt-in flag. Turning it off never runs location code again; it
@@ -1521,6 +1938,61 @@ function SettingsScreen(props: {
             </span>
           </div>
           <button className="primary" onClick={saveStation}>Save station</button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <h3>Hunt</h3>
+        <div className="col">
+          <div className="muted">
+            When Hunt is on (toggle it from the top bar), the app auto-answers
+            the best eligible CQ each cycle instead of waiting for a manual
+            click — never while already in a QSO. These options control which
+            CQ counts as "best." Ported from the Android app's own Hunt engine;
+            two of its priorities aren't available here yet (DXCC entity
+            lookup, and POTA "new park" ranking need data this app doesn't
+            fetch yet).
+          </div>
+          <div className="field">
+            <label>Priority</label>
+            <select value={huntPriority} onChange={(e) => onHuntPriority(e.target.value as HuntPriority)}>
+              {HUNT_PRIORITIES.map((p) => (
+                <option key={p} value={p}>
+                  {p === "latest" ? "Latest (most recent decode)"
+                    : p === "strongest" ? "Strongest signal"
+                    : p === "weakest" ? "Weakest signal"
+                    : p === "farthest" ? "Farthest station"
+                    : p === "pota_first" ? "POTA activators first"
+                    : "New grid first"}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input
+                type="checkbox"
+                checked={huntAvoidPileups}
+                onChange={(e) => onHuntAvoidPileups(e.target.checked)}
+                style={{ width: "auto" }}
+              />
+              Avoid pileups when a pileup-free CQ is available
+            </label>
+          </div>
+          <div className="field">
+            <label>Minimum SNR (dB) — blank disables the floor</label>
+            <input
+              value={huntMinSnr == null ? "" : String(huntMinSnr)}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                if (v === "") { onHuntMinSnr(null); return; }
+                const n = parseInt(v, 10);
+                if (!Number.isNaN(n)) onHuntMinSnr(n);
+              }}
+              placeholder="e.g. -15"
+              style={{ width: 80 }}
+            />
+          </div>
         </div>
       </div>
 
@@ -1802,6 +2274,7 @@ function SettingsScreen(props: {
                   ? ` (${rigCfg.hamlib_network ? rigCfg.hamlib_address : rigCfg.port || "no port"})`
                   : "";
               onStatus(`Connecting ${rigName(rigCfg, hamlibRigs)}${detail}`);
+              onSettingsSaved({ call, rigBackend: rigCfg.backend });
             }}
           >
             Connect rig
@@ -1942,15 +2415,16 @@ const TX_STAGES: { stage: TxStage; label: string; title: string }[] = [
   { stage: "bye73", label: "73", title: "Tx5 — send 73" },
 ];
 
+// Call CQ and Tune now live in TopBar (matching the Android layout); this bar
+// keeps the detailed status + the manual Tx1-5 stage override, which Android
+// doesn't surface on its main screen but desktop operators rely on.
 function TxBar(props: {
   txState: TxStateEvent | null;
   decoding: boolean;
-  onCq: () => void;
   onStage: (s: TxStage) => void;
   onStop: () => void;
-  onToggleTune: () => void;
 }) {
-  const { txState, decoding, onCq, onStage, onStop, onToggleTune } = props;
+  const { txState, decoding, onStage, onStop } = props;
   const tx = txState?.transmitting;
   const tuning = txState?.tuning ?? false;
   const stage = txState?.status.stage ?? "idle";
@@ -1965,14 +2439,6 @@ function TxBar(props: {
       {target && <span className="muted">→ {target}</span>}
       <span className="msg">{txState?.message ?? ""}</span>
       <div className="spacer" style={{ flex: 1 }} />
-      <button
-        className={"tune-toggle" + (tuning ? " active" : "")}
-        disabled={!tuning && tx}
-        title="Transmit a steady carrier to tune the antenna, without calling CQ"
-        onClick={onToggleTune}
-      >
-        Tune
-      </button>
       <div className="stage-picker" title={target ? "" : "Pick a station first"}>
         {TX_STAGES.map((s) => (
           <button
@@ -1986,7 +2452,6 @@ function TxBar(props: {
           </button>
         ))}
       </div>
-      <button className="primary" onClick={onCq} disabled={tuning}>Call CQ</button>
       <button className="danger" onClick={onStop}>Stop TX</button>
     </div>
   );

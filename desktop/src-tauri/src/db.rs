@@ -467,6 +467,26 @@ impl Db {
             .unwrap_or_default()
     }
 
+    /// Distinct 4+ character grid squares already logged, any band/mode --
+    /// mirrors Android's "Worked Grids" check (`GeneralVariables.checkQSLGrid`,
+    /// which is not band/mode-scoped, unlike [Self::worked_calls]) for the
+    /// Decode list's Hunt "new grid" priority and New-Grid filter. A 2-char
+    /// grid field (locator precision too coarse to mean "worked this square")
+    /// is excluded, matching the 4-char floor Android's own grid-priority
+    /// logic uses.
+    pub fn worked_grids(&self) -> Vec<String> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT DISTINCT UPPER(gridsquare) FROM qso_log WHERE LENGTH(gridsquare) >= 4",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     /// Flag a QSO as synced to an online service so re-runs are idempotent.
     /// `service` is `"cloudlog"` or `"qrz"`; unknown services are a no-op.
     pub fn mark_synced(&self, id: i64, service: &str) -> anyhow::Result<()> {
@@ -1198,6 +1218,55 @@ mod tests {
         assert_eq!(worked, vec!["K1ABC".to_string(), "W1AW".to_string()]);
 
         assert!(db.worked_calls("30m", "FT8").is_empty());
+    }
+
+    #[test]
+    fn worked_grids_ignores_band_mode_and_short_grids() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            gridsquare: "fn31".into(), // lower-case: result is still upper-cased
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(), // different band/mode: still counts (not scoped)
+            gridsquare: "EM12".into(),
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT4".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1QRS".into(),
+            gridsquare: "FN31".into(), // duplicate of the first (case-insensitive)
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1SHORT".into(), // 2-char grid: too coarse, excluded
+            gridsquare: "EM".into(),
+            qso_date: "20260604".into(),
+            time_on: "123000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let mut grids = db.worked_grids();
+        grids.sort();
+        assert_eq!(grids, vec!["EM12".to_string(), "FN31".to_string()]);
     }
 
     #[test]

@@ -69,9 +69,17 @@ pub struct RigConfig {
 pub const QRPLABS_QMX_HAMLIB_MODEL: i32 = 2057;
 
 /// Is this rig a QRP Labs QMX connected via Hamlib? Shared gate behind the
-/// QMX-specific TX workarounds below.
+/// QMX-specific TX workarounds below, and (via [`supports_meter_query`]) the
+/// SWR/power meter polling in engine.rs.
 fn is_qmx(backend: RigBackend, hamlib_model: i32) -> bool {
     backend == RigBackend::Hamlib && hamlib_model == QRPLABS_QMX_HAMLIB_MODEL
+}
+
+/// Does this rig answer the `SW;`/`PC;` SWR/power meter queries (see
+/// [`crate::qmx_meters`])? Firmware 1.04+ QMX only, same gate as the CAT-tone
+/// TX workarounds above.
+pub fn supports_meter_query(backend: RigBackend, hamlib_model: i32) -> bool {
+    is_qmx(backend, hamlib_model)
 }
 
 /// Does this rig need its TX audio confined to the left channel to fully
@@ -186,6 +194,14 @@ trait RigTransport: Send {
     fn send_raw_cat(&mut self, _cmd: &str) -> anyhow::Result<()> {
         anyhow::bail!("raw CAT commands are not supported by this rig backend")
     }
+    /// Send a raw CAT command and read back its reply, terminated by one of
+    /// the bytes in `term` (a null-terminated C string, per Hamlib's
+    /// `rig_send_raw`) — used to poll the QMX's `SW;`/`PC;` meter replies (see
+    /// [`crate::qmx_meters`]). Same support footprint as [`send_raw_cat`]
+    /// (Hamlib only); the default errors out the same way.
+    fn send_raw_cat_query(&mut self, _cmd: &str, _term: &[u8]) -> anyhow::Result<String> {
+        anyhow::bail!("raw CAT queries are not supported by this rig backend")
+    }
 }
 
 /// The engine's handle to whatever backend is configured.
@@ -224,6 +240,9 @@ impl RigConnection {
     }
     pub fn send_raw_cat(&mut self, cmd: &str) -> anyhow::Result<()> {
         self.inner.send_raw_cat(cmd)
+    }
+    pub fn send_raw_cat_query(&mut self, cmd: &str, term: &[u8]) -> anyhow::Result<String> {
+        self.inner.send_raw_cat_query(cmd, term)
     }
 }
 
@@ -608,10 +627,31 @@ pub fn list_hamlib_rigs() -> Vec<HamlibRig> {
     rigs
 }
 
+/// On Linux, prefer a Hamlib built from source at this well-known prefix over
+/// whatever the bare `libhamlib.so.4` soname resolves to. Real, confirmed
+/// conflict on at least one dev machine: the distro's `libhamlib4` package is
+/// 4.5.4 (no QRP Labs QMX support at all), while a separately-built 4.7.1
+/// here has it -- both share the same soname, so an unqualified dlopen
+/// silently picks whichever the dynamic linker finds first (normally the
+/// older distro one). `run-ft8af.sh` already works around this for the
+/// packaged app via `LD_PRELOAD`, but that env var is inherited by every
+/// child process a Tauri app spawns, including WebKitGTK's own out-of-process
+/// WebProcess/NetworkProcess helpers -- which have nothing to do with Hamlib
+/// and should never load it. Confirmed directly: launching under `LD_PRELOAD`
+/// left the webview permanently blank (WebKitWebProcess alive but never
+/// painting), while launching the exact same binary without it rendered
+/// fine. Trying this absolute path first fixes the root cause (ambiguous
+/// soname resolution) instead of working around it with a process-wide env
+/// var, and is a pure no-op on any machine without a build at this path.
+#[cfg(target_os = "linux")]
+const PREFERRED_LINUX_HAMLIB: &str = "/usr/local/lib/libhamlib.so.4";
+
 fn load_hamlib() -> anyhow::Result<libloading::Library> {
     // Try the common shared-library names across platforms; the OS loader
     // resolves them against PATH / the app directory / system paths.
     let candidates = [
+        #[cfg(target_os = "linux")]
+        PREFERRED_LINUX_HAMLIB,
         "hamlib-4.dll",
         "libhamlib-4.dll",
         "libhamlib.dll",
@@ -741,6 +781,31 @@ impl RigTransport for Hamlib {
             anyhow::bail!("rig_send_raw failed (Hamlib error {rc}) for {cmd:?}");
         }
         Ok(())
+    }
+    fn send_raw_cat_query(&mut self, cmd: &str, term: &[u8]) -> anyhow::Result<String> {
+        let bytes = cmd.as_bytes();
+        // Hamlib's own doc for rig_send_raw: with a non-null reply buffer and
+        // a non-zero reply_len, it reads from the rig until one of the bytes
+        // in `term` is seen (or reply_len is reached) and returns the number
+        // of bytes read into `reply` -- the QMX's own meter replies ("SW130;",
+        // "PC45;") are short, so a 64-byte buffer is generous headroom.
+        let mut reply = [0u8; 64];
+        let rc = unsafe {
+            (self.fns.rig_send_raw)(
+                self.rig,
+                bytes.as_ptr(),
+                bytes.len() as c_int,
+                reply.as_mut_ptr(),
+                reply.len() as c_int,
+                term.as_ptr(),
+            )
+        };
+        if rc < 0 {
+            self.connected = false;
+            anyhow::bail!("rig_send_raw query failed (Hamlib error {rc}) for {cmd:?}");
+        }
+        let n = (rc as usize).min(reply.len());
+        Ok(String::from_utf8_lossy(&reply[..n]).into_owned())
     }
 }
 

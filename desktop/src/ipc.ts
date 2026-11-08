@@ -195,6 +195,10 @@ export type EngineEvent =
   | { type: "waterfall"; data: { bins: number[]; rows: number; cols: number; hz_per_col: number } }
   | { type: "waterfall_row"; data: { bins: number[]; hz_per_col: number; boundary: boolean } }
   | { type: "input_level"; data: { db: number; silent: boolean } }
+  /** SWR/output-power readings polled over CAT while transmitting (QMX only
+   *  -- see rig.rs's supports_meter_query). Either field is null when that
+   *  particular query didn't return a valid reading. */
+  | { type: "meter"; data: { swr_ratio: number | null; power_watts: number | null } }
   | { type: "info"; data: string }
   | { type: "error"; data: string };
 
@@ -252,6 +256,9 @@ export const api = {
   logCount: () => invoke<number>("log_count"),
   /** Calls already worked on the currently-tuned band, for Decode-list strikethrough. */
   workedCalls: (mode: string) => invoke<string[]>("worked_calls", { mode }),
+  /** Grid squares already worked (any band/mode), for Hunt's new-grid priority
+   *  and the New Grid filter chip. */
+  workedGrids: () => invoke<string[]>("worked_grids"),
   deleteQso: (id: number) => invoke("delete_qso", { id }),
   saveQso: (record: QsoRecord) => invoke<number>("save_qso", { record }),
   /** Export ADIF, optionally restricted to an inclusive YYYYMMDD date range. */

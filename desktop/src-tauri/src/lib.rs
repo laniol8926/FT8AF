@@ -17,6 +17,7 @@ pub mod dsp;
 pub mod engine;
 pub mod os_location;
 pub mod qmx_cat_tones;
+pub mod qmx_meters;
 pub mod qso;
 pub mod rig;
 pub mod timesync;

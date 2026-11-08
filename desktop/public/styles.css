@@ -1,16 +1,34 @@
+/* Design tokens ported from the Android app's theme (theme/Color.kt,
+   Type.kt, Shape.kt, dev branch) -- same names/values, so the two apps read
+   as one design system rather than two differently-themed UIs. Existing
+   selectors below that already reference --bg/--panel/--accent/etc. pick up
+   the new palette automatically; only --cq/--tome/--yellow were dropped (no
+   longer referenced -- see the new decode-row/tabbar rules further down). */
 :root {
-  --bg: #0f1419;
-  --panel: #1a2129;
-  --panel-2: #222c36;
-  --border: #2e3a46;
-  --text: #d7e0e8;
-  --muted: #8a99a8;
-  --accent: #4ea1ff;
-  --cq: #2e7d32;
-  --tome: #b8860b;
-  --tx: #c0392b;
-  --ok: #3fae6a;
-  --yellow: #ffc107;
+  --bg: #07090f;         /* Android bgApp */
+  --panel: #0e131e;      /* Android bgSurface */
+  --panel-2: #161c2b;    /* Android bgSurface2 */
+  --panel-3: #1d2538;    /* Android bgSurface3 */
+  --elev: #232c43;       /* Android bgElev */
+  --border: rgba(148, 163, 184, 0.16);        /* Android borderStrong */
+  --border-subtle: rgba(148, 163, 184, 0.08); /* Android border */
+  --border-amber: rgba(255, 175, 94, 0.22);   /* Android borderAmber */
+  --text: #e7ecf3;       /* Android textPrimary */
+  --muted: #8a96b1;      /* Android textMuted */
+  --text-faint: #5a647e; /* Android textFaint */
+  --accent: #ffaf5e;     /* Android accent (amber) */
+  --accent-soft: rgba(255, 175, 94, 0.14);
+  --signal: #5cd6e8;     /* Android signal (cyan) */
+  --signal-soft: rgba(92, 214, 232, 0.14);
+  --target: #f472b6;     /* Android Target (pink) -- messages addressed to me */
+  --ok: #4ade80;         /* Android StatusConfirmed */
+  --tx: #ef4444;         /* Android StatusBad */
+  --yellow: #facc15;     /* Android StatusWarn */
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
 }
 
 * { box-sizing: border-box; }
@@ -20,8 +38,18 @@ html, body, #root {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: "Segoe UI", system-ui, sans-serif;
+  /* "Inter" first in case it's installed locally; otherwise a native
+     sans-serif stack -- this is a desktop app with no guaranteed network
+     access at runtime, so no remote web-font fetch. */
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 13px;
+}
+
+/* Tabular/data text (callsigns, frequencies, numeric columns) -- same idea as
+   Android's Geist Mono usage, with a system monospace fallback stack. */
+.mono {
+  font-family: "Geist Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 #root { display: flex; flex-direction: column; }
@@ -86,62 +114,181 @@ select option {
   color: #000;
 }
 
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 14px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-.topbar .spacer { flex: 1; }
-.brand { font-weight: 700; letter-spacing: 0.5px; color: var(--accent); }
+/* --- Android-matched top chrome ------------------------------------------ */
 
-.clock { font-variant-numeric: tabular-nums; font-size: 18px; }
-.cycle-bar { width: 160px; height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.topbar-android {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.topbar-row { display: flex; align-items: center; gap: 10px; }
+.topbar-row .spacer { flex: 1; }
+.topbar-clock { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
+
+/* Band/mode title + chevron, with the real <select> invisibly stacked on top
+   so clicking the styled label opens a working native dropdown without a
+   hand-built listbox. */
+.band-picker { position: relative; display: flex; align-items: center; gap: 4px; }
+.band-picker-label { font-size: 20px; font-weight: 700; color: var(--text); white-space: nowrap; }
+.band-picker .chevron { color: var(--muted); font-size: 14px; }
+.band-picker-select {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer; padding: 0; border: none;
+}
+
+/* Generic pill button, matching Android's StatusPill/chip shape: fully
+   rounded, dark fill, used for Hunt/Radio/TUNE/slot-parity. */
+.pill {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border-radius: var(--radius-lg); padding: 8px 14px;
+  font-size: 13px; font-weight: 700; white-space: nowrap;
+}
+.pill-dark { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+.pill-static { cursor: default; }
+.pill-label-2line { line-height: 1.15; text-align: left; }
+.pill-hunt-active { background: var(--accent-soft); border-color: var(--border-amber); color: var(--accent); }
+.pill-tune-active { background: var(--tx); border-color: var(--tx); color: #fff; }
+.pill-disconnected { opacity: 0.6; }
+
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); display: inline-block; }
+.status-dot.ok { background: var(--ok); }
+
+/* Call CQ pill + its MORE badge/popover. */
+.cq-pill-wrap { position: relative; }
+.pill-cq {
+  background: var(--accent); border: 1px solid var(--accent); color: #1a0f00;
+}
+.pill-more-badge {
+  position: absolute; top: -6px; right: -10px;
+  background: var(--panel-3); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-size: 9px; font-weight: 700;
+  padding: 2px 5px; cursor: pointer;
+}
+.cq-more-popover {
+  position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 40;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: 10px; width: 220px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.cq-more-popover label { display: block; color: var(--muted); margin-bottom: 4px; font-size: 11px; }
+.cq-more-popover input { width: 100%; margin-bottom: 8px; }
+.cq-more-popover .row { gap: 6px; }
+
+/* RX/TX status + countdown. */
+.rx-tx-indicator { display: inline-flex; align-items: center; gap: 8px; }
+.rx-tx-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--signal); }
+.rx-tx-dot.tx { background: var(--tx); }
+.rx-tx-main { display: flex; flex-direction: column; line-height: 1.1; }
+.rx-tx-label { font-weight: 700; color: var(--text); }
+.rx-tx-sub { font-size: 11px; color: var(--muted); }
+
+.icon-button {
+  background: transparent; border: none; color: var(--text); font-size: 16px;
+  padding: 4px 6px; cursor: pointer; border-radius: var(--radius-sm);
+}
+.icon-button:hover { background: var(--panel-2); }
+
+/* DT/NTP sync row, below the title row. */
+.sync-row { gap: 10px; }
+.cycle-bar { flex: 1; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
 .cycle-bar > div { height: 100%; background: var(--accent); transition: width 0.2s linear; }
-.seq { color: var(--muted); }
-.tx-level { display: inline-flex; align-items: center; gap: 6px; }
-.tx-level input[type="range"] { margin: 0; }
+.seq { font-variant-numeric: tabular-nums; }
 
 .tabs { display: flex; gap: 4px; padding: 8px 14px 0; background: var(--panel); }
 .tabs button { border-bottom: none; border-radius: 6px 6px 0 0; }
 .tabs button.active { background: var(--bg); border-color: var(--border); color: var(--accent); }
 
+/* Bottom tab bar, matching Android's TabBar: icon-over-label, active tab gets
+   a filled pill behind it. */
+.tabbar {
+  display: flex; gap: 4px; padding: 8px 10px; background: var(--bg);
+  border-top: 1px solid var(--border-subtle);
+}
+.tabbar-item {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: transparent; border: none; border-radius: var(--radius-lg);
+  padding: 6px 4px; color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.tabbar-item:hover { background: var(--panel-2); }
+.tabbar-item.active { background: var(--accent-soft); color: var(--accent); }
+.tabbar-icon { font-size: 16px; }
+
+.coming-soon { padding: 24px; max-width: 480px; }
+.coming-soon h3 { color: var(--text); margin: 0 0 8px; }
+
 .content { flex: 1; overflow: auto; padding: 14px; }
 
-/* Decode tab: left panel (filter chips + scrolling table), right panel
+/* Decode tab: left panel (filter chips + scrolling list), right panel
    (waterfall), each half the window width. */
 .content.decode { overflow: hidden; display: flex; flex-direction: column; }
 .decode-split { flex: 1; display: flex; flex-direction: row; gap: 14px; min-height: 0; }
 .decode-detail { width: 50%; min-width: 0; display: flex; flex-direction: column; }
 .decode-waterfall { width: 50%; min-width: 0; display: flex; flex-direction: column; }
 .decode-detail .decode-list { flex: 1; overflow: auto; min-height: 0; }
+.waterfall-tab { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.decode-controls { display: flex; align-items: center; gap: 10px; }
+.tx-level { display: inline-flex; align-items: center; gap: 6px; }
+.tx-level input[type="range"] { margin: 0; }
+.decode-list-header { font-size: 11px; padding: 2px 0 6px; }
 
 .row { display: flex; align-items: center; gap: 10px; }
 .col { display: flex; flex-direction: column; gap: 8px; }
 .field label { display: block; color: var(--muted); margin-bottom: 3px; }
 
-.chips { display: flex; gap: 6px; margin-bottom: 8px; }
-.chip { padding: 4px 10px; border-radius: 14px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
-.chip.active { background: var(--accent); color: #04121f; border-color: var(--accent); }
+.chips { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.chip {
+  padding: 6px 14px; border-radius: var(--radius-pill); border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--muted); cursor: pointer; font-weight: 500;
+}
+.chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--border-amber); font-weight: 700; }
 
-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-/* Decode table's Message column: fixed-width monospace so callsign/grid
-   text lines up column-to-column between rows, matching the Android app. */
-.msg-col { font-family: "Cascadia Code", monospace; width: 30ch; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; }
+/* Decode rows: compact single-line flex rows (not a table), matching the
+   Android app. A left accent bar marks a CQ row; a trailing pill marks it
+   too, since the accent bar alone is easy to miss at a glance. */
+.decode-list { display: flex; flex-direction: column; }
+.decode-row {
+  display: flex; align-items: center; gap: 12px; padding: 5px 10px 5px 8px;
+  border-left: 3px solid transparent; font-family: "Geist Mono", "Cascadia Code", monospace;
+  font-variant-numeric: tabular-nums; font-size: 12.5px;
+}
+.decode-row.cq { border-left-color: var(--accent); }
+.decode-row.tome { background: var(--signal-soft); }
+.decode-row.clickable { cursor: pointer; }
+.decode-row.clickable:hover { background: var(--panel-2); }
+.decode-row-msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 /* Already-worked station (this band + mode): struck through in red, matching
    the Android app's worked-station highlighting. */
-.msg-col.worked { text-decoration: line-through; color: var(--tx); }
-th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
-tr.time-sep td { border-top: 2px solid #34618f; color: var(--muted); font-size: 11px; padding: 2px 8px; background: #131a21; font-variant-numeric: tabular-nums; }
-tr.cq td { color: #7ed492; }
-tr.tome td { background: rgba(184,134,11,0.15); }
-tr.clickable { cursor: pointer; }
-tr.clickable:hover td { background: #1d2730; }
+.decode-row-msg.worked { text-decoration: line-through; color: var(--tx); opacity: 0.7; }
+.decode-row-snr, .decode-row-freq { width: 42px; text-align: right; color: var(--muted); }
+.decode-row-dt { width: 48px; text-align: right; color: var(--muted); }
+.decode-row-dt.warn { color: var(--yellow); font-weight: 700; }
+.cq-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--accent-soft); border: 1px solid var(--border-amber); color: var(--accent);
+  border-radius: var(--radius-pill); padding: 2px 8px; font-size: 10px; font-weight: 700;
+}
+.cq-badge-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+.decode-row-empty { padding: 10px 8px; }
 
-.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.time-sep {
+  border-top: 2px solid var(--signal); color: var(--muted); font-size: 11px;
+  padding: 2px 8px; background: var(--panel); font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* Waterfall bottom status strip. */
+.wf-status-strip {
+  display: flex; align-items: center; gap: 10px; padding: 6px 4px 0;
+  font-size: 11px; color: var(--muted);
+}
+.wf-status-freq { color: var(--signal); font-weight: 700; font-variant-numeric: tabular-nums; }
+.wf-status-live { color: var(--ok); font-weight: 700; letter-spacing: 0.5px; }
+.wf-status-live.off { color: var(--text-faint); }
+
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 12px; }
 .panel h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
 .txbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel-2); border-top: 1px solid var(--border); }
