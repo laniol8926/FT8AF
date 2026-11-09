@@ -16,7 +16,6 @@ import {
   type RigConfig,
   type RigStatusEvent,
   type SerialPortInfo,
-  type TxStage,
   type TxStateEvent,
   type UdpConfig,
   type UiMessage,
@@ -58,6 +57,7 @@ import {
 import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
 import { wpxPrefixOf } from "./wpxPrefix";
 import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
+import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
 
 type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
 type Filter = "all" | "cq" | "pota" | "dxcc" | "zone" | "state" | "grid" | "prefix" | "needed" | "tome";
@@ -186,6 +186,10 @@ export default function App() {
   const [audio, setAudio] = useState<{ db: number; silent: boolean } | null>(null);
   const [status, setStatus] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  // Decode list sort/collapse mode (Time/Call/SNR/DX), matching Android's
+  // decode_sort_mode -- cycled from the TIME/CALL/SNR/DX button in the top
+  // bar (see TopBar, after the SWR/PWR chips).
+  const [sortMode, setSortMode] = useState<DecodeSortMode>("time");
   // Whether the "More" controls panel (Tx stage picker + Stop TX, see TxBar)
   // is open -- off by default, matching Android's operate-controls drawer
   // starting collapsed. Toggled from the tab bar's More button rather than
@@ -379,6 +383,9 @@ export default function App() {
     });
     api.getConfig("cq_saved_free_text").then((v) => {
       if (v) setSavedFreeText(v);
+    });
+    api.getConfig("decode_sort_mode").then((v) => {
+      if (v === "call" || v === "snr" || v === "dx" || v === "time") setSortMode(v);
     });
     api.getConfig("hunt_enabled").then((v) => setHuntEnabled(v === "true"));
     api.getConfig("hunt_priority").then((v) => setHuntPriorityState(huntPriorityFromConfig(v)));
@@ -585,6 +592,12 @@ export default function App() {
           setHuntEnabled(next);
           api.setConfig("hunt_enabled", String(next));
         }}
+        sortMode={sortMode}
+        onCycleSortMode={() => {
+          const next = nextSortMode(sortMode);
+          setSortMode(next);
+          api.setConfig("decode_sort_mode", next);
+        }}
         onClearDecodes={() => setMessages([])}
         onRefresh={() => api.refreshStatus()}
       />
@@ -596,6 +609,8 @@ export default function App() {
         {tab === "decode" && (
           <DecodeScreen
             messages={visible}
+            sortMode={sortMode}
+            myGrid={myGrid}
             filter={filter}
             setFilter={setFilter}
             workedCalls={workedCalls}
@@ -675,9 +690,7 @@ export default function App() {
       {tab !== "waterfall" && moreOpen && (
         <TxBar
           txState={txState}
-          decoding={decoding}
-          onStage={(s) => api.setStage(s)}
-          onStop={() => api.stopTx()}
+          onSetTxPeriod={(parity) => api.setTxPeriod(parity)}
         />
       )}
       <div className="status-line">{status}</div>
@@ -768,13 +781,16 @@ function TopBar(props: {
   onToggleTune: () => void;
   huntEnabled: boolean;
   onToggleHunt: () => void;
+  sortMode: DecodeSortMode;
+  onCycleSortMode: () => void;
   onClearDecodes: () => void;
   onRefresh: () => void;
 }) {
   const {
     cycle, bands, dialHz, onBand, myCall, myGrid, savedFreeText, onSaveFreeText,
     rig, clock, rigLabel, txState, meter,
-    onCq, onStop, onFreeText, onToggleTune, huntEnabled, onToggleHunt, onClearDecodes, onRefresh,
+    onCq, onStop, onFreeText, onToggleTune, huntEnabled, onToggleHunt,
+    sortMode, onCycleSortMode, onClearDecodes, onRefresh,
   } = props;
   const [cqOptionsOpen, setCqOptionsOpen] = useState(false);
   const [cqModifier, setCqModifier] = useState(""); // "" = plain CQ, else e.g. "DX" or a custom 1-4 letter code
@@ -902,6 +918,16 @@ function TopBar(props: {
           </span>
         )}
 
+        {/* Decode-list sort control, matching Android's DecodeScreen.kt
+            top-bar sort button: cycles TIME -> CALL -> SNR -> DX on click. */}
+        <button
+          className="icon-button sort-mode-button"
+          onClick={onCycleSortMode}
+          title={SORT_MODE_TITLE[sortMode]}
+        >
+          {SORT_MODE_LABEL[sortMode]}
+        </button>
+
         <div className="spacer" />
 
         <span className="topbar-clock">
@@ -1027,7 +1053,7 @@ function CqOptionsModal(props: {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal modal-cq-options" onClick={(e) => e.stopPropagation()}>
         <h3>CQ Message</h3>
         <div className="col">
           <label className="muted" style={{ fontSize: 12 }}>CQ MESSAGE</label>
@@ -1303,6 +1329,8 @@ const DECODE_FILTERS: { id: Filter; label: string }[] = [
 
 function DecodeScreen(props: {
   messages: UiMessage[];
+  sortMode: DecodeSortMode;
+  myGrid: string;
   filter: Filter;
   setFilter: (f: Filter) => void;
   workedCalls: Set<string>;
@@ -1319,10 +1347,16 @@ function DecodeScreen(props: {
   audio: { db: number; silent: boolean } | null;
 }) {
   const {
-    messages, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids, workedPrefixes,
-    workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
+    messages, sortMode, myGrid, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids,
+    workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
     decoding, audio,
   } = props;
+
+  // Default "time" mode keeps the existing full-history, per-slot-grouped
+  // list untouched; CALL/SNR/DX collapse to one row per station (latest
+  // decode wins) and reorder, matching Android's collapseByStation -- see
+  // decodeSort.ts for why collapsing isn't also applied to "time".
+  const displayMessages = sortMode === "time" ? messages : collapseByStation(messages, sortMode, myGrid);
 
   return (
     <>
@@ -1356,11 +1390,16 @@ function DecodeScreen(props: {
             <span className="decode-row-dt">Δt</span>
           </div>
           <div className="decode-list">
-            {messages.map((m, i) => {
+            {displayMessages.map((m, i) => {
+              // Time-group dividers only make sense in "time" mode, where rows
+              // stay time-ordered -- once sorted by call/SNR/distance the rows
+              // interleave cycles and a divider would be noise (matches
+              // Android's showTimeGroupDividers).
               // i === 0 also starts a new block: messages are prepended newest-first,
               // so the current decode period is always at the top of the list, and
               // Android always shows that period's header there too.
-              const newBlock = i === 0 || messages[i - 1].utc_ms !== m.utc_ms;
+              const newBlock =
+                sortMode === "time" && (i === 0 || displayMessages[i - 1].utc_ms !== m.utc_ms);
               // Distinct callers decoded in this slot, for the centered
               // divider -- matches Android's "UTC : 16:15:52 · 8 decoded
               // this cycle" header, just per-group instead of once for the
@@ -1368,8 +1407,8 @@ function DecodeScreen(props: {
               let groupStationCount = 0;
               if (newBlock) {
                 const seen = new Set<string>();
-                for (let j = i; j < messages.length && messages[j].utc_ms === m.utc_ms; j++) {
-                  seen.add(messages[j].call_from.toUpperCase());
+                for (let j = i; j < displayMessages.length && displayMessages[j].utc_ms === m.utc_ms; j++) {
+                  seen.add(displayMessages[j].call_from.toUpperCase());
                 }
                 groupStationCount = seen.size;
               }
@@ -1438,7 +1477,7 @@ function DecodeScreen(props: {
                 </Fragment>
               );
             })}
-            {messages.length === 0 && (
+            {displayMessages.length === 0 && (
               <div className="decode-row-empty muted">
                 No decodes yet — set your callsign and rig in Settings; decoding starts on its own.
               </div>
@@ -2788,54 +2827,60 @@ function SettingsScreen(props: {
   );
 }
 
-// The operator-selectable QSO messages, in WSJT-X Tx1–Tx5 order. Each rebuilds
-// the outgoing message from the current target/report on the backend.
-const TX_STAGES: { stage: TxStage; label: string; title: string }[] = [
-  { stage: "grid", label: "Grid", title: "Tx1 — send my grid" },
-  { stage: "report", label: "Rpt", title: "Tx2 — send signal report" },
-  { stage: "r_report", label: "R+Rpt", title: "Tx3 — send R + report" },
-  { stage: "rr73", label: "RR73", title: "Tx4 — send RR73" },
-  { stage: "bye73", label: "73", title: "Tx5 — send 73" },
-];
-
-// Call CQ and Tune now live in TopBar (matching the Android layout); this bar
-// keeps the detailed status + the manual Tx1-5 stage override, which Android
-// doesn't surface on its main screen but desktop operators rely on.
+// Opened from the tab bar's "More" button, matching Android's
+// operate-controls drawer toggle. Call CQ/STOP, Hunt, TUNE, and Band are
+// already in TopBar (matching Android's CqHuntRow/BandModeRow/TUNE, which
+// would otherwise duplicate here), and TX volume already moved to Settings
+// this round -- so the only genuinely drawer-only content left to port is
+// Android's TX-period (Even/Odd) picker (PeriodTuneDxRow in TxStrip.kt),
+// newly wired up via EngineCommand::SetTxPeriod this round. This entirely
+// replaces the previous desktop-only content (RX/TX/stage/target/message
+// readout, a manual Tx1-5 stage override, a separate Stop TX button) with no
+// Android equivalent of its own.
+//
+// Android's DX (DXpedition/Hound mode) belongs in this same row
+// (PeriodTuneDxRow) but isn't ported: it needs its own Fox/Hound TX
+// sequencer, not just a UI toggle -- same category of real on-air-stakes
+// work as Field Day, deliberately left as a documented gap rather than
+// faked (see docs/desktop-decode-android-parity.md).
+//
+// Android has no "no preference" third state (TxPeriodControl always shows
+// exactly one of 1st/2nd selected, defaulting to 1st/even) -- but that would
+// mean every CQ here waits for a specific parity before keying at all,
+// changing today's "key up at the next free slot" default. AUTO (the
+// existing default, preferred_tx_parity == null) is a deliberate addition
+// so the period picker is opt-in rather than a default-behavior change.
 function TxBar(props: {
   txState: TxStateEvent | null;
-  decoding: boolean;
-  onStage: (s: TxStage) => void;
-  onStop: () => void;
+  onSetTxPeriod: (parity: number | null) => void;
 }) {
-  const { txState, decoding, onStage, onStop } = props;
-  const tx = txState?.transmitting;
-  const tuning = txState?.tuning ?? false;
-  const stage = txState?.status.stage ?? "idle";
-  const target = txState?.status.target ?? null;
-  // Outside a QSO the auto-sequencer stage is "idle", which reads as "nothing
-  // happening" even while we're decoding — show the receiver's real activity then.
-  const stageLabel = stage === "idle" ? (decoding ? "listening" : "stopped") : stage;
+  const { txState, onSetTxPeriod } = props;
+  const preferredParity = txState?.preferred_tx_parity ?? null;
   return (
     <div className="txbar">
-      <span className={"badge " + (tx ? "tx" : "rx")}>{tx ? "TX" : "RX"}</span>
-      <span className="muted">stage: {stageLabel}</span>
-      {target && <span className="muted">→ {target}</span>}
-      <span className="msg">{txState?.message ?? ""}</span>
-      <div className="spacer" style={{ flex: 1 }} />
-      <div className="stage-picker" title={target ? "" : "Pick a station first"}>
-        {TX_STAGES.map((s) => (
+      <div className="tx-period-control" title="Which half of the 15s cycle a new CQ/QSO starts keying in">
+        <span className="tx-period-label">TX PERIOD</span>
+        <div className="tx-period-segments">
           <button
-            key={s.stage}
-            className={stage === s.stage ? "active" : ""}
-            disabled={!target || tuning}
-            title={s.title}
-            onClick={() => onStage(s.stage)}
+            className={preferredParity === null ? "active" : ""}
+            onClick={() => onSetTxPeriod(null)}
           >
-            {s.label}
+            Auto
           </button>
-        ))}
+          <button
+            className={preferredParity === 0 ? "active" : ""}
+            onClick={() => onSetTxPeriod(0)}
+          >
+            1st (even)
+          </button>
+          <button
+            className={preferredParity === 1 ? "active" : ""}
+            onClick={() => onSetTxPeriod(1)}
+          >
+            2nd (odd)
+          </button>
+        </div>
       </div>
-      <button className="danger" onClick={onStop}>Stop TX</button>
     </div>
   );
 }

@@ -175,6 +175,11 @@ fn stop_tx(state: State<AppState>) {
 }
 
 #[tauri::command]
+fn set_tx_period(state: State<AppState>, parity: Option<i64>) {
+    state.engine.send(EngineCommand::SetTxPeriod(parity));
+}
+
+#[tauri::command]
 fn start_tune(state: State<AppState>) {
     state.engine.send(EngineCommand::StartTune);
 }
@@ -608,6 +613,7 @@ fn main() {
             answer,
             set_stage,
             stop_tx,
+            set_tx_period,
             start_tune,
             stop_tune,
             free_text,

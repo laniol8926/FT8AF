@@ -264,6 +264,10 @@ pub enum EngineCommand {
     Answer(AnswerArgs),
     /// Operator manually selects which QSO message to transmit next.
     SetStage(crate::qso::TxStage),
+    /// Operator's preferred TX slot parity for the *next* CQ/QSO start (0 =
+    /// Even, 1 = Odd; `None` = no preference) -- matches Android's
+    /// `TxPeriodControl`. Does not affect an already-locked in-progress QSO.
+    SetTxPeriod(Option<i64>),
     StopTx,
     /// Transmit a steady carrier at the TX offset for antenna tuning, with no
     /// FT8 message involved — see [`Engine::start_tune`].
@@ -332,6 +336,9 @@ pub struct TxStateEvent {
     /// Whether a TUNE (steady carrier, no FT8 message) is in flight — see
     /// [`Engine::start_tune`]. Drives the Tune button's on/off look.
     pub tuning: bool,
+    /// Operator's preferred TX slot parity for the next CQ/QSO start (0 =
+    /// Even, 1 = Odd, `None` = no preference) -- see `EngineCommand::SetTxPeriod`.
+    pub preferred_tx_parity: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -555,6 +562,12 @@ struct Engine {
     /// Drives the CAT PTT keepalive independently of the NTP-corrected clock.
     last_ptt_on_sent: Option<Instant>,
     tx_parity: Option<i64>,
+    /// Operator's preferred TX slot parity (0 = Even, 1 = Odd; `None` = no
+    /// preference), set via `EngineCommand::SetTxPeriod` -- matches Android's
+    /// `TxPeriodControl`/`onSelectTxPeriodAction`. Only takes effect the next
+    /// time a CQ/QSO starts (`StartCq` seeds `tx_parity` from this instead of
+    /// `None`); it never overrides an already-locked in-progress QSO's parity.
+    preferred_tx_parity: Option<i64>,
     clock_offset_ms: i64,
     time_synced: bool,
     /// Clone of the command sender so background helpers (NTP sync) can feed
@@ -690,6 +703,7 @@ impl Engine {
             last_tick_ms: 0,
             last_ptt_on_sent: None,
             tx_parity: None,
+            preferred_tx_parity: None,
             clock_offset_ms: saved_offset.unwrap_or(0),
             time_synced: saved_offset.is_some(),
             udp: crate::udp::UdpService::new(cmd_tx.clone()),
@@ -1373,6 +1387,7 @@ impl Engine {
             message: self.qso.tx_message().map(|s| s.to_string()),
             status: self.qso.status(),
             tuning: self.tx_tune.is_some(),
+            preferred_tx_parity: self.preferred_tx_parity,
         }));
         // Mirror the state change out over WSJT-X UDP so companion apps see TX
         // start/stop and QSO progress without waiting for the next 1 Hz tick.
@@ -1550,8 +1565,12 @@ impl Engine {
                 self.emit(EngineEvent::Info("rig disconnected".into()));
                 self.publish_rig_status();
             }
+            EngineCommand::SetTxPeriod(parity) => {
+                self.preferred_tx_parity = parity;
+                self.publish_tx_state();
+            }
             EngineCommand::StartCq => {
-                self.tx_parity = None;
+                self.tx_parity = self.preferred_tx_parity;
                 self.qso.start_cq();
                 // Start CQ this very slot if we're still inside the window;
                 // otherwise the first transmission lands at the next free slot.
@@ -1679,8 +1698,8 @@ impl Engine {
 mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, should_refresh_ptt,
-        waterfall_row_due, wf_boundary_row, Engine, CYCLE_MS, DEFAULT_RX_GAIN, DEFAULT_TX_GAIN,
-        MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
+        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, CYCLE_MS, DEFAULT_RX_GAIN,
+        DEFAULT_TX_GAIN, MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::db::Db;
     use crate::dsp::DecodedMessage;
@@ -1722,6 +1741,37 @@ mod tests {
         engine.refresh_ptt_keepalive();
         assert!(!engine.ptt);
         assert!(engine.last_ptt_on_sent.is_none());
+    }
+
+    #[test]
+    fn preferred_tx_period_seeds_the_lock_on_cq_start() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+
+        // No preference set: CQ starts free to key in any slot's parity (the
+        // existing default behavior), locking only once it actually transmits.
+        engine.handle(EngineCommand::StartCq);
+        assert_eq!(engine.tx_parity, None);
+        engine.handle(EngineCommand::StopTx);
+
+        // Operator picks Odd (1) as their preferred TX period before calling CQ:
+        // the preference is stored immediately...
+        engine.handle(EngineCommand::SetTxPeriod(Some(1)));
+        assert_eq!(engine.preferred_tx_parity, Some(1));
+        // ...and the next CQ start locks tx_parity to it right away, restricting
+        // eligibility to Odd slots from the very first transmission instead of
+        // whichever slot happened to be current.
+        engine.handle(EngineCommand::StartCq);
+        assert_eq!(engine.tx_parity, Some(1));
+
+        // Clearing the preference (back to "no preference") and starting a new
+        // CQ frees tx_parity again.
+        engine.handle(EngineCommand::StopTx);
+        engine.handle(EngineCommand::SetTxPeriod(None));
+        engine.handle(EngineCommand::StartCq);
+        assert_eq!(engine.tx_parity, None);
     }
 
     #[test]

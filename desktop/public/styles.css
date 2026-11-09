@@ -192,6 +192,13 @@ select option {
 }
 .icon-button:hover { background: var(--panel-2); }
 
+/* Decode-list sort button (TIME/CALL/SNR/DX), matching Android's
+   SortModeLabel -- bold accent-colored mono text, not a generic icon glyph. */
+.sort-mode-button {
+  font-family: "Geist Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+  font-weight: 700; font-size: 11px; letter-spacing: 0.04em; color: var(--accent);
+}
+
 /* DT/NTP sync row, below the title row. */
 .sync-row { gap: 10px; }
 .cycle-bar { flex: 1; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
@@ -304,21 +311,13 @@ select option {
 .panel h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
 .txbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel-2); border-top: 1px solid var(--border); }
-.txbar .msg { font-family: "Cascadia Code", monospace; }
-.stage-picker { display: flex; gap: 4px; }
-.stage-picker button { padding: 4px 10px; font-size: 12px; font-weight: 600; }
-.stage-picker button.active { background: var(--tx); color: #fff; border-color: var(--tx); }
-.stage-picker button:disabled { opacity: 0.4; cursor: not-allowed; }
-/* Tune toggle: steady carrier for antenna tuning, no CQ/QSO involved. Red
-   background while on is a deliberate "RF is live" warning, same color as
-   the TX badge and the stage-picker's active pill. */
-.tune-toggle { padding: 4px 10px; font-size: 12px; font-weight: 600; }
-.tune-toggle.active { background: var(--tx); color: #fff; border-color: var(--tx); }
-.tune-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
-.badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
-.badge.tx { background: var(--tx); color: #fff; }
-.badge.rx { background: var(--panel); color: var(--muted); }
-.badge.ok { background: var(--ok); color: #04121f; }
+/* TX-period (Even/Odd) picker, matching Android's TxPeriodControl/
+   PeriodTuneDxRow (TxStrip.kt): a labeled segmented control, AUTO/1st/2nd. */
+.tx-period-control { display: flex; align-items: center; gap: 10px; }
+.tx-period-label { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; color: var(--text-faint); }
+.tx-period-segments { display: flex; gap: 4px; background: var(--panel); border-radius: var(--radius-sm); padding: 3px; }
+.tx-period-segments button { padding: 4px 10px; font-size: 12px; font-weight: 600; }
+.tx-period-segments button.active { background: var(--accent); color: #1a1200; border-color: var(--accent); }
 
 .status-line { color: var(--muted); font-size: 12px; padding: 4px 14px; min-height: 20px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -373,6 +372,9 @@ select option {
   padding: 16px; width: 520px; max-width: 92vw; max-height: 88vh; overflow: auto;
 }
 .modal h3 { margin: 0 0 12px; font-size: 14px; color: var(--accent); }
+/* Wide enough that the 8 CQ-direction preset chips (CQ/DX/NA/EU/SA/AS/OC/AF)
+   fit on one row instead of wrapping after "CQ AS" at the default 520px. */
+.modal-cq-options { width: 640px; }
 .modal .grid2 { margin-bottom: 12px; }
 .modal .field input { width: 100%; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }

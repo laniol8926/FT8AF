@@ -187,6 +187,53 @@ anywhere, harmless, or worse, decode to a *wrong* exchange on someone
 else's screen), not something to rush. Not started; needs a deliberate
 go-ahead given the stakes.
 
+## Done this round, part 5: CQ modal width, decode sort control, More panel rebuilt
+
+- **CQ Options modal width**: at the default 520px shared `.modal` width, the
+  8 directional preset chips (CQ/DX/NA/EU/SA/AS/OC/AF) wrapped after "CQ AS".
+  Gave the modal its own `.modal-cq-options` width (640px) rather than
+  widening every dialog that reuses `.modal`.
+- **Decode-list sort control (Time/Call/SNR/DX)**: `src/decodeSort.ts` (+
+  tests) ports Android's `DecodeCollapse.kt` — `nextSortMode` (the same
+  Time→Call→SNR→DX→Time cycle) and `collapseByStation` (latest decode per
+  callsign, then ordered by the chosen mode; gridless stations sink to the
+  bottom in DX mode, same as Android, via `hunt.ts`'s existing
+  `maidenheadDistanceKm`). A button in the top bar (after the SWR/PWR chips,
+  matching where the operator asked for it — Android's own copy lives in the
+  Decode screen's title-bar actions instead) cycles modes and shows
+  Android's exact TIME/CALL/SNR/DX labels in amber mono, persisted via
+  `decode_sort_mode` config. **Deliberately scoped down from Android**: only
+  CALL/SNR/DX collapse-and-reorder the list; the default TIME mode keeps
+  this branch's existing full-history, per-slot-grouped view exactly as
+  before rather than also switching to Android's always-collapsed
+  one-row-per-station list, which would be a bigger, unrequested change to
+  already-approved default behavior. Time-group dividers only render in TIME
+  mode, matching Android's `showTimeGroupDividers`.
+- **More panel (tab bar's "More" toggle) rebuilt on Android logic,
+  replacing all of its previous content**: it used to show a desktop-only
+  plain-text RX/TX/stage/target/message readout, a manual Tx1-5 stage
+  override, and a separate Stop TX button — none with an Android
+  equivalent. All of that is gone. Call CQ/STOP, Hunt, TUNE, and Band
+  already live in TopBar (Android's CqHuntRow/BandModeRow equivalents), and
+  TX volume already moved to Settings, so the only genuinely drawer-only
+  row left to port is Android's **TX period (Even/Odd) picker**
+  (`PeriodTuneDxRow`/`TxPeriodControl` in `TxStrip.kt`), newly wired
+  end-to-end: `EngineCommand::SetTxPeriod` (+ a `preferred_tx_parity` engine
+  field, unit-tested), the `set_tx_period` Tauri command, `api.setTxPeriod`,
+  and `TxStateEvent.preferred_tx_parity` so the UI reflects it. `StartCq`
+  now seeds the TX-parity lock from this preference instead of always
+  `None`, so choosing a period actually restricts which slots a new CQ/QSO
+  keys in from the start, not just cosmetically. One deliberate difference
+  from Android: there's a third **Auto** state (the prior default — key up
+  at the next free slot, in either parity) alongside 1st (even) / 2nd (odd),
+  since Android's control always has exactly one of the two selected, which
+  would force every CQ to wait for a specific parity by default — a default
+  behavior change nobody asked for.
+  **DX (DXpedition/Hound mode)**, the row's other Android control, is *not*
+  ported: Android's `startHoundMode`/`stopHoundMode` is a real Fox/Hound TX
+  sequencer, not a UI toggle — same category of real on-air-stakes work as
+  Field Day above, left as a documented gap rather than faked.
+
 ## Build note
 
 `npm run tauri -- build --no-bundle` is the only way to get a real,

@@ -48,6 +48,9 @@ export interface TxStateEvent {
   status: QsoStatus;
   /** A TUNE (steady carrier, no FT8 message) is in flight — drives the Tune button's on/off look. */
   tuning: boolean;
+  /** Operator's preferred TX slot parity for the next CQ/QSO start (0 = Even,
+   *  1 = Odd, null = no preference) — see `set_tx_period`. */
+  preferred_tx_parity: number | null;
 }
 
 export interface RigStatusEvent {
@@ -246,6 +249,7 @@ export const api = {
     invoke("answer", { args }),
   setStage: (stage: TxStage) => invoke("set_stage", { stage }),
   stopTx: () => invoke("stop_tx"),
+  setTxPeriod: (parity: number | null) => invoke("set_tx_period", { parity }),
   freeText: (text: string) => invoke("free_text", { text }),
   startTune: () => invoke("start_tune"),
   stopTune: () => invoke("stop_tune"),
