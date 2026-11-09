@@ -9,42 +9,51 @@ equivalent until now. New schema v7 table: `callsign_qth(callsign TEXT
 PRIMARY KEY, grid TEXT NOT NULL, updated_at INTEGER NOT NULL)` — matches
 Android's own table shape exactly, no extra columns.
 
-## ⚠ Known issue: no visible progress during the first-run seed (ship-blocking)
+## Resolved: the first-run seed is now narrated by a native OS popup
 
-**A first-time user would reasonably conclude the app had hung and kill it.**
-The first-run FCC/Census seed (condition 1 below) takes anywhere from several
-seconds to roughly a minute (a ~200MB download plus a 1.7M-record scan), and
-on this board a real, reproducible WebKitGTK bug means **the window stops
-repainting almost immediately after launch and does not visually update
-again — not the clock, not the sync readout, not the progress dialog — until
-a real mouse click forces a repaint.** The backend is correct and the
-progress dialog (`FccGridSeedDialog` in `App.tsx`) does mount and update
-exactly as designed; it just never gets drawn to screen without that
-artificial nudge. Confirmed directly, repeatedly: resetting the table and
-relaunching reliably reproduces an identical silent freeze, and a single
-click anywhere in the window reliably reveals that the operation already
-completed correctly underneath (806,625 and 806,661 rows across two
-independent runs, matching the live FCC data each time).
+**The problem** (found while verifying this live): a real, reproducible
+WebKitGTK bug on this board means the main window can stop repainting almost
+immediately after launch — not the clock, not the sync readout, not the
+in-app progress dialog, nothing visually updates again until a real mouse
+click forces a repaint. A first-time user watching the ~200MB download +
+1.7M-record scan happen behind a silently frozen window would reasonably
+conclude the app had hung and kill it. Tried and ruled out as fixes:
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` (already set in `run-ft8af.sh` for a
+related but distinct freeze — see that script's own comment — does not
+prevent this one), `WEBKIT_DISABLE_COMPOSITING_MODE=1`, `GDK_BACKEND=x11`,
+`vblank_mode=0`, and combinations of all four — the underlying repaint bug
+itself is still unfixed and tracked separately.
 
-This is **not specific to the grid-table feature** — the same window-wide
-freeze blocks the live clock and NTP sync readout too, both pre-existing,
-unrelated UI elements. It reproduces on both this branch and
-`feat/decode-waterfall-android-design`'s own build of the same binary. Tried
-and **ruled out** as fixes: `WEBKIT_DISABLE_DMABUF_RENDERER=1` (already set
-in `run-ft8af.sh` for a related but distinct freeze —
-see that script's own comment — does not prevent this one),
-`WEBKIT_DISABLE_COMPOSITING_MODE=1`, `GDK_BACKEND=x11`, `vblank_mode=0`, and
-combinations of all four. None changed the behavior.
+**The fix**: sidestep it rather than chase it. `main.rs`'s `setup()` now
+triggers the first-run seed itself (not the frontend's mount effect — see
+below) and shows a **native GTK message dialog** (`tauri-plugin-dialog`,
+backed by `rfd` — a genuinely separate OS window, not webview content) with
+"Creating US Grid Table" before the download starts. Native dialogs render
+through a completely different pipeline than the webview, so they stay
+visible and responsive regardless of the repaint bug — confirmed directly:
+`wmctrl -l` lists it as its own top-level window (`Creating US Grid Table`)
+alongside the frozen `FT8AF` one, and it persists correctly for as long as
+it isn't dismissed. Only the *starting* popup is native; a native
+completion/error popup was tried too and then deliberately removed after
+live testing showed it was redundant with the in-app completion dialog
+(`FccGridSeedCompleteDialog`) — one "it's done" notification is enough once
+the operator already knows the app is alive.
 
-**Not fixed in this round.** Given the first-run seed is the single most
-likely place for a brand-new user to hit this blind (no prior trust that the
-app is "just slow"), this needs real investigation before shipping to
-anyone who isn't already in on the workaround — candidates for next time:
-an explicit `gtk_widget_queue_draw`/frame-clock kick from the Rust side on
-every `EngineEvent` emit (rather than relying on WebKitGTK's own repaint
-scheduling), or filing/searching further upstream WebKitGTK-on-ARM reports.
-Workaround for testing in the meantime: click anywhere in the window after
-starting the app.
+`run_fcc_grid_seed` (shared by both the backend auto-trigger and the manual
+`import_fcc_grid_seed` command) emits `fcc-grid-progress` throughout and a
+new `fcc-grid-done` event (`{ok: FccSeedSummary} | {err: string}`) at the
+end regardless of which trigger started it, so the in-app dialog still works
+correctly whenever the window *is* repainting — App.tsx now listens for both
+passively for its whole lifetime instead of only while a manually-triggered
+seed is in flight, which is also what lets a Settings-panel-triggered
+manual re-run (`CallsignGridPanel`, "Update now") share the exact same UI
+path as the first-run auto-start.
+
+**Verified idempotent**: two back-to-back real runs — first with an empty
+table (native popup appears, seed completes, 806,668 rows), second
+immediately after with the table already populated (no popup, zero seed
+activity in the log, row count unchanged) — confirm `callsign_qth_count() !=
+0` correctly skips re-seeding on every subsequent launch.
 
 ## Populated four ways
 
@@ -125,26 +134,33 @@ vs. `fillCallsignQTHFromLog` (`INSERT OR IGNORE`):
 
 ## Tauri commands / frontend
 
-`callsign_qth_count` (first-run check) and `import_fcc_grid_seed` (the seed
-itself, `catch_unwind`-wrapped like `import_adif` since it also parses
-external file content this app doesn't control) in `main.rs`; `fcc-grid-
-progress` events drive `App.tsx`'s `FccGridSeedDialog`/
-`FccGridSeedCompleteDialog`/`FccGridSeedErrorDialog`, the same structural
-shape as the existing ADIF-import dialogs. The mount effect calls
-`api.callsignQthCount()` once at startup and auto-starts the seed (no
-button) if it comes back zero — no separate onboarding flow, matching how
-every other piece of startup state on this screen already hydrates itself.
+`callsign_qth_count` (Settings panel's row count) and `import_fcc_grid_seed`
+(manual re-run command, `catch_unwind`-wrapped like `import_adif` since it
+also parses external file content this app doesn't control) in `main.rs`;
+both call into the shared `run_fcc_grid_seed`, which the `setup()` auto-
+trigger thread also calls directly (not through the command) so the native
+popup can wrap it. `fcc-grid-progress`/`fcc-grid-done` events drive
+`App.tsx`'s `FccGridSeedDialog`/`FccGridSeedCompleteDialog`/
+`FccGridSeedErrorDialog` (the same structural shape as the existing
+ADIF-import dialogs) via one passive listener active for the component's
+whole lifetime — no imperative per-trigger listener setup. `CallsignGridPanel`
+in Settings (same local-state/`useEffect(refresh, [])` pattern as the
+existing `CustomBandsPanel`) shows the live row count and an "Update now"
+button for re-running the seed later, since the FCC data changes weekly.
 
 ## Testing
 
-213 Rust tests (including the new `fcc_grid.rs` module's parser/Gazetteer
-tests against synthetic fixtures and real downloaded-data spot checks, the
-`callsign_qth` schema-v7 migration test, REPLACE-vs-IGNORE priority-ordering
-tests, and the directional-CQ protocol-level regression test above), 125
-vitest tests. Verified live against the real FCC data twice (806,625 and
-806,661 rows seeded, 822,153 active licenses found each time) by querying
-sqlite directly — necessary given the rendering issue above means the UI
-itself can't be trusted as the verification path for this feature yet.
+287 Rust tests (`cargo test --lib` + the `main.rs` binary's own tests +
+`tests/roundtrip.rs`; includes the new `fcc_grid.rs` module's parser/
+Gazetteer tests against synthetic fixtures and real downloaded-data spot
+checks, the `callsign_qth` schema-v7 migration test, REPLACE-vs-IGNORE
+priority-ordering tests, and the directional-CQ protocol-level regression
+test above), 125 vitest tests. Verified live against the real FCC data
+repeatedly (806,625 / 806,661 / 806,667 / 806,668 / 806,669 / 806,670 rows
+seeded across six separate runs, 822,153 active licenses found every time)
+— first via direct sqlite queries (before the native-popup fix made the
+live UI itself trustworthy to watch), then visually once the fix landed,
+including the two-run idempotency check described above.
 
 ## Branch note
 

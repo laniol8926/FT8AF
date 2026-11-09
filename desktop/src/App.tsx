@@ -4,6 +4,7 @@ import {
   onEngineEvent,
   onImportProgress,
   onFccGridProgress,
+  onFccGridDone,
   type AudioDevice,
   type BandInfo,
   type ClockSyncEvent,
@@ -315,27 +316,51 @@ export default function App() {
   // reason refreshWorkedCalls re-fetches on dialHz.
   useEffect(refreshWorkedStates, [dialHz]);
 
-  // First-run callsign/grid table seed (Map screen prerequisite, fcc_grid.rs).
-  // `fccSeedProgress` null = not running; non-null drives the dialog, which
-  // auto-starts (no button) the moment the mount effect below finds the
-  // table empty -- see that effect's comment for why.
+  // Callsign/grid table seed (Map screen prerequisite, fcc_grid.rs). The
+  // first-run seed is triggered from the *backend* now (main.rs's setup(),
+  // narrated through native OS dialogs, not this window -- see that
+  // function's doc comment for why: a real WebKitGTK repaint freeze on this
+  // hardware means this window can silently stop updating shortly after
+  // launch). This component only *listens* passively for
+  // "fcc-grid-progress"/"fcc-grid-done" for the whole app lifetime, rather
+  // than driving the seed itself, so the in-window dialog below still works
+  // correctly whenever the window happens to be repainting, regardless of
+  // which trigger (the backend's first-run auto-start, or a future Settings
+  // "update now" button) started it -- both emit the same two events.
   const [fccSeedProgress, setFccSeedProgress] = useState<FccSeedProgress | null>(null);
   const [fccSeedSummary, setFccSeedSummary] = useState<FccSeedSummary | null>(null);
   const [fccSeedError, setFccSeedError] = useState<string | null>(null);
 
-  async function startFccGridSeed() {
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenDone: (() => void) | undefined;
+    onFccGridProgress((p) => {
+      setFccSeedProgress(p);
+      setFccSeedSummary(null);
+      setFccSeedError(null);
+    }).then((u) => (cancelled ? u() : (unlistenProgress = u)));
+    onFccGridDone((d) => {
+      setFccSeedProgress(null);
+      if ("ok" in d) setFccSeedSummary(d.ok);
+      else setFccSeedError(d.err);
+    }).then((u) => (cancelled ? u() : (unlistenDone = u)));
+    return () => {
+      cancelled = true;
+      unlistenProgress?.();
+      unlistenDone?.();
+    };
+  }, []);
+
+  // For the future Settings "update now" button: kicks the backend command
+  // directly; the passive listener above (not this function's return value)
+  // is what actually drives the dialog, so it behaves identically to the
+  // backend's own first-run auto-start.
+  function startFccGridSeed() {
+    setFccSeedProgress({ phase: "downloading", processed: 0, total: 0, current_callsign: "" });
     setFccSeedSummary(null);
     setFccSeedError(null);
-    setFccSeedProgress({ phase: "downloading", processed: 0, total: 0, current_callsign: "" });
-    const unlisten = await onFccGridProgress(setFccSeedProgress);
-    try {
-      setFccSeedSummary(await api.importFccGridSeed());
-    } catch (err) {
-      setFccSeedError(String(err));
-    } finally {
-      unlisten();
-      setFccSeedProgress(null);
-    }
+    api.importFccGridSeed().catch((err) => setFccSeedError(String(err)));
   }
 
   // keep latest decoding flag for the toggle without stale closure
@@ -481,15 +506,6 @@ export default function App() {
       setHuntMinSnr(Number.isNaN(n) ? null : n);
     });
     maybeAutoStartDecode();
-    // First-run grid-table seed: an empty callsign_qth table means this
-    // install has never run the FCC/Census import (a fresh install, or an
-    // upgrade from before this feature existed) -- auto-start it with no
-    // button, matching the "if the table is empty... display a popup"
-    // request directly, the same unprompted-auto-trigger shape as the
-    // existing rig/band/gain hydration calls right above this one.
-    api.callsignQthCount().then((n) => {
-      if (n === 0) startFccGridSeed();
-    });
     return () => {
       cancelled = true;
       unlisten?.();
@@ -767,6 +783,7 @@ export default function App() {
             messages={visible}
             sortMode={sortMode}
             myGrid={myGrid}
+            operatingMode={operatingMode}
             filter={filter}
             setFilter={setFilter}
             workedCalls={workedCalls}
@@ -850,6 +867,8 @@ export default function App() {
               setDisplayHzState(hz);
               api.setWfDisplayHz(hz);
             }}
+            onUpdateGridTable={startFccGridSeed}
+            gridSeedBusy={fccSeedProgress != null}
           />
         )}
         {(tab === "map" || tab === "pota") && (
@@ -1676,10 +1695,74 @@ const DECODE_FILTERS: { id: Filter; label: string }[] = [
   { id: "tome", label: "For Me" },
 ];
 
+// Empty-state title/body per active filter, ported verbatim from Android's
+// EmptyState composable (DecodeScreen.kt) and strings_compose.xml -- "all"
+// is Android's `else` branch, whose body interpolates the current mode name
+// ("Waiting for FT8 signals to appear...").
+const EMPTY_STATE_TEXT: Record<Exclude<Filter, "all">, { title: string; body: string }> = {
+  cq: { title: "No CQ calls", body: "No stations are calling CQ on this band right now." },
+  pota: {
+    title: "No POTA spots",
+    body: "No park activations decoded on this band yet — open POTA → Hunt for the spot list.",
+  },
+  dxcc: { title: "No new DXCC", body: "No unworked DXCC entities have been decoded yet." },
+  zone: {
+    title: "No new zones",
+    body: "No stations calling from an unworked CQ zone have been decoded yet.",
+  },
+  state: {
+    title: "No new states",
+    body: "No stations calling from an unworked US state have been decoded yet.",
+  },
+  grid: {
+    title: "No new grids",
+    body: "No stations calling from an unworked grid square have been decoded yet.",
+  },
+  prefix: {
+    title: "No new prefixes",
+    body: "No stations calling from an unworked callsign prefix (WPX) have been decoded yet.",
+  },
+  needed: { title: "Nothing needed", body: "No stations needing confirmation found." },
+  tome: { title: "No calls for you", body: "No stations are calling your callsign right now." },
+};
+
+// Matches Android's EmptyState + EmptyStateWaves (DecodeScreen.kt /
+// ui/components/EmptyStateWaves.kt): a decorative radial-glow + three
+// stacked wave arcs above a title/body message that varies with the active
+// filter. Android animates the waves drifting (an infinite 6s phase loop);
+// this port is a static SVG of the same shape rather than a canvas
+// animation loop -- the filter-aware copy is the part actually requested,
+// and a static graphic is far cheaper to keep correct.
+function EmptyState({ filter, operatingMode }: { filter: Filter; operatingMode: OperatingMode }) {
+  const { title, body } =
+    filter === "all"
+      ? { title: "No signals decoded", body: `Waiting for ${MODE_LABEL[operatingMode]} signals to appear...` }
+      : EMPTY_STATE_TEXT[filter];
+  return (
+    <div className="decode-empty-state">
+      <svg width="140" height="140" viewBox="0 0 140 140" aria-hidden="true">
+        <defs>
+          <radialGradient id="emptyStateGlow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+        <circle cx="70" cy="70" r="63" fill="url(#emptyStateGlow)" />
+        <path d="M0,56 Q17.5,42 35,56 T70,56 T105,56 T140,56" fill="none" stroke="var(--accent)" strokeOpacity="0.45" strokeWidth="1.5" />
+        <path d="M0,70 Q17.5,84 35,70 T70,70 T105,70 T140,70" fill="none" stroke="var(--accent)" strokeOpacity="0.35" strokeWidth="1.3" />
+        <path d="M0,84 Q17.5,70 35,84 T70,84 T105,84 T140,84" fill="none" stroke="var(--accent)" strokeOpacity="0.25" strokeWidth="1.1" />
+      </svg>
+      <div className="decode-empty-title">{title}</div>
+      <div className="decode-empty-body">{body}</div>
+    </div>
+  );
+}
+
 function DecodeScreen(props: {
   messages: UiMessage[];
   sortMode: DecodeSortMode;
   myGrid: string;
+  operatingMode: OperatingMode;
   filter: Filter;
   setFilter: (f: Filter) => void;
   workedCalls: Set<string>;
@@ -1702,7 +1785,7 @@ function DecodeScreen(props: {
   onToggleMessages: () => void;
 }) {
   const {
-    messages, sortMode, myGrid, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids,
+    messages, sortMode, myGrid, operatingMode, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids,
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
   } = props;
@@ -1835,9 +1918,7 @@ function DecodeScreen(props: {
               );
             })}
             {displayMessages.length === 0 && (
-              <div className="decode-row-empty muted">
-                No decodes yet — set your callsign and rig in Settings; decoding starts on its own.
-              </div>
+              <EmptyState filter={filter} operatingMode={operatingMode} />
             )}
           </div>
         </div>
@@ -2598,6 +2679,51 @@ function CustomBandsPanel(props: {
   );
 }
 
+// Row count for the callsign/grid cache (fcc_grid.rs, schema v7) + a manual
+// re-run button, matching CustomBandsPanel's own local-state/refresh
+// pattern. The seed's live progress/completion dialog itself is driven by
+// App()'s own passive event listener (not this panel), so it shows up
+// correctly regardless of whether this screen is even open when a seed
+// (first-run or manual) is running.
+function CallsignGridPanel(props: { onUpdate: () => void; busy: boolean }) {
+  const { onUpdate, busy } = props;
+  const [count, setCount] = useState<number | null>(null);
+
+  function refresh() {
+    api.callsignQthCount().then(setCount);
+  }
+  useEffect(refresh, []);
+  // Pick up the row count once a seed (either trigger) finishes.
+  useEffect(() => {
+    if (!busy) refresh();
+  }, [busy]);
+
+  return (
+    <div className="panel">
+      <h3>US callsign/grid table</h3>
+      <div className="col">
+        <div className="muted">
+          Seeds the Map screen's callsign-to-grid lookup from the FCC
+          amateur-license database (~200MB download, cross-referenced
+          against a bundled ZIP-code table) — the first-run download also
+          happens automatically once, and otherwise fills in from decodes
+          and the logbook as you operate. The FCC data changes weekly.
+        </div>
+        <div className="row">
+          <span>
+            {count == null
+              ? "Checking…"
+              : `${count.toLocaleString()} station${count === 1 ? "" : "s"} known`}
+          </span>
+          <button className="primary" onClick={onUpdate} disabled={busy}>
+            {busy ? "Updating…" : "Update now"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SettingsScreen(props: {
   onStatus: (s: string) => void;
   clock: ClockSyncEvent | null;
@@ -2624,11 +2750,22 @@ function SettingsScreen(props: {
    *  doc comment for why this one value is lifted instead of locally fetched. */
   displayHz: number;
   onDisplayHz: (hz: number) => void;
+  /** Re-runs the FCC/Census grid-table seed (fcc_grid.rs) -- the same
+   *  function the backend's first-run auto-start kicks off; this just gives
+   *  the operator a manual way to refresh it later (the FCC data changes
+   *  weekly). The live dialog is driven by App()'s own passive event
+   *  listener, not by this call directly -- see that listener's comment. */
+  onUpdateGridTable: () => void;
+  /** Whether a grid-table seed (either trigger) is currently running, to
+   *  grey out the button instead of letting the operator start a second
+   *  one concurrently. */
+  gridSeedBusy: boolean;
 }) {
   const {
     onStatus, clock, onSettingsSaved, onRigLabel, onBandsChanged,
     huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
     inputGain, onInputGain, txGain, onTxGain, displayHz, onDisplayHz,
+    onUpdateGridTable, gridSeedBusy,
   } = props;
   const [call, setCall] = useState("");
   const [rigLabel, setRigLabel] = useState("");
@@ -3266,6 +3403,8 @@ function SettingsScreen(props: {
       </div>
 
       <CustomBandsPanel onStatus={onStatus} onBandsChanged={onBandsChanged} />
+
+      <CallsignGridPanel onUpdate={onUpdateGridTable} busy={gridSeedBusy} />
 
       <div className="panel">
         <h3>Developer — waterfall FFT</h3>

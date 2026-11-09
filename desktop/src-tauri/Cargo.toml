@@ -11,6 +11,11 @@ path = "src/lib.rs"
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# Native OS message dialogs (GTK dialogs on Linux, not webview content) --
+# the first-run grid-table seed's "it's working" popup rides this instead of
+# the main window, since that window's own repaint can freeze independently
+# of this app (see docs/desktop-callsign-grid-table.md).
+tauri-plugin-dialog = "2"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

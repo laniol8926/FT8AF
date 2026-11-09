@@ -173,6 +173,15 @@ export function onFccGridProgress(cb: (p: FccSeedProgress) => void): Promise<Unl
   return listen<FccSeedProgress>("fcc-grid-progress", (ev) => cb(ev.payload));
 }
 
+/** Fires once, after "fcc-grid-progress" stops, whichever triggered the
+ *  seed (the backend's first-run auto-start or a manual re-run) -- see
+ *  Rust `run_fcc_grid_seed`'s doc comment. */
+export type FccSeedDone = { ok: FccSeedSummary } | { err: string };
+
+export function onFccGridDone(cb: (d: FccSeedDone) => void): Promise<UnlistenFn> {
+  return listen<FccSeedDone>("fcc-grid-done", (ev) => cb(ev.payload));
+}
+
 export interface AudioDevice {
   id: string;
   name: string;

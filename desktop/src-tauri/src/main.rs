@@ -365,20 +365,24 @@ fn callsign_qth_count(state: State<AppState>) -> i64 {
 /// Download the FCC amateur-license database, cross-reference it against the
 /// bundled Census ZCTA Gazetteer, and seed `callsign_qth` -- see
 /// `fcc_grid.rs`'s module doc comment for the full pipeline. Emits
-/// `"fcc-grid-progress"` events (payload: [`FccSeedProgress`]) throughout
-/// both the download and the processing phase, since either one alone can
-/// take long enough that a silent wait would look like a hang (the download
-/// is ~200MB; processing scans ~1.7M FCC records).
+/// `"fcc-grid-progress"` events (payload: [`fcc_grid::FccSeedProgress`])
+/// throughout both the download and the processing phase, since either one
+/// alone can take long enough that a silent wait would look like a hang (the
+/// download is ~200MB; processing scans ~1.7M FCC records), then
+/// `"fcc-grid-done"` once (payload: `{ok: FccSeedSummary} | {err: string}`)
+/// so a listener never has to guess "has it finished?" from progress alone.
+///
+/// Called from two places: the `setup()` first-run auto-trigger (below,
+/// which also drives native OS popups -- see its own doc comment for why)
+/// and the `import_fcc_grid_seed` command (the future Settings "update now"
+/// button). Both share this one function so there's exactly one seed
+/// implementation and one event contract regardless of trigger source.
 ///
 /// Wrapped in `catch_unwind` like `import_adif`: this also parses an
 /// external file of content this app doesn't control.
-#[tauri::command]
-fn import_fcc_grid_seed(
-    state: State<AppState>,
-    app: tauri::AppHandle,
-) -> Result<FccSeedSummary, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        fcc_grid::download_and_seed(&state.db, &app_data_dir(), |progress| {
+fn run_fcc_grid_seed(db: &Db, app: &tauri::AppHandle) -> Result<FccSeedSummary, String> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fcc_grid::download_and_seed(db, &app_data_dir(), |progress| {
             let _ = app.emit("fcc-grid-progress", progress);
         })
     }))
@@ -387,7 +391,32 @@ fn import_fcc_grid_seed(
          any stations already added are kept."
             .to_string()
     })
-    .and_then(|r| r.map_err(|e| e.to_string()))
+    .and_then(|r| r.map_err(|e| e.to_string()));
+
+    // Tuple variants + rename_all so this serializes as exactly
+    // `{"ok": <summary>}` or `{"err": "<message>"}`, not double-nested.
+    #[derive(Clone, serde::Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Done {
+        Ok(FccSeedSummary),
+        Err(String),
+    }
+    let _ = app.emit(
+        "fcc-grid-done",
+        match &result {
+            Ok(summary) => Done::Ok(summary.clone()),
+            Err(e) => Done::Err(e.clone()),
+        },
+    );
+    result
+}
+
+#[tauri::command]
+fn import_fcc_grid_seed(
+    state: State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<FccSeedSummary, String> {
+    run_fcc_grid_seed(&state.db, &app)
 }
 
 #[tauri::command]
@@ -629,8 +658,10 @@ fn main() {
     );
 
     let (engine, evt_rx) = engine::spawn(db.clone());
+    let db_for_setup = db.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState { engine, db })
         .setup(move |app| {
             // Forward engine events to the webview on the "engine-event" channel.
@@ -651,6 +682,62 @@ fn main() {
                         let _ = handle.emit("engine-event", ev);
                     }
                 })?;
+
+            // First-run callsign/grid table seed, triggered here (backend)
+            // rather than waited-on from the frontend's own mount effect, and
+            // narrated through native OS dialogs rather than the main
+            // window: a real, reproducible WebKitGTK bug on this hardware
+            // means the main window's content can stop repainting shortly
+            // after launch and not visibly update again (not the clock, not
+            // the sync readout, nothing) until a real click forces a
+            // repaint -- see docs/desktop-callsign-grid-table.md. A
+            // brand-new user watching a ~200MB download + a 1.7M-record scan
+            // happen behind a silently frozen window would reasonably
+            // conclude the app had hung and kill it. Native dialogs (GTK
+            // message boxes on Linux, via tauri-plugin-dialog) render
+            // through a completely different pipeline than webview content,
+            // so they stay visible and responsive regardless of that bug.
+            // `fcc-grid-progress`/`fcc-grid-done` are still emitted
+            // throughout (run_fcc_grid_seed, shared with the manual-trigger
+            // command below) so the in-app dialog also works correctly
+            // whenever the window *is* repainting.
+            let db_for_seed = db_for_setup.clone();
+            let handle_for_seed = app.handle().clone();
+            std::thread::Builder::new()
+                .name("ft8af-grid-seed".into())
+                .spawn(move || {
+                    if db_for_seed.callsign_qth_count() != 0 {
+                        return;
+                    }
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    handle_for_seed
+                        .dialog()
+                        .message(
+                            "FT8AF is downloading the FCC amateur-license database and \
+                             building a US callsign/grid table for the upcoming Map \
+                             screen. This can take up to a minute on a slow connection. \
+                             FT8AF keeps working normally while this runs in the \
+                             background -- this message is just letting you know the \
+                             app hasn't hung.",
+                        )
+                        .title("Creating US Grid Table")
+                        .kind(MessageDialogKind::Info)
+                        .blocking_show();
+
+                    // No native completion/error popup here -- only the
+                    // "it's working" one above needs to be native (that's
+                    // the one standing in for a frozen main window). Once
+                    // the operator has dismissed that, they're already
+                    // engaged with the app; run_fcc_grid_seed's
+                    // "fcc-grid-done" event drives the in-window completion/
+                    // error dialog (App.tsx) same as it would for a manual
+                    // re-run from Settings, so there's exactly one "it's
+                    // done" notification, not two.
+                    if let Err(e) = run_fcc_grid_seed(&db_for_seed, &handle_for_seed) {
+                        eprintln!("[ft8af] ERROR: FCC grid seed failed: {e}");
+                    }
+                })?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

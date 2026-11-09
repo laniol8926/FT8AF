@@ -285,7 +285,16 @@ select option {
   white-space: nowrap;
 }
 .status-pill-row-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
-.decode-row-empty { padding: 10px 8px; }
+/* Matches Android's EmptyState composable (DecodeScreen.kt): centered
+   decorative graphic + a title (TextMuted, semibold) + body (TextFaint)
+   that varies with the active filter -- see EMPTY_STATE_TEXT in App.tsx. */
+.decode-empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; padding: 0 32px; text-align: center; gap: 4px;
+}
+.decode-empty-state svg { margin-bottom: 16px; }
+.decode-empty-title { color: var(--muted); font-size: 16px; font-weight: 600; }
+.decode-empty-body { color: var(--text-faint); font-size: 13px; line-height: 18px; max-width: 360px; }
 
 /* The slot-boundary divider, with the UTC time/station-count label
    superimposed on the center of the bold line itself (rather than a

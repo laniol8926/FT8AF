@@ -521,6 +521,34 @@ waterfall on both the Decode screen and the standalone Waterfall tab; zero
 `ptt=1` events throughout all of this round's testing — no live
 transmission was attempted or authorized.
 
+## Done this round, part 9: the empty-decode-list message is Android's real one
+
+Desktop's "no decodes yet" message was leftover copy from an early
+desktop-only prototype stage (`"set your callsign and rig in Settings;
+decoding starts on its own"`), never updated to match Android once a real
+design existed — flagged directly as a leftover worth replacing with
+Android's actual version. Android's `EmptyState` composable
+(`ui/decode/DecodeScreen.kt`) isn't one static message: it's 10 different
+title/body pairs keyed on the active filter chip (`strings_compose.xml`'s
+`decode_empty_*` resources), e.g. "No CQ calls" / "No stations are calling
+CQ on this band right now." for the CQ Calls filter, "No calls for you" /
+"No stations are calling your callsign right now." for For Me, down to the
+default (no filter) case, `"No signals decoded"` / `"Waiting for %s signals
+to appear..."` with the live operating mode interpolated in. All 10 are
+ported verbatim into `App.tsx`'s new `EMPTY_STATE_TEXT` map and `EmptyState`
+component, keyed on the existing `Filter` type (already exactly Android's
+filter set) and now also threaded `operatingMode` into `DecodeScreen`'s
+props for the default message's mode name.
+
+Android's version also draws `EmptyStateWaves`: an animated canvas graphic
+(three sine waves drifting in phase over 6s, radial accent glow behind
+them). Ported as a **static** inline SVG approximation (radial gradient +
+three wave paths) rather than a canvas animation loop — the filter-aware
+copy was the actual complaint, and a static graphic is far cheaper to keep
+correct than chasing an animation loop's edge cases. New `.decode-empty-*`
+CSS reuses the existing `--muted`/`--text-faint` tokens, which already
+mirror Android's `TextMuted`/`TextFaint` exactly.
+
 ## Note for when Map work starts
 
 Not started this round -- just a pointer so the prerequisite isn't lost.
