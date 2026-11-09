@@ -213,26 +213,36 @@ go-ahead given the stakes.
   replacing all of its previous content**: it used to show a desktop-only
   plain-text RX/TX/stage/target/message readout, a manual Tx1-5 stage
   override, and a separate Stop TX button — none with an Android
-  equivalent. All of that is gone. Call CQ/STOP, Hunt, TUNE, and Band
-  already live in TopBar (Android's CqHuntRow/BandModeRow equivalents), and
-  TX volume already moved to Settings, so the only genuinely drawer-only
-  row left to port is Android's **TX period (Even/Odd) picker**
-  (`PeriodTuneDxRow`/`TxPeriodControl` in `TxStrip.kt`), newly wired
-  end-to-end: `EngineCommand::SetTxPeriod` (+ a `preferred_tx_parity` engine
-  field, unit-tested), the `set_tx_period` Tauri command, `api.setTxPeriod`,
-  and `TxStateEvent.preferred_tx_parity` so the UI reflects it. `StartCq`
-  now seeds the TX-parity lock from this preference instead of always
-  `None`, so choosing a period actually restricts which slots a new CQ/QSO
-  keys in from the start, not just cosmetically. One deliberate difference
-  from Android: there's a third **Auto** state (the prior default — key up
-  at the next free slot, in either parity) alongside 1st (even) / 2nd (odd),
-  since Android's control always has exactly one of the two selected, which
-  would force every CQ to wait for a specific parity by default — a default
-  behavior change nobody asked for.
-  **DX (DXpedition/Hound mode)**, the row's other Android control, is *not*
-  ported: Android's `startHoundMode`/`stopHoundMode` is a real Fox/Hound TX
-  sequencer, not a UI toggle — same category of real on-air-stakes work as
-  Field Day above, left as a documented gap rather than faked.
+  equivalent. All of that is gone, replaced by a direct port of Android's
+  `OperateControlsDrawer` rows below the Call CQ/Hunt row (which stays on
+  TopBar, not duplicated): **Band & Mode** (a card reusing the same
+  label+overlaid-`<select>` trick as TopBar's own band picker), **TX period
+  (Even/Odd)** (`PeriodTuneDxRow`/`TxPeriodControl` in `TxStrip.kt`, wired
+  end-to-end: `EngineCommand::SetTxPeriod` + a `preferred_tx_parity` engine
+  field, unit-tested, the `set_tx_period` Tauri command, `api.setTxPeriod`,
+  `TxStateEvent.preferred_tx_parity`; `StartCq` seeds the TX-parity lock
+  from this preference so picking a period actually restricts which slots a
+  new CQ/QSO keys in from, not just cosmetically), **TUNE**, and **TX
+  volume** (`TxVolumeRow`, −/slider/+, sharing the same handler as Settings
+  → Audio's TX output level slider rather than a second independent one).
+  TUNE and Band & Mode now appear in *both* TopBar and this panel, on
+  purpose — matching Android, which shows them in both the drawer and the
+  screen's title row rather than picking one. The guiding principle this
+  round: port Android's actual structure first, even where it duplicates an
+  existing desktop control, rather than deciding up front what desktop
+  "needs" — some of this may turn out redundant once Settings exists, but
+  that's a later call, not one to make while still establishing parity.
+  One deliberate difference from Android: there's a third **Auto** state on
+  the TX-period control (the prior default — key up at the next free slot,
+  in either parity) alongside 1st (even) / 2nd (odd), since Android's
+  control always has exactly one of the two selected, which would force
+  every CQ to wait for a specific parity by default — a default-behavior
+  change nobody asked for.
+  **DX (DXpedition/Hound mode)** is shown as a real, visibly disabled button
+  in the right spot (not omitted) with an explanatory tooltip: Android's
+  `startHoundMode`/`stopHoundMode` is a real Fox/Hound TX sequencer, not a
+  UI toggle — same category of real on-air-stakes work as Field Day above,
+  left as a documented, visible gap rather than fully omitted or faked.
 
 ## Build note
 

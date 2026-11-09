@@ -535,6 +535,14 @@ export default function App() {
     api.setBand(hz);
   }
 
+  // Shared with Settings -> Audio and the More panel's TX-volume row (Android
+  // shows TxVolumeRow in both the drawer and nowhere else -- desktop also
+  // keeps it in Settings for discoverability, so this one handler drives both).
+  function onTxGain(v: number) {
+    setTxGain(v);
+    debouncedSetTxGain(v);
+  }
+
   const visible = messages.filter((m) => {
     switch (filter) {
       case "all": return true;
@@ -670,10 +678,7 @@ export default function App() {
               debouncedSetRxGain(v);
             }}
             txGain={txGain}
-            onTxGain={(v) => {
-              setTxGain(v);
-              debouncedSetTxGain(v);
-            }}
+            onTxGain={onTxGain}
           />
         )}
         {(tab === "map" || tab === "pota") && (
@@ -691,6 +696,12 @@ export default function App() {
         <TxBar
           txState={txState}
           onSetTxPeriod={(parity) => api.setTxPeriod(parity)}
+          bands={bands}
+          dialHz={dialHz}
+          onBand={onBand}
+          onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
+          txGain={txGain}
+          onTxGain={onTxGain}
         />
       )}
       <div className="status-line">{status}</div>
@@ -2828,23 +2839,30 @@ function SettingsScreen(props: {
 }
 
 // Opened from the tab bar's "More" button, matching Android's
-// operate-controls drawer toggle. Call CQ/STOP, Hunt, TUNE, and Band are
-// already in TopBar (matching Android's CqHuntRow/BandModeRow/TUNE, which
-// would otherwise duplicate here), and TX volume already moved to Settings
-// this round -- so the only genuinely drawer-only content left to port is
-// Android's TX-period (Even/Odd) picker (PeriodTuneDxRow in TxStrip.kt),
-// newly wired up via EngineCommand::SetTxPeriod this round. This entirely
-// replaces the previous desktop-only content (RX/TX/stage/target/message
-// readout, a manual Tx1-5 stage override, a separate Stop TX button) with no
-// Android equivalent of its own.
+// operate-controls drawer toggle. Call CQ/STOP and Hunt stay on TopBar
+// (Android's CqHuntRow); everything else Android's drawer shows below that
+// row is ported here, duplicating TopBar's own Band/TUNE controls on
+// purpose -- matching Android, which shows BandModeRow and the Tune button
+// in its drawer even though a band/mode control also sits in the screen's
+// title row. TX volume is ported here too (TxVolumeRow) *and* stays in
+// Settings -> Audio for discoverability -- Android only shows it in the
+// drawer, but desktop had already put it in Settings this round and nothing
+// said to remove it from there. This entirely replaces the previous
+// desktop-only content (plain-text RX/TX/stage/target/message readout, a
+// manual Tx1-5 stage override, a separate Stop TX button), none of which
+// had an Android equivalent.
 //
-// Android's DX (DXpedition/Hound mode) belongs in this same row
-// (PeriodTuneDxRow) but isn't ported: it needs its own Fox/Hound TX
-// sequencer, not just a UI toggle -- same category of real on-air-stakes
-// work as Field Day, deliberately left as a documented gap rather than
-// faked (see docs/desktop-decode-android-parity.md).
+// DX (DXpedition/Hound mode) is shown as a real, visible button matching
+// Android's layout, but disabled: Android's startHoundMode/stopHoundMode is
+// a whole separate Fox/Hound TX sequencer, not a UI toggle -- same
+// real-on-air-stakes category as Field Day. Showing a disabled button with
+// an explanatory title is the honest way to represent "present in Android,
+// not implemented here yet" -- the alternative (a working-looking button
+// that silently does nothing, or inventing a half-built sequencer) would be
+// worse than either omitting it or saying so (see
+// docs/desktop-decode-android-parity.md).
 //
-// Android has no "no preference" third state (TxPeriodControl always shows
+// Android's TxPeriodControl has no "no preference" third state (always
 // exactly one of 1st/2nd selected, defaulting to 1st/even) -- but that would
 // mean every CQ here waits for a specific parity before keying at all,
 // changing today's "key up at the next free slot" default. AUTO (the
@@ -2853,32 +2871,116 @@ function SettingsScreen(props: {
 function TxBar(props: {
   txState: TxStateEvent | null;
   onSetTxPeriod: (parity: number | null) => void;
+  bands: BandInfo[];
+  dialHz: number;
+  onBand: (hz: number) => void;
+  onToggleTune: () => void;
+  txGain: number;
+  onTxGain: (v: number) => void;
 }) {
-  const { txState, onSetTxPeriod } = props;
+  const { txState, onSetTxPeriod, bands, dialHz, onBand, onToggleTune, txGain, onTxGain } = props;
   const preferredParity = txState?.preferred_tx_parity ?? null;
+  const tuning = txState?.tuning ?? false;
+  const transmitting = txState?.transmitting ?? false;
+  const band = bands.find((b) => b.dial_hz === dialHz);
   return (
     <div className="txbar">
-      <div className="tx-period-control" title="Which half of the 15s cycle a new CQ/QSO starts keying in">
-        <span className="tx-period-label">TX PERIOD</span>
-        <div className="tx-period-segments">
-          <button
-            className={preferredParity === null ? "active" : ""}
-            onClick={() => onSetTxPeriod(null)}
+      {/* Row 1 -- Band & Mode, matching Android's BandModeRow (tappable
+          card showing the current band/mode). Reuses the same label +
+          overlaid <select> pattern as TopBar's own band picker. */}
+      <div className="txbar-row">
+        <div className="band-picker band-picker-card">
+          <span className="band-picker-row-label">BAND & MODE</span>
+          <span className="band-picker-label">{band ? band.name : "--"} · FT8</span>
+          <span className="chevron">⌄</span>
+          <select
+            className="band-picker-select"
+            aria-label="Band"
+            value={dialHz}
+            onChange={(e) => onBand(parseInt(e.target.value, 10))}
           >
-            Auto
-          </button>
+            {bands.map((b) => (
+              <option key={b.dial_hz} value={b.dial_hz}>
+                {b.custom ? "★ " : ""}{b.name} · {(b.dial_hz / 1e6).toFixed(3)}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Row 2 -- TX period / Tune / DX, matching Android's PeriodTuneDxRow. */}
+      <div className="txbar-row">
+        <div className="tx-period-control" title="Which half of the 15s cycle a new CQ/QSO starts keying in">
+          <span className="tx-period-label">TX PERIOD</span>
+          <div className="tx-period-segments">
+            <button
+              className={preferredParity === null ? "active" : ""}
+              onClick={() => onSetTxPeriod(null)}
+            >
+              Auto
+            </button>
+            <button
+              className={preferredParity === 0 ? "active" : ""}
+              onClick={() => onSetTxPeriod(0)}
+            >
+              1st (even)
+            </button>
+            <button
+              className={preferredParity === 1 ? "active" : ""}
+              onClick={() => onSetTxPeriod(1)}
+            >
+              2nd (odd)
+            </button>
+          </div>
+        </div>
+        <button
+          className={"pill pill-dark" + (tuning ? " pill-tune-active" : "")}
+          onClick={onToggleTune}
+          disabled={!tuning && transmitting}
+          title="Transmit a steady carrier to tune the antenna, without calling CQ"
+        >
+          TUNE
+        </button>
+        <button
+          className="pill pill-dark"
+          disabled
+          title="DXpedition/Hound mode -- not yet implemented on desktop (needs its own Fox/Hound TX sequencer, see docs/desktop-decode-android-parity.md)"
+        >
+          DX
+        </button>
+      </div>
+
+      {/* Row 3 -- TX volume, matching Android's TxVolumeRow (-/slider/+).
+          Shares the same handler as Settings -> Audio's TX output level
+          slider -- Android only ever shows this one control (in the
+          drawer); desktop also keeps it in Settings for discoverability. */}
+      <div className="txbar-row">
+        <div className="tx-volume-control">
           <button
-            className={preferredParity === 0 ? "active" : ""}
-            onClick={() => onSetTxPeriod(0)}
+            className="tx-volume-step"
+            aria-label="Decrease TX volume"
+            onClick={() => onTxGain(Math.max(0, txGain - 5))}
           >
-            1st (even)
+            −
           </button>
+          <input
+            type="range"
+            aria-label="TX output level (drive), percent"
+            min={0}
+            max={100}
+            step={1}
+            value={txGain}
+            onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
+            className="tx-volume-slider"
+          />
           <button
-            className={preferredParity === 1 ? "active" : ""}
-            onClick={() => onSetTxPeriod(1)}
+            className="tx-volume-step"
+            aria-label="Increase TX volume"
+            onClick={() => onTxGain(Math.min(100, txGain + 5))}
           >
-            2nd (odd)
+            +
           </button>
+          <span className="tx-volume-value">{txGain}%</span>
         </div>
       </div>
     </div>

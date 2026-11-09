@@ -310,7 +310,21 @@ select option {
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 12px; }
 .panel h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
-.txbar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel-2); border-top: 1px solid var(--border); }
+/* "More" panel (the operate-controls drawer port): one row per Android
+   drawer row (Band & Mode / TX period+Tune+DX / TX volume), stacked. */
+.txbar { display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; background: var(--panel-2); border-top: 1px solid var(--border); }
+.txbar-row { display: flex; align-items: center; gap: 12px; }
+
+/* Band & Mode card, matching Android's BandModeRow -- same label+overlaid
+   <select> trick as TopBar's own band picker, but styled as a labeled card
+   (smaller label text than the TopBar title use) instead of a bare title. */
+.band-picker-card {
+  flex: 1; background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 8px 12px; gap: 8px;
+}
+.band-picker-row-label { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; color: var(--text-faint); margin-right: auto; }
+.band-picker-card .band-picker-label { font-size: 14px; }
+
 /* TX-period (Even/Odd) picker, matching Android's TxPeriodControl/
    PeriodTuneDxRow (TxStrip.kt): a labeled segmented control, AUTO/1st/2nd. */
 .tx-period-control { display: flex; align-items: center; gap: 10px; }
@@ -318,6 +332,16 @@ select option {
 .tx-period-segments { display: flex; gap: 4px; background: var(--panel); border-radius: var(--radius-sm); padding: 3px; }
 .tx-period-segments button { padding: 4px 10px; font-size: 12px; font-weight: 600; }
 .tx-period-segments button.active { background: var(--accent); color: #1a1200; border-color: var(--accent); }
+
+/* TX volume row, matching Android's TxVolumeRow (-/slider/+). */
+.tx-volume-control { display: flex; align-items: center; gap: 8px; width: 100%; }
+.tx-volume-step {
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm); background: var(--panel); border: 1px solid var(--border);
+  font-weight: 700; font-size: 15px; flex: none;
+}
+.tx-volume-slider { flex: 1; }
+.tx-volume-value { font-size: 12px; font-weight: 600; color: var(--muted); width: 36px; text-align: right; flex: none; }
 
 .status-line { color: var(--muted); font-size: 12px; padding: 4px 14px; min-height: 20px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
