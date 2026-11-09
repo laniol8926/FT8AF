@@ -46,8 +46,12 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    /// Create a decoder for the given sample rate. `is_ft8 = false` selects FT4.
-    pub fn new(sample_rate: i32, is_ft8: bool) -> Self {
+    /// Create a decoder for the given sample rate and protocol (one of
+    /// `ffi::FTX_PROTOCOL_FT8`/`_FT4`/`_FT2` -- see `Mode::ffi_protocol`).
+    /// `monitor_init` (common/monitor.c) derives the slot_time/symbol_period
+    /// for the given protocol internally, so no other field here changes
+    /// per mode.
+    pub fn new(sample_rate: i32, protocol: std::os::raw::c_int) -> Self {
         // SAFETY: monitor_init fully initializes every field of `mon`.
         let mut mon: ffi::monitor_t = unsafe { std::mem::zeroed() };
         let cfg = ffi::monitor_config_t {
@@ -58,11 +62,7 @@ impl Decoder {
             // recall gain. freq_osr must stay 2 (4 regresses — see decode_params.h).
             time_osr: 4,
             freq_osr: 2,
-            protocol: if is_ft8 {
-                ffi::FTX_PROTOCOL_FT8
-            } else {
-                ffi::FTX_PROTOCOL_FT4
-            },
+            protocol,
         };
         unsafe { ffi::monitor_init(&mut mon, &cfg) };
 

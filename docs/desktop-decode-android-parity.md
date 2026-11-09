@@ -410,6 +410,117 @@ deliberately stopped rather than pushed further near the Call CQ control.
 Worth a closer look (not blocking, not reproduced as a code bug) before
 relying on scripted clicks near TX-adjacent controls again.
 
+## Done this round, part 8: real per-mode frequencies, real Width/NR/MSG, FT2 decode
+
+Closes three gaps part 6/7 explicitly deferred (per-mode dial frequencies,
+Width/NR/MSG as real controls instead of disabled stubs, FT2) plus two
+layout bugs found while verifying them live.
+
+- **Per-mode dial frequencies, real now**: switching FT8↔FT4↔FT2 retunes
+  within the same band to that mode's actual calling frequency, matching
+  Android's `OperationBand.getModeBandFreq`/`MainViewModel.setOperatingMode`
+  exactly — same-band-only (never jumps bands), leaves the dial untouched if
+  the new mode has no entry for the current band (160m/60m have no FT4
+  dial), and refuses outright while actually transmitting rather than
+  force-stopping. `bands.rs` gained `FT4_BANDS`/`FT2_BANDS` (mirroring
+  Android's `bands.txt` `:FT4`/`:FT2` entries) and `mode_band_freq`/
+  `bands_for_mode`/`bands_for_mode_entries`; `engine.rs`'s `switch_mode` was
+  rewritten around this instead of its previous force-stop-then-switch
+  behavior.
+- **Width and NR are real DSP now**, not disabled stubs: `wf.rs` gained
+  `WfConfig.display_hz` (2500–5000 Hz, Android's `spectrumWidth` range,
+  clamped the same way) — `process_row`'s column count now reads it instead
+  of the old fixed `WF_MAX_HZ` — and `WfConfig.denoise`, a display-only
+  band-tilt flattening (prefix-sum local-average subtraction, ported from
+  the shared `fft_display.c`'s algorithm; confirmed by reading that file
+  that it never touches decoding, which runs its own independent FFT).
+  New `set_wf_display_hz`/`set_wf_denoise` Tauri commands merge into the
+  live config rather than requiring every field on every call. **MSG was
+  already fully wired in part 7's commit** (`drawSignalLabels` ran
+  unconditionally) — this round just added the `showMessages` toggle gate
+  the strip's chip was missing.
+- **Width's actual UI, corrected from a live-drag popover to Android's real
+  design**: a screenshot of Android's "Spectrum Width" dialog showed a
+  centered Cancel/Save modal with a bounded number field (2500–5000 Hz
+  hint), not a slider that commits on every drag tick. The first
+  implementation this round *was* a live popover slider — replaced with
+  `SpectrumWidthDialog` (draft state, `onDisplayHz` only called once on
+  Save) once the screenshot came in. The live-slider version is also why an
+  earlier debugging session this round chased a phantom "stale Band & Mode
+  sheet" bug for a long time: dragging across it fired `set_wf_display_hz`
+  (a full `WfProcessor` rebuild) on every intermediate pixel, and on this
+  board's CPU (shared with live FFT decode) that was enough to build a
+  genuine input-processing backlog — clicks got applied correctly but
+  several seconds to tens of seconds late, which looked exactly like stale
+  React state until traced with a temporary click-logging overlay (since
+  removed). Logged here so the same shape of false alarm isn't rediscovered
+  from scratch: screenshots taken soon after a synthetic click on this
+  hardware are not reliable evidence of application state — re-check
+  against `sqlite3 ~/.local/share/FT8AF/ft8af.sqlite` or wait substantially
+  longer before concluding anything moved.
+- **FT2, decode-only** (matches reality everywhere — confirmed against
+  ft8af.app, which only ever claims "decodes in milliseconds — now across
+  three modes", never TX, and no `ft2_encode` exists anywhere, Android
+  included): `Mode::Ft2` added (`mode.rs`: 3750ms cycle, 0.024s symbol
+  period, 105 tones reusing FT4's layout, `can_transmit() == false`,
+  `ffi_protocol()` returning the `FTX_PROTOCOL_FT2` enum value).  Decode
+  works because desktop's FFI links the shared `ft8_lib` monitor/decoder
+  directly (`dsp/decoder.rs`, `dsp/ffi.rs`) rather than through Android's
+  JNI wrappers (`ft2_decode_jni.cpp`) — `common/monitor.c` already derives
+  FT2's slot_time/symbol_period from the protocol enum, so only the third
+  constant needed plumbing through; `Decoder::new` now takes the raw
+  protocol int instead of an `is_ft8` bool. `engine.rs`'s `start_transmit`
+  refuses to key up in FT2 regardless of caller (covers the Call CQ/More/
+  Hunt path and the CAT-tone sub-path it falls through to, and the
+  click-a-CQ-row-to-answer path, which still shows the refusal as an error
+  toast rather than being separately gated in the UI). TopBar greys out
+  Call CQ/More/Hunt while in FT2 with an explanatory tooltip; TUNE stays
+  enabled (a steady unmodulated carrier, no message encoding — mode-
+  independent, and Android's own FT2 screenshot leaves it enabled too).
+  `FT2_BANDS` covers the 12 bands desktop already has edge definitions for
+  (matching Android's FT2 table exactly for those, including 160m/60m,
+  which FT4 lacks but FT2 has); Android's FT2 table also lists
+  1.25m/70cm/23cm/13cm/3cm and the QO-100 satellite dials, skipped here —
+  no band-edge or transverter/satellite support anywhere else in this
+  codebase, FT8 included.
+- **Two layout bugs found live, both fixed**: (1) the waterfall's
+  Width/NR/MSG strip was being squeezed to a 1-pixel sliver (or hidden
+  behind the tab bar entirely on the standalone Waterfall tab) by its own
+  canvas wrapper's `height: "100%"` claiming the whole flex column
+  regardless of siblings — changed to `flex: 1` so it properly shares the
+  column with `WaterfallStatusStrip` (`.decode-waterfall` also needed
+  `min-height: 0`, the usual flex-children-can't-shrink-without-it fix,
+  already present on `.waterfall-tab` but missing on its Decode-screen
+  sibling). The strip is now also rendered on the standalone Waterfall tab,
+  which never had it at all before this round. (2) The bottom `status-line`
+  footer (raw `EngineEvent::Info`/`Error` text — "switched to FT8",
+  "capturing from 'default' @ 44100 Hz", etc.) was removed per direct
+  feedback: a carryover from an early desktop-only prototype stage with no
+  Android equivalent. `status`/`setStatus` stay wired for Settings' own
+  save-confirmation use; only the always-visible footer render is gone.
+- **Decode-list time-group dividers now overlap their own rule** instead of
+  sitting in a separate row below a `border-top` line — `HH:MM:SS UTC · N
+  stations` is centered directly on the bold slot-delimiter line (the line
+  drawn edge-to-edge via `::before` at the row's vertical center, the label
+  masking it locally with the same panel background), saving one text
+  line's height per slot boundary in the decode list.
+
+259 Rust lib tests (+20 over part 7: `mode.rs` FT2 profile/can_transmit/
+ffi_protocol, `bands.rs` FT4/FT2 `mode_band_freq` + band-table coverage,
+`engine.rs` `switch_mode` retune/leave-untouched/reject-while-transmitting,
+`wf.rs` display_hz clamping/column-count and denoise toggle/band-tilt
+flattening), 125 vitest tests (unchanged — this round's frontend work was
+layout/wiring, not new pure logic modules). Verified live against the
+running app and real decodes on 40m: FT8→FT4→FT2 switching retunes the
+dial correctly each time (cross-checked against `operating_mode`/`dial_hz`
+in sqlite, not just the UI, after the phantom-input lesson above); FT2
+decodes real stations with Call CQ/More/Hunt all correctly greyed out; the
+Width dialog matches the Android screenshot and the waterfall visibly
+redraws at the new span on Save; the status strip is now visible under the
+waterfall on both the Decode screen and the standalone Waterfall tab; zero
+`ptt=1` events throughout all of this round's testing — no live
+transmission was attempted or authorized.
+
 ## Note for when Map work starts
 
 Not started this round -- just a pointer so the prerequisite isn't lost.

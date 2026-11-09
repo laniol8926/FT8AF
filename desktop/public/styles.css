@@ -229,7 +229,7 @@ select option {
 .content.decode { overflow: hidden; display: flex; flex-direction: column; }
 .decode-split { flex: 1; display: flex; flex-direction: row; gap: 14px; min-height: 0; }
 .decode-detail { width: 50%; min-width: 0; display: flex; flex-direction: column; }
-.decode-waterfall { width: 50%; min-width: 0; display: flex; flex-direction: column; }
+.decode-waterfall { width: 50%; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .decode-detail .decode-list { flex: 1; overflow: auto; min-height: 0; }
 .waterfall-tab { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
@@ -287,11 +287,22 @@ select option {
 .status-pill-row-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .decode-row-empty { padding: 10px 8px; }
 
+/* The slot-boundary divider, with the UTC time/station-count label
+   superimposed on the center of the bold line itself (rather than a
+   separate border-top row above a text row below it) -- saves a line of
+   height per slot boundary in the decode list, which adds up over a long
+   session. The line draws edge to edge via ::before at the row's vertical
+   center; the label sits on top with the same panel background so the line
+   doesn't show through the letters. */
 .time-sep {
-  border-top: 2px solid var(--signal); color: var(--muted); font-size: 11px;
-  padding: 2px 8px; background: var(--panel); font-variant-numeric: tabular-nums;
-  text-align: center;
+  position: relative; display: flex; align-items: center; justify-content: center;
+  height: 16px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
 }
+.time-sep::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 50%;
+  border-top: 2px solid var(--signal);
+}
+.time-sep span { position: relative; background: var(--panel); padding: 0 8px; }
 
 /* Waterfall bottom status strip. */
 .wf-status-strip {
@@ -309,6 +320,31 @@ select option {
   border-radius: var(--radius-sm); background: var(--panel-2); color: var(--muted);
 }
 .wf-toggle-chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--border-amber); }
+
+/* Spectrum Width dialog, matching Android's actual "Spectrum Width" modal
+   (confirmed against a real screenshot): a centered Cancel/Save dialog with
+   a bounded number field, not a live-drag slider popover -- committing only
+   on Save avoids firing set_wf_display_hz (a WfProcessor rebuild) on every
+   drag tick the way the previous live popover did. */
+.spectrum-width-dialog { width: 360px; }
+.spectrum-width-field {
+  display: flex; flex-direction: column; gap: 6px; margin: 16px 0 20px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.spectrum-width-hint { font-size: 11px; color: var(--muted); }
+.spectrum-width-field input {
+  background: transparent; border: none; color: var(--text); font-size: 20px;
+  font-weight: 700; font-variant-numeric: tabular-nums; padding: 0; width: 100%;
+}
+.spectrum-width-field input:focus { outline: none; }
+.modal-text-btn {
+  background: none; border: none; color: var(--muted); font-size: 14px;
+  font-weight: 600; padding: 6px 10px;
+}
+.modal-text-btn:hover { color: var(--text); }
+.modal-text-btn-accent { color: var(--accent); }
+.modal-text-btn-accent:hover { color: var(--accent); filter: brightness(1.15); }
+.modal-text-btn:disabled { color: var(--text-faint); cursor: default; }
 
 /* RX input-level meter, matching Android's InputLevelIndicator.kt: RX label,
    a small RMS-filled bar with a peak tick, a percent readout, and a
@@ -393,7 +429,6 @@ select option {
 .tx-volume-slider { flex: 1; }
 .tx-volume-value { font-size: 12px; font-weight: 600; color: var(--muted); width: 36px; text-align: right; flex: none; }
 
-.status-line { color: var(--muted); font-size: 12px; padding: 4px 14px; min-height: 20px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .muted { color: var(--muted); }
 

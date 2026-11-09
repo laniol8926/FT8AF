@@ -52,6 +52,14 @@ fn list_bands(state: State<AppState>) -> Vec<BandEntry> {
     bands::merged_bands(&load_custom_bands(&state.db))
 }
 
+/// Band entries for a specific mode (FT8's full list with customs merged in,
+/// or FT4's smaller canonical list) -- drives `BandModeSheet`'s band list,
+/// which must follow whichever mode tile is currently selected.
+#[tauri::command]
+fn list_bands_for_mode(state: State<AppState>, mode: ft8af::mode::Mode) -> Vec<BandEntry> {
+    bands::bands_for_mode_entries(mode, &load_custom_bands(&state.db))
+}
+
 #[tauri::command]
 fn list_custom_bands(state: State<AppState>) -> Vec<CustomBand> {
     load_custom_bands(&state.db)
@@ -388,9 +396,25 @@ fn get_os_location(state: State<AppState>) -> Result<OsLocation, String> {
 
 #[tauri::command]
 fn set_waterfall_config(state: State<AppState>, config: WfConfig) {
-    // The engine sanitizes, persists (wf_window/wf_fft_size/wf_avg), and
-    // rebuilds its FFT plan; see EngineCommand::SetWaterfallConfig.
+    // The engine sanitizes, persists (wf_window/wf_fft_size/wf_avg/
+    // wf_display_hz/wf_denoise), and rebuilds its FFT plan; see
+    // EngineCommand::SetWaterfallConfig.
     state.engine.send(EngineCommand::SetWaterfallConfig(config));
+}
+
+/// "Width" -- merges into the engine's current waterfall config so the
+/// operator doesn't need the full `WfConfig` to change just this one field.
+/// See `EngineCommand::SetWfDisplayHz`.
+#[tauri::command]
+fn set_wf_display_hz(state: State<AppState>, hz: f32) {
+    state.engine.send(EngineCommand::SetWfDisplayHz(hz));
+}
+
+/// "NR" -- same merge-into-current-config treatment as `set_wf_display_hz`.
+/// See `EngineCommand::SetWfDenoise`.
+#[tauri::command]
+fn set_wf_denoise(state: State<AppState>, denoise: bool) {
+    state.engine.send(EngineCommand::SetWfDenoise(denoise));
 }
 
 fn app_data_dir() -> PathBuf {
@@ -598,6 +622,7 @@ fn main() {
             list_serial_ports,
             list_hamlib_rigs,
             list_bands,
+            list_bands_for_mode,
             list_custom_bands,
             add_custom_band,
             delete_custom_band,
@@ -641,6 +666,8 @@ fn main() {
             set_config,
             all_config,
             set_waterfall_config,
+            set_wf_display_hz,
+            set_wf_denoise,
             get_custom_css,
             set_udp_config,
             get_os_location,

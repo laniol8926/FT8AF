@@ -2,11 +2,15 @@
 //! the per-mode timing/symbol/synthesis parameters live here so the engine
 //! stays mode-agnostic rather than hard-coding FT8's 15 s/79-tone assumptions.
 //!
-//! Only FT8 and FT4 are implemented (`ModeProfile` also lists FT2, deferred
-//! here -- it needs its own native decode entry points Android's comment
-//! describes as "from-source" `ft2_decode_jni.cpp`-equivalent bindings this
-//! desktop FFI layer doesn't have at all yet, unlike FT4 which reuses the
-//! same `ft8_lib` monitor/decoder with a different `ftx_protocol_t`).
+//! FT2 is decode-only, matching Android and the product site (ft8af.app:
+//! "decodes in milliseconds — now across three modes", no TX claim) --
+//! there is no `ft2_encode` anywhere in the shared C core or any platform.
+//! Decode works because desktop's FFI layer (dsp/ffi.rs, dsp/decoder.rs)
+//! links the shared `ft8_lib` monitor/decoder directly rather than going
+//! through Android's JNI wrappers, and `common/monitor.c` already derives
+//! FT2's slot_time/symbol_period from `FTX_PROTOCOL_FT2` -- unlike Android,
+//! which needed a separate `ft2_decode_jni.cpp` entry-point family, desktop
+//! only needed the third protocol constant plumbed through.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,15 +30,18 @@ const PTT_DELAY_MS: i64 = 100;
 pub enum Mode {
     Ft8,
     Ft4,
+    Ft2,
 }
 
 impl Mode {
-    /// Resolve a persisted config value ("FT8"/"FT4", any case), defaulting
-    /// to FT8 for anything else -- matches `ModeProfile.fromId`'s
+    /// Resolve a persisted config value ("FT8"/"FT4"/"FT2", any case),
+    /// defaulting to FT8 for anything else -- matches `ModeProfile.fromId`'s
     /// forward-compat fallback for an unknown persisted value.
     pub fn from_config(value: &str) -> Mode {
         if value.eq_ignore_ascii_case("FT4") {
             Mode::Ft4
+        } else if value.eq_ignore_ascii_case("FT2") {
+            Mode::Ft2
         } else {
             Mode::Ft8
         }
@@ -46,6 +53,7 @@ impl Mode {
         match self {
             Mode::Ft8 => "FT8",
             Mode::Ft4 => "FT4",
+            Mode::Ft2 => "FT2",
         }
     }
 
@@ -54,6 +62,7 @@ impl Mode {
         match self {
             Mode::Ft8 => 15_000,
             Mode::Ft4 => 7_500,
+            Mode::Ft2 => 3_750,
         }
     }
 
@@ -62,6 +71,7 @@ impl Mode {
         match self {
             Mode::Ft8 => 0.160,
             Mode::Ft4 => 0.048,
+            Mode::Ft2 => 0.024,
         }
     }
 
@@ -70,22 +80,47 @@ impl Mode {
         match self {
             Mode::Ft8 => 2.0,
             Mode::Ft4 => 1.0,
+            Mode::Ft2 => 1.0,
         }
     }
 
     /// Number of channel symbols/tones -- matches `ModeProfile.numTones`.
+    /// FT2 reuses FT4's tone layout (4-GFSK, 4 Costas, 105 symbols, same
+    /// LDPC) at double the baud -- see `ModeProfile.FT2`'s doc comment.
     pub fn num_tones(self) -> usize {
         match self {
             Mode::Ft8 => 79,
             Mode::Ft4 => 105,
+            Mode::Ft2 => 105,
         }
     }
 
     /// Whether the native decoder/encoder should use the FT8 protocol
-    /// (false == FT4) -- matches `ModeProfile.isFt8`, passed straight into
-    /// `Decoder::new`'s `is_ft8` argument.
+    /// (false == FT4/FT2) -- matches `ModeProfile.isFt8`. FT2 has no encoder
+    /// at all (see the module doc comment), so this is decode-path-only for
+    /// FT2: it is never passed to an encode call for that mode.
     pub fn is_ft8(self) -> bool {
         matches!(self, Mode::Ft8)
+    }
+
+    /// Whether this mode can transmit -- FT8 and FT4 both have a native
+    /// encoder (`GenerateFT8.ft8Encode`/`ft4Encode`, bound in dsp/encode.rs);
+    /// FT2 has none anywhere (see the module doc comment), so TX must be
+    /// refused for it regardless of radio-safety state.
+    pub fn can_transmit(self) -> bool {
+        !matches!(self, Mode::Ft2)
+    }
+
+    /// The native `ftx_protocol_t` value for this mode (constants.h enum
+    /// order: FT4 = 0, FT8 = 1, FT2 = 2), passed to the decoder so it
+    /// configures the monitor for the right symbol period/sync layout --
+    /// matches `ModeProfile.ftxProtocol()`.
+    pub fn ffi_protocol(self) -> i32 {
+        match self {
+            Mode::Ft4 => 0,
+            Mode::Ft8 => 1,
+            Mode::Ft2 => 2,
+        }
     }
 
     /// Audio waveform length in milliseconds, rounded -- matches
@@ -156,13 +191,14 @@ mod tests {
         assert_eq!(Mode::from_config("ft4"), Mode::Ft4);
         assert_eq!(Mode::from_config("FT8"), Mode::Ft8);
         assert_eq!(Mode::from_config(""), Mode::Ft8);
-        assert_eq!(Mode::from_config("FT2"), Mode::Ft8); // not implemented -- falls back
+        assert_eq!(Mode::from_config("FT2"), Mode::Ft2);
+        assert_eq!(Mode::from_config("ft2"), Mode::Ft2);
         assert_eq!(Mode::from_config("garbage"), Mode::Ft8);
     }
 
     #[test]
     fn display_name_round_trips_through_from_config() {
-        for m in [Mode::Ft8, Mode::Ft4] {
+        for m in [Mode::Ft8, Mode::Ft4, Mode::Ft2] {
             assert_eq!(Mode::from_config(m.display_name()), m);
         }
     }
@@ -170,5 +206,35 @@ mod tests {
     #[test]
     fn default_is_ft8() {
         assert_eq!(Mode::default(), Mode::Ft8);
+    }
+
+    #[test]
+    fn ft2_matches_android_modeprofile() {
+        // ModeProfile.FT2(..., 3750, 3000, 0.024f, 1.0f, 105, false) --
+        // audioMillis/audioSlackMillis are derived, not listed directly there.
+        assert_eq!(Mode::Ft2.cycle_ms(), 3_750);
+        assert_eq!(Mode::Ft2.num_tones(), 105);
+        assert_eq!(Mode::Ft2.symbol_period(), 0.024);
+        assert_eq!(Mode::Ft2.symbol_bt(), 1.0);
+        assert_eq!(Mode::Ft2.audio_ms(), 2_520);
+        assert_eq!(Mode::Ft2.audio_slack_ms(), 1_230);
+        assert_eq!(Mode::Ft2.tx_latest_ms(), 1_130);
+        assert_eq!(Mode::Ft2.decode_at_ms(), 3_080);
+        assert!(!Mode::Ft2.is_ft8());
+    }
+
+    #[test]
+    fn only_ft2_cannot_transmit() {
+        assert!(Mode::Ft8.can_transmit());
+        assert!(Mode::Ft4.can_transmit());
+        assert!(!Mode::Ft2.can_transmit());
+    }
+
+    #[test]
+    fn ffi_protocol_matches_constants_h_enum_order() {
+        // ft8_lib/ft8/constants.h: FT4 = 0, FT8 = 1, FT2 = 2.
+        assert_eq!(Mode::Ft4.ffi_protocol(), 0);
+        assert_eq!(Mode::Ft8.ffi_protocol(), 1);
+        assert_eq!(Mode::Ft2.ffi_protocol(), 2);
     }
 }

@@ -13,8 +13,14 @@ use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use serde::{Deserialize, Serialize};
 
-/// Displayed top of the audio band (matches decoder f_max).
+/// Displayed top of the audio band (matches decoder f_max) -- the *default*
+/// for `WfConfig::display_hz`, now operator-adjustable ("Width" on the
+/// waterfall strip, matching Android's `GeneralVariables.spectrumWidth`).
 pub const WF_MAX_HZ: f32 = 3_500.0;
+/// `WfConfig.display_hz` clamp range, matching Android's
+/// `MIN_SPECTRUM_WIDTH_HZ`/`MAX_SPECTRUM_WIDTH_HZ` exactly.
+pub const WF_MIN_DISPLAY_HZ: f32 = 2_500.0;
+pub const WF_MAX_DISPLAY_HZ: f32 = 5_000.0;
 /// dB above the black point that maps to full brightness.
 pub const WF_SPAN_DB: f32 = 26.0;
 /// Black point sits this far above the noise floor so noise stays dark.
@@ -80,19 +86,41 @@ impl WfWindow {
     }
 }
 
-/// Developer-tunable waterfall FFT parameters (issue #428). Persisted in the
-/// config table as `wf_window` / `wf_fft_size` / `wf_avg`.
+/// Developer-tunable waterfall FFT parameters (issue #428), plus the
+/// operator-facing display width. Persisted in the config table as
+/// `wf_window` / `wf_fft_size` / `wf_avg` / `wf_display_hz`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WfConfig {
     pub window: WfWindow,
     pub fft_size: usize,
     /// Welch segments averaged per emitted row (50% overlap).
     pub avg: usize,
+    /// Displayed span of the audio band in Hz -- "Width" on the waterfall
+    /// strip, matching Android's `spectrumWidth`. Display-only geometry: it
+    /// controls how many already-computed FFT bins are included in each
+    /// emitted row (and so what the frontend's ruler/TX-marker math divides
+    /// by), never the decoder's own analysis window.
+    #[serde(default = "default_display_hz")]
+    pub display_hz: f32,
+    /// "NR" on the waterfall strip -- matches Android's `deNoise` exactly: a
+    /// *display-only* band-tilt flattening (subtract each bin's local
+    /// sliding-window dB average before mapping to brightness), ported from
+    /// the shared `ft8af_magnitudes_to_display`'s denoise branch
+    /// (`fft_display.c`). Never touches the decoder, which runs its own FFT
+    /// in the C core independently -- same as Android's own NR toggle.
+    /// Off by default, matching Android's `MainViewModel.deNoise = false`
+    /// and preserving this pipeline's existing look until opted in.
+    #[serde(default)]
+    pub denoise: bool,
+}
+
+fn default_display_hz() -> f32 {
+    WF_MAX_HZ
 }
 
 impl Default for WfConfig {
     fn default() -> Self {
-        WfConfig { window: WfWindow::Hann, fft_size: 2048, avg: 6 }
+        WfConfig { window: WfWindow::Hann, fft_size: 2048, avg: 6, display_hz: WF_MAX_HZ, denoise: false }
     }
 }
 
@@ -104,6 +132,13 @@ impl WfConfig {
             self.fft_size = WfConfig::default().fft_size;
         }
         self.avg = self.avg.clamp(1, 16);
+        // Mirrors Android's setSpectrumWidth: a corrupted/hand-edited 0 or
+        // negative value must never reach the cols/bin_hz division below --
+        // NaN/negative column counts would panic the Vec allocations.
+        if !self.display_hz.is_finite() {
+            self.display_hz = WF_MAX_HZ;
+        }
+        self.display_hz = self.display_hz.clamp(WF_MIN_DISPLAY_HZ, WF_MAX_DISPLAY_HZ);
         self
     }
 
@@ -159,7 +194,7 @@ impl WfProcessor {
         let step = self.cfg.step();
 
         let bin_hz = sample_rate / n as f32;
-        let cols = ((WF_MAX_HZ / bin_hz) as usize).min(n / 2).max(1);
+        let cols = ((self.cfg.display_hz / bin_hz) as usize).min(n / 2).max(1);
 
         // Average `avg` overlapping FFTs (Welch) to cut the per-bin variance of
         // a single FFT, so the noise floor reads smooth instead of speckled.
@@ -186,6 +221,15 @@ impl WfProcessor {
             dbs[i] = 20.0 * (mag + 1e-12).log10();
         }
 
+        // "NR": flatten slowly-varying band tilt before anything else reads
+        // `dbs`, so both the noise-floor estimate below and the final
+        // brightness see the flattened spectrum -- matches
+        // ft8af_magnitudes_to_display's denoise branch exactly (flatten,
+        // *then* take the floor reference).
+        if self.cfg.denoise {
+            flatten_band_tilt(&mut dbs);
+        }
+
         // Estimate the noise floor from the 30th-percentile dB (robust even on
         // a busy band where signals fill much of the spectrum), smoothed over time.
         let mut sorted = dbs.clone();
@@ -195,6 +239,46 @@ impl WfProcessor {
 
         let black_point = self.floor_db + WF_BLACK_OFFSET_DB;
         Some((map_to_u8(&dbs, black_point, WF_SPAN_DB), bin_hz))
+    }
+}
+
+/// "NR" display filter: subtract each bin's local sliding-window dB average
+/// from itself, in place -- flattens a slowly-varying broadband noise slope
+/// so it doesn't wash out one side of the band. Ported from
+/// `ft8af_magnitudes_to_display`'s denoise branch (`fft_display.c`): window
+/// is ~5% of the bins, floored at 8, and the per-bin average is computed via
+/// a prefix sum so the whole pass is O(n) rather than O(n*window).
+fn flatten_band_tilt(dbs: &mut [f32]) {
+    let n = dbs.len();
+    if n == 0 {
+        return;
+    }
+    let win = (n / 20).max(8).min(n);
+
+    // prefix[i] = sum of dbs[0..i], so a window's sum is prefix[right] - prefix[left].
+    let mut prefix = vec![0f32; n + 1];
+    for i in 0..n {
+        prefix[i + 1] = prefix[i] + dbs[i];
+    }
+
+    let original = dbs.to_vec();
+    for i in 0..n {
+        let mut left = i as isize - win as isize / 2;
+        let mut right = left + win as isize;
+        if left < 0 {
+            left = 0;
+            right = win as isize;
+        }
+        if right > n as isize {
+            right = n as isize;
+            left = right - win as isize;
+        }
+        if left < 0 {
+            left = 0;
+        }
+        let (left, right) = (left as usize, right as usize);
+        let avg = (prefix[right] - prefix[left]) / (right - left) as f32;
+        dbs[i] = original[i] - avg;
     }
 }
 
@@ -274,7 +358,7 @@ mod tests {
     #[test]
     fn tone_lands_in_correct_bin_across_sizes() {
         for fft_size in [1024usize, 2048, 4096] {
-            let cfg = WfConfig { window: WfWindow::Hann, fft_size, avg: 1 }.sanitize();
+            let cfg = WfConfig { window: WfWindow::Hann, fft_size, avg: 1, ..WfConfig::default() }.sanitize();
             let mut p = WfProcessor::new(cfg);
             let samples = tone(1000.0, p.samples_needed());
             let (bins, hz_per_col) = p.process_row(&samples, SR).unwrap();
@@ -315,7 +399,7 @@ mod tests {
         // Amplitude is kept small so brightness stays inside the linear span
         // instead of clamping to 255 in both cases.
         let brightness_at_1k = |avg: usize| -> f32 {
-            let cfg = WfConfig { window: WfWindow::Rect, fft_size: 2048, avg };
+            let cfg = WfConfig { window: WfWindow::Rect, fft_size: 2048, avg, ..WfConfig::default() };
             let mut p = WfProcessor::new(cfg);
             let need = p.samples_needed();
             let mut samples = vec![0f32; need];
@@ -336,12 +420,111 @@ mod tests {
     #[test]
     fn samples_needed_and_sanitize() {
         assert_eq!(WfConfig::default().samples_needed(), 7168); // 2048 + 5*1024
-        let s = WfConfig { window: WfWindow::Hann, fft_size: 3000, avg: 0 }.sanitize();
+        let s = WfConfig { window: WfWindow::Hann, fft_size: 3000, avg: 0, ..WfConfig::default() }.sanitize();
         assert_eq!(s.fft_size, 2048);
         assert_eq!(s.avg, 1);
-        let s = WfConfig { window: WfWindow::Rect, fft_size: 512, avg: 99 }.sanitize();
+        let s = WfConfig { window: WfWindow::Rect, fft_size: 512, avg: 99, ..WfConfig::default() }.sanitize();
         assert_eq!(s.fft_size, 512);
         assert_eq!(s.avg, 16);
+    }
+
+    #[test]
+    fn display_hz_clamps_like_androids_spectrum_width() {
+        let s = WfConfig { display_hz: 100.0, ..WfConfig::default() }.sanitize();
+        assert_eq!(s.display_hz, WF_MIN_DISPLAY_HZ);
+        let s = WfConfig { display_hz: 9_999.0, ..WfConfig::default() }.sanitize();
+        assert_eq!(s.display_hz, WF_MAX_DISPLAY_HZ);
+        let s = WfConfig { display_hz: 0.0, ..WfConfig::default() }.sanitize();
+        assert_eq!(s.display_hz, WF_MIN_DISPLAY_HZ, "zero must clamp, not divide-by-zero downstream");
+        let s = WfConfig { display_hz: f32::NAN, ..WfConfig::default() }.sanitize();
+        assert_eq!(s.display_hz, WF_MAX_HZ, "non-finite falls back to the default, not a clamped NaN");
+        // An in-range value passes through untouched.
+        let s = WfConfig { display_hz: 4_000.0, ..WfConfig::default() }.sanitize();
+        assert_eq!(s.display_hz, 4_000.0);
+    }
+
+    #[test]
+    fn display_hz_controls_emitted_column_count() {
+        // At a fixed sample rate/FFT size, a wider display_hz must emit more
+        // columns (bin_hz is unchanged -- only how many of them get included).
+        let mut narrow = WfProcessor::new(
+            WfConfig { fft_size: 2048, avg: 1, display_hz: WF_MIN_DISPLAY_HZ, ..WfConfig::default() },
+        );
+        let mut wide = WfProcessor::new(
+            WfConfig { fft_size: 2048, avg: 1, display_hz: WF_MAX_DISPLAY_HZ, ..WfConfig::default() },
+        );
+        let samples = vec![0f32; narrow.samples_needed()];
+        let (narrow_bins, _) = narrow.process_row(&samples, SR).unwrap();
+        let (wide_bins, _) = wide.process_row(&samples, SR).unwrap();
+        assert!(wide_bins.len() > narrow_bins.len());
+    }
+
+    #[test]
+    fn denoise_defaults_off_preserving_existing_behavior() {
+        assert!(!WfConfig::default().denoise, "NR must default off, matching Android's deNoise=false");
+    }
+
+    #[test]
+    fn flatten_band_tilt_removes_a_linear_slope() {
+        // A pure linear ramp (broadband tilt, no signal) should flatten to
+        // (near-)zero everywhere once its local average is subtracted off.
+        let n = 200;
+        let mut dbs: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
+        flatten_band_tilt(&mut dbs);
+        for (i, &v) in dbs.iter().enumerate() {
+            assert!(v.abs() < 1.0, "bin {i}: expected near-zero after flattening, got {v}");
+        }
+    }
+
+    #[test]
+    fn flatten_band_tilt_preserves_a_narrow_spike_against_a_tilted_floor() {
+        // A real signal (a few bins wide) riding on a broadband tilt must
+        // still stand out after flattening -- NR shouldn't erase the thing
+        // the operator is trying to see, only the slope under it.
+        let n = 200;
+        let mut dbs: Vec<f32> = (0..n).map(|i| i as f32 * 0.05).collect();
+        let spike_at = 100;
+        dbs[spike_at] += 30.0;
+        let before_spike_prominence = dbs[spike_at] - dbs[spike_at - 20];
+        flatten_band_tilt(&mut dbs);
+        let after_spike_prominence = dbs[spike_at] - dbs[spike_at - 20];
+        assert!(dbs[spike_at] > dbs[spike_at - 20] + 20.0, "spike must still stand out after flattening");
+        // The spike's prominence relative to nearby bins shouldn't be destroyed.
+        assert!(after_spike_prominence > before_spike_prominence * 0.5);
+    }
+
+    #[test]
+    fn flatten_band_tilt_handles_degenerate_sizes() {
+        // No panic on empty or tiny (smaller than the minimum 8-bin window) input.
+        let mut empty: Vec<f32> = vec![];
+        flatten_band_tilt(&mut empty);
+        assert!(empty.is_empty());
+
+        let mut tiny = vec![1.0f32, 2.0, 3.0];
+        flatten_band_tilt(&mut tiny);
+        assert_eq!(tiny.len(), 3);
+    }
+
+    #[test]
+    fn denoise_toggle_changes_process_row_output() {
+        // Same input, same everything else, only `denoise` differs -- the
+        // emitted row must actually differ when there's real tilt to flatten,
+        // proving the config flag is wired through process_row.
+        let mut off = WfProcessor::new(WfConfig { denoise: false, ..WfConfig::default() });
+        let mut on = WfProcessor::new(WfConfig { denoise: true, ..WfConfig::default() });
+        let mut samples = vec![0f32; off.samples_needed()];
+        // Synthesize a tilted-noise-ish signal: a sum of low-frequency content
+        // so the spectrum isn't flat (a literally flat/silent input leaves
+        // nothing for NR to flatten, which would make this test meaningless).
+        for (i, s) in samples.iter_mut().enumerate() {
+            let t = i as f32 / SR;
+            *s = 0.01 * (2.0 * std::f32::consts::PI * 150.0 * t).sin()
+                + 0.1 * (2.0 * std::f32::consts::PI * 900.0 * t).sin();
+        }
+
+        let (bins_off, _) = off.process_row(&samples, SR).unwrap();
+        let (bins_on, _) = on.process_row(&samples, SR).unwrap();
+        assert_ne!(bins_off, bins_on, "denoise=true must change the emitted row");
     }
 
     #[test]

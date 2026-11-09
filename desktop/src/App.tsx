@@ -23,6 +23,9 @@ import {
   type UiMessage,
   type WaterfallConfig,
   type WfWindow,
+  WF_DEFAULT_DISPLAY_HZ,
+  WF_MIN_DISPLAY_HZ,
+  WF_MAX_DISPLAY_HZ,
 } from "./ipc";
 import {
   adifToDateInput,
@@ -87,8 +90,14 @@ const GAIN_DEBOUNCE_MS = 120;
 // packs more history into the same screen space.
 const WF_HEIGHT = 500;
 const WF_TICK_STEP_HZ = 500;
-// Top of the displayed audio band; matches the backend's WF_MAX_HZ.
-const WF_TOP_HZ = 3500;
+// Top of the displayed audio band -- operator-adjustable ("Width"), mirroring
+// the backend's WfConfig.display_hz. A plain module-level mutable (not React
+// state) because drawSignalLabels is a plain function, not a component, kept
+// current by the `wfDisplayHzGlobal = displayHz` effect in App() -- the same
+// "module global as the escape hatch for non-component drawing code" pattern
+// wfCanvas below already uses. React components (WaterfallScale/WaterfallView)
+// take the live value as a prop instead, for correct re-rendering.
+let wfDisplayHzGlobal = WF_DEFAULT_DISPLAY_HZ;
 const TX_MIN_HZ = 200;
 const TX_MAX_HZ = 2900;
 // Height (px) of the slot-boundary band: tall enough to bake a readable
@@ -168,7 +177,7 @@ function drawSignalLabels(messages: UiMessage[]) {
   const y = Math.min(SIGNAL_LABEL_HEIGHT, cv.height);
   for (const m of messages) {
     if (!m.is_cq) continue;
-    const x = Math.round((m.freq_hz / WF_TOP_HZ) * cv.width);
+    const x = Math.round((m.freq_hz / wfDisplayHzGlobal) * cv.width);
     ctx.save();
     ctx.translate(x + 4, y);
     ctx.rotate(-Math.PI / 2);
@@ -186,7 +195,7 @@ export default function App() {
   const [clock, setClock] = useState<ClockSyncEvent | null>(null);
   const [decoding, setDecoding] = useState(false);
   const [audio, setAudio] = useState<InputLevelEvent | null>(null);
-  const [status, setStatus] = useState("");
+  const [, setStatus] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   // Decode list sort/collapse mode (Time/Call/SNR/DX), matching Android's
   // decode_sort_mode -- cycled from the TIME/CALL/SNR/DX button in the top
@@ -208,6 +217,20 @@ export default function App() {
   // (see BandModePicker), same as Android reuses one bandModeLabel in both
   // its title row and its TxStrip/drawer rows.
   const [operatingMode, setOperatingModeState] = useState<OperatingMode>("ft8");
+  // Waterfall "Width"/"NR"/"MSG" (WaterfallStatusStrip), matching Android's
+  // spectrumWidth/deNoise/markMessage. displayHz is lifted here (not local
+  // to WaterfallView) because the waterfall strip's own Width control and
+  // Settings -> Audio both need to read/write the same live value -- Android
+  // explicitly offers Width in both places (WaterfallScreen.kt's comment:
+  // "Opens the same Spectrum Width setting as Settings -> Radio & Audio").
+  // NR has no rendering-affecting state on the frontend at all (the denoise
+  // math runs entirely server-side in wf.rs); this is purely the chip's
+  // on/off display + persistence. MSG also needs no prop-threading to
+  // WaterfallView: drawSignalLabels is a plain module function (not a
+  // component), gated via showMessagesRef below.
+  const [displayHz, setDisplayHzState] = useState(WF_DEFAULT_DISPLAY_HZ);
+  const [denoise, setDenoiseState] = useState(false);
+  const [showMessages, setShowMessages] = useState(true);
   // Calls already worked on the current band (upper-cased), for the Decode
   // list's worked-station strikethrough. Desktop only ever logs "FT8" today
   // (see qso.rs), so that's the only mode checked for now.
@@ -292,6 +315,15 @@ export default function App() {
   // keep latest decoding flag for the toggle without stale closure
   const decodingRef = useRef(decoding);
   decodingRef.current = decoding;
+  // Same "always current" escape hatch for the engine-event handler's MSG
+  // gate (drawSignalLabels) and the module-level mirror drawSignalLabels
+  // itself reads (it's a plain function, not a component -- see
+  // wfDisplayHzGlobal below).
+  const showMessagesRef = useRef(showMessages);
+  showMessagesRef.current = showMessages;
+  useEffect(() => {
+    wfDisplayHzGlobal = displayHz;
+  }, [displayHz]);
 
   // handleEvent below is registered once at mount (see the engine-event
   // effect), so any state it reads directly would be frozen at its mount-time
@@ -346,6 +378,7 @@ export default function App() {
     [debouncedSetTxGain, debouncedSetRxGain]
   );
 
+
   useEffect(() => {
     // Register the event listener with cancellation-safe cleanup. Without this,
     // React StrictMode's mount/unmount/mount in dev leaks the first listener
@@ -362,12 +395,29 @@ export default function App() {
       // next status change.
       api.refreshStatus();
     });
-    api.listBands().then(setBands);
     api.getConfig("dial_hz").then((v) => {
       if (v) setDialHz(parseInt(v, 10));
     });
     api.getConfig("operating_mode").then((v) => {
-      if (v && v.toUpperCase() === "FT4") setOperatingModeState("ft4");
+      const mode: OperatingMode = modeFromConfigStr(v);
+      setOperatingModeState(mode);
+      // Explicit, not a reactive [operatingMode] effect (removed -- see
+      // onMode's own doc comment on why that indirection was unreliable):
+      // this is the one place besides onMode that needs the band list to
+      // follow mode, so it fetches directly instead of depending on a
+      // separate effect whose dependency-change timing turned out to be
+      // fragile in practice.
+      api.listBandsForMode(mode).then(setBands);
+    });
+    api.getConfig("wf_display_hz").then((v) => {
+      const hz = v == null ? NaN : parseFloat(v);
+      if (Number.isFinite(hz)) setDisplayHzState(hz);
+    });
+    api.getConfig("wf_denoise").then((v) => setDenoiseState(v === "true"));
+    api.getConfig("wf_show_messages").then((v) => {
+      // Only the exact string "false" turns it off -- matches Android's
+      // markMessage default of true, and an unset/garbage value stays on.
+      if (v === "false") setShowMessages(false);
     });
     api.getConfig("base_freq").then((v) => {
       if (v) setTxFreq(parseInt(v, 10));
@@ -423,7 +473,7 @@ export default function App() {
             if (fresh.length === 0) return prev;
             return [...fresh, ...prev].slice(0, MAX_MESSAGES);
           });
-          drawSignalLabels(e.data);
+          if (showMessagesRef.current) drawSignalLabels(e.data);
           runHunt(e.data);
         }
         break;
@@ -545,11 +595,48 @@ export default function App() {
     api.setBand(hz);
   }
 
+  // Shared by DecodeScreen's own WaterfallStatusStrip and the standalone
+  // Waterfall tab's -- named here (not inlined twice) so both stay wired to
+  // the same backend calls.
+  function onDisplayHz(hz: number) {
+    setDisplayHzState(hz);
+    api.setWfDisplayHz(hz);
+  }
+  function onDenoise(v: boolean) {
+    setDenoiseState(v);
+    api.setWfDenoise(v);
+  }
+  function onToggleMessages() {
+    const next = !showMessages;
+    setShowMessages(next);
+    api.setConfig("wf_show_messages", String(next));
+  }
+
   // Shared with both BandModePicker instances (TopBar's title and the More
   // panel's Band & Mode card -- same underlying control, see BandModePicker).
-  function onMode(mode: OperatingMode) {
+  async function onMode(mode: OperatingMode) {
+    // Optimistic, then corrected below: engine.rs's switch_mode rejects the
+    // switch outright while actually transmitting (radio safety -- see its
+    // doc comment), in which case neither operating_mode nor dial_hz config
+    // actually changed. Re-reading both after the call, rather than trusting
+    // the optimistic update, keeps the UI from showing a mode switch that
+    // silently didn't happen.
     setOperatingModeState(mode);
-    api.setMode(mode);
+    await api.setMode(mode);
+    const [realModeStr, realDialHz] = await Promise.all([
+      api.getConfig("operating_mode"),
+      api.getConfig("dial_hz"),
+    ]);
+    const realMode: OperatingMode = modeFromConfigStr(realModeStr);
+    setOperatingModeState(realMode);
+    if (realDialHz) setDialHz(parseInt(realDialHz, 10));
+    // Fetched directly here (not via a [operatingMode]-keyed effect, which
+    // this app used to have): BandModeSheet's band list needs to reflect
+    // realMode, the *confirmed* result of this specific switch, every time
+    // this function runs -- an effect only re-fires on a value change, so it
+    // would miss a case where the optimistic setOperatingModeState above
+    // already happened to match realMode.
+    api.listBandsForMode(realMode).then(setBands);
   }
 
   // Shared with Settings -> Audio and the More panel's TX-volume row (Android
@@ -655,6 +742,12 @@ export default function App() {
             onAnswer={(m) => api.answer({ call_from: m.call_from, grid: m.grid, snr: m.snr })}
             decoding={decoding}
             audio={audio}
+            displayHz={displayHz}
+            onDisplayHz={onDisplayHz}
+            denoise={denoise}
+            onDenoise={onDenoise}
+            showMessages={showMessages}
+            onToggleMessages={onToggleMessages}
           />
         )}
         {tab === "waterfall" && (
@@ -665,6 +758,18 @@ export default function App() {
                 setTxFreq(hz);
                 api.setBaseFreq(hz);
               }}
+              displayHz={displayHz}
+            />
+            <WaterfallStatusStrip
+              txFreq={txFreq}
+              decoding={decoding}
+              audio={audio}
+              displayHz={displayHz}
+              onDisplayHz={onDisplayHz}
+              denoise={denoise}
+              onDenoise={onDenoise}
+              showMessages={showMessages}
+              onToggleMessages={onToggleMessages}
             />
           </div>
         )}
@@ -698,6 +803,11 @@ export default function App() {
             }}
             txGain={txGain}
             onTxGain={onTxGain}
+            displayHz={displayHz}
+            onDisplayHz={(hz) => {
+              setDisplayHzState(hz);
+              api.setWfDisplayHz(hz);
+            }}
           />
         )}
         {(tab === "map" || tab === "pota") && (
@@ -725,7 +835,6 @@ export default function App() {
           onTxGain={onTxGain}
         />
       )}
-      <div className="status-line">{status}</div>
       <TabBar
         tab={tab}
         onTab={setTab}
@@ -793,18 +902,29 @@ function TabBar({
   );
 }
 
-const MODE_LABEL: Record<OperatingMode, string> = { ft8: "FT8", ft4: "FT4" };
+const MODE_LABEL: Record<OperatingMode, string> = { ft8: "FT8", ft4: "FT4", ft2: "FT2" };
 // TX/RX cycle length in ms per mode -- matches Rust's Mode::cycle_ms()
 // (mode.rs). Drives the countdown/progress-bar timing below; the waterfall
 // itself needs no separate fix -- its rows are pushed by the backend's own
 // per-mode wf_boundary_row cadence, not computed from a cycle length here.
-const MODE_CYCLE_MS: Record<OperatingMode, number> = { ft8: 15_000, ft4: 7_500 };
+const MODE_CYCLE_MS: Record<OperatingMode, number> = { ft8: 15_000, ft4: 7_500, ft2: 3_750 };
 // Cycle-time subtext shown on each mode tile in BandModeSheet, matching
 // Android's BandModeSheet.kt (formatSlotSeconds: 15000->"15s", 7500->"7.5s",
-// 3750->"3.75s"). Includes FT2 even though it isn't selectable here.
-const MODE_CYCLE_LABEL: Record<"ft8" | "ft4" | "ft2", string> = {
+// 3750->"3.75s").
+const MODE_CYCLE_LABEL: Record<OperatingMode, string> = {
   ft8: "15s", ft4: "7.5s", ft2: "3.75s",
 };
+
+// Resolve a persisted `operating_mode` config string ("FT8"/"FT4"/"FT2", any
+// case) the same way Rust's Mode::from_config does -- shared by the startup
+// config-load effect and onMode's post-switch re-read, so both can never
+// disagree about what a given backend value means.
+function modeFromConfigStr(v: string | null | undefined): OperatingMode {
+  const u = v?.toUpperCase();
+  if (u === "FT4") return "ft4";
+  if (u === "FT2") return "ft2";
+  return "ft8";
+}
 
 // Shared Band & Mode control, used identically by TopBar's title (the
 // upper-left picker) and the More panel's Band & Mode card -- matching
@@ -863,12 +983,19 @@ function BandModePicker(props: {
 // The "Band & mode" bottom sheet, matching Android's BandModeSheet.kt: a
 // 3-way mode toggle (FT8/FT4/FT2, each with its cycle time) over a band
 // list, each row showing name + dial frequency with a checkmark on the
-// current selection. FT2 is shown (not omitted -- Android lists it) but
-// disabled: desktop's FFI layer has no FT2 protocol binding at all (unlike
-// FT4, which the shared C ft8_lib already exported -- see mode.rs). Android's
-// band rows also carry a short descriptive subtitle ("Local, evenings",
-// "Daytime, worldwide") that desktop's BandInfo has no data for -- omitted
-// rather than inventing text that might not match Android's actual wording.
+// current selection. All three tiles are selectable -- FT2 decode works the
+// same way FT4's does (desktop's FFI links the shared ft8_lib monitor/
+// decoder directly rather than going through Android's JNI wrappers, so it
+// only needed the third `ftx_protocol_t` constant plumbed through, see
+// mode.rs). FT2 has no encoder anywhere (confirmed against ft8af.app, which
+// only ever claims decode for it: "decodes in milliseconds — now across
+// three modes") -- engine.rs's start_transmit refuses to key up in FT2
+// regardless of what the UI allows, and TopBar/TxBar grey out Call CQ/Tune
+// while operatingMode is "ft2" to make that receive-only state visible
+// rather than silently failing on click. Android's band rows also carry a
+// short descriptive subtitle ("Local, evenings", "Daytime, worldwide") that
+// desktop's BandInfo has no data for -- omitted rather than inventing text
+// that might not match Android's actual wording.
 function BandModeSheet(props: {
   bands: BandInfo[];
   dialHz: number;
@@ -886,21 +1013,17 @@ function BandModeSheet(props: {
           <button className="modal-close" aria-label="Close" onClick={onClose}>✕</button>
         </div>
         <div className="mode-tile-row">
-          {(["ft8", "ft4", "ft2"] as const).map((m) => {
-            const isFt2 = m === "ft2";
-            return (
-              <button
-                key={m}
-                className={"mode-tile" + (mode === m ? " active" : "")}
-                disabled={isFt2}
-                title={isFt2 ? "FT2 isn't implemented yet -- no decode protocol binding on desktop" : undefined}
-                onClick={() => onMode(m as OperatingMode)}
-              >
-                <span className="mode-tile-name">{m.toUpperCase()}</span>
-                <span className="mode-tile-cycle">{MODE_CYCLE_LABEL[m]}</span>
-              </button>
-            );
-          })}
+          {(["ft8", "ft4", "ft2"] as const).map((m) => (
+            <button
+              key={m}
+              className={"mode-tile" + (mode === m ? " active" : "")}
+              title={m === "ft2" ? "FT2: receive-only, matching ft8af.app (no FT2 TX anywhere)" : undefined}
+              onClick={() => onMode(m as OperatingMode)}
+            >
+              <span className="mode-tile-name">{m.toUpperCase()}</span>
+              <span className="mode-tile-cycle">{MODE_CYCLE_LABEL[m]}</span>
+            </button>
+          ))}
         </div>
         <div className="band-sheet-list">
           {bands.map((b) => {
@@ -979,6 +1102,12 @@ function TopBar(props: {
   // (desktop has no manual slot-parity override), matching WSJT-X/Android's
   // "Odd"/"Even" slot readout.
   const slotParity = cycle ? (cycle.sequential % 2 === 0 ? "Even" : "Odd") : null;
+  // FT2 has no encoder anywhere (see BandModeSheet's doc comment) --
+  // engine.rs's start_transmit refuses to key up regardless, but greying out
+  // every TX entry point here makes the receive-only state visible instead
+  // of letting the operator click Call CQ/More/Hunt and get a silent no-op
+  // (or, for Call CQ specifically, an error toast with no obvious cause).
+  const receiveOnly = operatingMode === "ft2";
 
   return (
     <>
@@ -996,14 +1125,15 @@ function TopBar(props: {
         <button
           className={"pill pill-cq" + (cqActive ? " pill-cq-stop" : "")}
           onClick={cqActive ? onStop : onCq}
-          disabled={tuning}
-          title={cqActive ? "Stop calling CQ" : "Call CQ"}
+          disabled={tuning || receiveOnly}
+          title={receiveOnly ? "FT2 is receive-only -- switch mode to transmit" : cqActive ? "Stop calling CQ" : "Call CQ"}
         >
           {cqActive ? "STOP" : <span className="pill-label-2line">Call<br />CQ</span>}
         </button>
         <button
           className="pill pill-dark"
-          title="More: CQ DX/NA/EU/... variants or a free-text message"
+          disabled={receiveOnly}
+          title={receiveOnly ? "FT2 is receive-only -- switch mode to transmit" : "More: CQ DX/NA/EU/... variants or a free-text message"}
           onClick={() => setCqOptionsOpen(true)}
         >
           More
@@ -1012,7 +1142,8 @@ function TopBar(props: {
         <button
           className={"pill pill-dark" + (huntEnabled ? " pill-hunt-active" : "")}
           onClick={onToggleHunt}
-          title="Hunt: auto-answer the best eligible CQ each cycle (priority/options in Settings)"
+          disabled={receiveOnly}
+          title={receiveOnly ? "FT2 is receive-only -- switch mode to transmit" : "Hunt: auto-answer the best eligible CQ each cycle (priority/options in Settings)"}
         >
           Hunt
         </button>
@@ -1363,18 +1494,18 @@ function ClockSyncBadge({ clock }: { clock: ClockSyncEvent | null }) {
 }
 
 // Frequency scale above the waterfall: a tick + label every WF_TICK_STEP_HZ
-// (0, 500, 1000, ... up to WF_TOP_HZ), positioned by the same hz/WF_TOP_HZ
+// (0, 500, 1000, ... up to displayHz), positioned by the same hz/displayHz
 // fraction the waterfall canvas and the TX marker already use, so they stay
 // aligned. The first/last ticks are pulled in from the edge instead of
 // centered, so "0" and the top label don't overflow the container.
-function WaterfallScale() {
+function WaterfallScale({ displayHz }: { displayHz: number }) {
   const ticks: number[] = [];
-  for (let hz = 0; hz <= WF_TOP_HZ; hz += WF_TICK_STEP_HZ) ticks.push(hz);
+  for (let hz = 0; hz <= displayHz; hz += WF_TICK_STEP_HZ) ticks.push(hz);
   return (
     <div style={{ position: "relative", height: 14, marginBottom: 2 }}>
       {ticks.map((hz) => {
-        const pct = (hz / WF_TOP_HZ) * 100;
-        const transform = hz === 0 ? "none" : hz === WF_TOP_HZ ? "translateX(-100%)" : "translateX(-50%)";
+        const pct = (hz / displayHz) * 100;
+        const transform = hz === 0 ? "none" : hz === ticks[ticks.length - 1] ? "translateX(-100%)" : "translateX(-50%)";
         return (
           <span
             key={hz}
@@ -1394,9 +1525,11 @@ function WaterfallScale() {
 function WaterfallView({
   txFreq,
   onSelectFreq,
+  displayHz,
 }: {
   txFreq: number;
   onSelectFreq: (hz: number) => void;
+  displayHz: number;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -1407,18 +1540,20 @@ function WaterfallView({
   function handleClick(e: MouseEvent<HTMLDivElement>) {
     const rect = e.currentTarget.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    const hz = Math.round(frac * WF_TOP_HZ);
+    const hz = Math.round(frac * displayHz);
     onSelectFreq(Math.min(TX_MAX_HZ, Math.max(TX_MIN_HZ, hz)));
   }
 
-  const leftPct = (txFreq / WF_TOP_HZ) * 100;
+  const leftPct = (txFreq / displayHz) * 100;
 
   return (
     <div
       // Fills its parent (`.decode-waterfall`, itself 50% of the window --
-      // see DecodeScreen's left/right split), both horizontally and now
-      // vertically too: the canvas flex-grows to the full panel height
-      // (its backing pixel buffer stays WF_HEIGHT rows -- only the CSS
+      // see DecodeScreen's left/right split) horizontally, and vertically
+      // shares that column with its sibling WaterfallStatusStrip via
+      // `flex: 1` (not `height: 100%`, which claimed the whole column and
+      // squeezed the strip below it down to a sliver -- the canvas's
+      // backing pixel buffer stays WF_HEIGHT rows regardless; only the CSS
       // display size changes, so the canvas just scales up like any other
       // image). The scale ruler and the TX marker below are positioned as
       // percentages of this same box, so they stay aligned at any size. The
@@ -1426,14 +1561,14 @@ function WaterfallView({
       // not a DOM overlay here -- it needs to scroll down with its own
       // boundary line.
       style={{
-        position: "relative", width: "100%", height: "100%",
+        position: "relative", width: "100%", flex: 1, minHeight: 0,
         display: "flex", flexDirection: "column",
         marginBottom: 8, cursor: "crosshair",
       }}
       onClick={handleClick}
       title="Click to set TX frequency"
     >
-      <WaterfallScale />
+      <WaterfallScale displayHz={displayHz} />
       <canvas
         ref={ref}
         style={{
@@ -1517,11 +1652,17 @@ function DecodeScreen(props: {
   onAnswer: (m: UiMessage) => void;
   decoding: boolean;
   audio: InputLevelEvent | null;
+  displayHz: number;
+  onDisplayHz: (hz: number) => void;
+  denoise: boolean;
+  onDenoise: (v: boolean) => void;
+  showMessages: boolean;
+  onToggleMessages: () => void;
 }) {
   const {
     messages, sortMode, myGrid, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids,
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
-    decoding, audio,
+    decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
   } = props;
 
   // Default "time" mode keeps the existing full-history, per-slot-grouped
@@ -1604,7 +1745,9 @@ function DecodeScreen(props: {
                 <Fragment key={i}>
                   {newBlock && (
                     <div className="time-sep">
-                      {rowTime} UTC · {groupStationCount} station{groupStationCount === 1 ? "" : "s"}
+                      <span>
+                        {rowTime} UTC · {groupStationCount} station{groupStationCount === 1 ? "" : "s"}
+                      </span>
                     </div>
                   )}
                   <div
@@ -1657,8 +1800,18 @@ function DecodeScreen(props: {
           </div>
         </div>
         <div className="decode-waterfall">
-          <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} />
-          <WaterfallStatusStrip txFreq={txFreq} decoding={decoding} audio={audio} />
+          <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} displayHz={displayHz} />
+          <WaterfallStatusStrip
+            txFreq={txFreq}
+            decoding={decoding}
+            audio={audio}
+            displayHz={displayHz}
+            onDisplayHz={onDisplayHz}
+            denoise={denoise}
+            onDenoise={onDenoise}
+            showMessages={showMessages}
+            onToggleMessages={onToggleMessages}
+          />
         </div>
       </div>
     </>
@@ -1667,47 +1820,66 @@ function DecodeScreen(props: {
 
 // Bottom info strip under the waterfall, matching Android's WaterfallScreen.kt
 // bottom strip layout: Width/NR/MSG toggle chips, the RX input-level meter,
-// current TX/cursor frequency, and LIVE/IDLE status.
-//
-// All three chips are shown -- in the right place, in Android's order --
-// but disabled with an explanatory tooltip rather than silently omitted or
-// faked, same treatment as the More panel's DX button: Width needs the
-// waterfall's displayed Hz span to become a runtime config (today it's a
-// fixed WF_TOP_HZ/WF_MAX_HZ constant on both ends), NR needs a real
-// noise-reduction DSP stage desktop doesn't have, and MSG (labeling decoded
-// callsigns directly on the waterfall at their frequency) needs real canvas
-// work in drawWaterfallRow to place text per-decode, not just a toggle --
-// lower effort than NR since the backend already carries each decode's
-// freq_hz, but still its own pass, not something to bolt on here.
+// current TX/cursor frequency, and LIVE/IDLE status. All three are real now:
+// Width opens a small popover (the same spectrumWidth range/editing Android's
+// own Width chip offers, and the same value Settings -> Audio edits -- see
+// WaterfallScreen.kt's own comment: "Opens the same Spectrum Width setting as
+// Settings -> Radio & Audio"); NR toggles the backend's display-only
+// band-tilt-flattening (wf.rs's WfConfig.denoise, ported from the shared
+// ft8af_magnitudes_to_display's denoise branch -- never touches the decoder,
+// which runs its own FFT independently, same as Android's own NR); MSG
+// toggles drawSignalLabels, which already existed and ran unconditionally --
+// this just makes it optional, defaulting on to match both Android's
+// markMessage default and this pipeline's prior always-on behavior.
 function WaterfallStatusStrip({
   txFreq,
   decoding,
   audio,
+  displayHz,
+  onDisplayHz,
+  denoise,
+  onDenoise,
+  showMessages,
+  onToggleMessages,
 }: {
   txFreq: number;
   decoding: boolean;
   audio: InputLevelEvent | null;
+  displayHz: number;
+  onDisplayHz: (hz: number) => void;
+  denoise: boolean;
+  onDenoise: (v: boolean) => void;
+  showMessages: boolean;
+  onToggleMessages: () => void;
 }) {
+  const [widthOpen, setWidthOpen] = useState(false);
   return (
     <div className="wf-status-strip">
       <button
-        className="wf-toggle-chip"
-        disabled
-        title="Spectrum width -- not yet adjustable on desktop (the displayed span is still a fixed 3500 Hz)"
+        className={"wf-toggle-chip" + (widthOpen ? " active" : "")}
+        onClick={() => setWidthOpen(true)}
+        title="Spectrum width (Hz) -- the same setting as Settings → Audio"
       >
         Width
       </button>
+      {widthOpen && (
+        <SpectrumWidthDialog
+          displayHz={displayHz}
+          onSave={(hz) => { onDisplayHz(hz); setWidthOpen(false); }}
+          onCancel={() => setWidthOpen(false)}
+        />
+      )}
       <button
-        className="wf-toggle-chip"
-        disabled
-        title="Noise reduction -- not yet implemented on desktop (no NR DSP stage)"
+        className={"wf-toggle-chip" + (denoise ? " active" : "")}
+        onClick={() => onDenoise(!denoise)}
+        title="Noise reduction: flattens broadband tilt in the waterfall display only (never affects decoding)"
       >
         NR
       </button>
       <button
-        className="wf-toggle-chip"
-        disabled
-        title="Label decoded callsigns on the waterfall at their frequency -- not yet implemented on desktop"
+        className={"wf-toggle-chip" + (showMessages ? " active" : "")}
+        onClick={onToggleMessages}
+        title="Label decoded callsigns on the waterfall at their frequency"
       >
         MSG
       </button>
@@ -1715,6 +1887,57 @@ function WaterfallStatusStrip({
       <div className="spacer" />
       <span className="wf-status-freq">{txFreq} Hz</span>
       <span className={"wf-status-live" + (decoding ? "" : " off")}>{decoding ? "LIVE" : "IDLE"}</span>
+    </div>
+  );
+}
+
+// Matches Android's actual "Spectrum Width" dialog (a centered Cancel/Save
+// modal with a bounded number field, not a live-drag slider) -- confirmed
+// against a real screenshot. Committing only on Save, rather than firing
+// set_wf_display_hz on every drag tick, also avoids spamming the backend
+// with a WfProcessor rebuild per pixel of drag (the previous live-slider
+// popover could flood the engine with a config rebuild on every intermediate
+// value during a single drag).
+function SpectrumWidthDialog({
+  displayHz,
+  onSave,
+  onCancel,
+}: {
+  displayHz: number;
+  onSave: (hz: number) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(String(Math.round(displayHz)));
+  const parsed = parseInt(draft, 10);
+  const valid = Number.isFinite(parsed) && parsed >= WF_MIN_DISPLAY_HZ && parsed <= WF_MAX_DISPLAY_HZ;
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal spectrum-width-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Spectrum Width</h3>
+        <label className="spectrum-width-field">
+          <span className="spectrum-width-hint">{WF_MIN_DISPLAY_HZ}–{WF_MAX_DISPLAY_HZ} Hz</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={WF_MIN_DISPLAY_HZ}
+            max={WF_MAX_DISPLAY_HZ}
+            step={100}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            autoFocus
+          />
+        </label>
+        <div className="actions">
+          <button className="modal-text-btn" onClick={onCancel}>Cancel</button>
+          <button
+            className="modal-text-btn modal-text-btn-accent"
+            disabled={!valid}
+            onClick={() => valid && onSave(parsed)}
+          >
+            Save
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2294,11 +2517,17 @@ function SettingsScreen(props: {
   onInputGain: (v: number) => void;
   txGain: number;
   onTxGain: (v: number) => void;
+  /** Shared with the Decode waterfall strip's own Width control (same
+   *  top-level state in App()) so a change made here is immediately live
+   *  on the waterfall, not just on next reload -- see WaterfallStatusStrip's
+   *  doc comment for why this one value is lifted instead of locally fetched. */
+  displayHz: number;
+  onDisplayHz: (hz: number) => void;
 }) {
   const {
     onStatus, clock, onSettingsSaved, onRigLabel, onBandsChanged,
     huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
-    inputGain, onInputGain, txGain, onTxGain,
+    inputGain, onInputGain, txGain, onTxGain, displayHz, onDisplayHz,
   } = props;
   const [call, setCall] = useState("");
   const [rigLabel, setRigLabel] = useState("");
@@ -2317,12 +2546,27 @@ function SettingsScreen(props: {
   const [output, setOutput] = useState("");
   const [baseFreq, setBaseFreq] = useState(1500);
   // Live-waterfall FFT developer knobs (issue #428). Defaults mirror
-  // WfConfig::default() on the Rust side: hann / 2048 / 6.
+  // WfConfig::default() on the Rust side: hann / 2048 / 6. display_hz and
+  // denoise round-trip here (kept synced from the displayHz prop, and
+  // denoise read once from config below) even with no dedicated edit control
+  // for either *in this object* -- Width has its own field below bound to
+  // the shared displayHz prop instead, and NR has no Settings UI at all
+  // (Android doesn't duplicate it there either) -- purely so a save here
+  // (window/fft_size/avg) can't silently clobber either one via the
+  // full-object SetWaterfallConfig path.
   const [wfCfg, setWfCfg] = useState<WaterfallConfig>({
     window: "hann",
     fft_size: 2048,
     avg: 6,
+    display_hz: displayHz,
+    denoise: false,
   });
+  // Keep wfCfg.display_hz mirroring the shared prop so a window/fft_size/avg
+  // save always sends the live Width, even if it changed via the waterfall
+  // strip's own control (or Settings' own field below) since this mounted.
+  useEffect(() => {
+    setWfCfg((prev) => ({ ...prev, display_hz: displayHz }));
+  }, [displayHz]);
   // WSJT-X UDP interface (outbound broadcast + inbound requests). Defaults match
   // WSJT-X: disabled, 127.0.0.1:2237. Rust persists the udp_* keys.
   const [udp, setUdp] = useState<UdpConfig>({
@@ -2373,18 +2617,24 @@ function SettingsScreen(props: {
     // Restore persisted waterfall knobs (written by the engine on change),
     // keeping only values from the option lists — an unknown window string or
     // NaN size would leave the <select>s blank and push an invalid config
-    // back through applyWfCfg.
+    // back through applyWfCfg. display_hz is NOT fetched here -- it's kept
+    // synced from the shared displayHz prop (see the effect above) rather
+    // than independently re-fetched, so this panel and the waterfall strip
+    // can never show two different "current" values for the same setting.
     Promise.all([
       api.getConfig("wf_window"),
       api.getConfig("wf_fft_size"),
       api.getConfig("wf_avg"),
-    ]).then(([w, size, avg]) => {
+      api.getConfig("wf_denoise"),
+    ]).then(([w, size, avg, denoiseStr]) => {
       const fftSize = parseInt(size ?? "", 10);
       const avgN = parseInt(avg ?? "", 10);
       setWfCfg((prev) => ({
         window: WF_WINDOWS.includes(w as WfWindow) ? (w as WfWindow) : prev.window,
         fft_size: WF_FFT_SIZES.includes(fftSize) ? fftSize : prev.fft_size,
         avg: WF_AVG_OPTIONS.includes(avgN) ? avgN : prev.avg,
+        display_hz: prev.display_hz,
+        denoise: denoiseStr === "true",
       }));
     });
   }, []);
@@ -2922,6 +3172,21 @@ function SettingsScreen(props: {
           <div className="muted">
             Spectrum/waterfall rendering experiments (issue #428) — affects the
             display only, never decoding. Defaults: Hann, 2048, 6 averages.
+          </div>
+          <div className="field">
+            <label>Spectrum width: {Math.round(displayHz)} Hz</label>
+            <input
+              type="range"
+              aria-label="Spectrum width, Hz"
+              min={WF_MIN_DISPLAY_HZ}
+              max={WF_MAX_DISPLAY_HZ}
+              step={100}
+              value={displayHz}
+              onChange={(e) => onDisplayHz(parseInt(e.target.value, 10))}
+            />
+            <span className="muted" style={{ fontSize: 12 }}>
+              Same setting as the Width control on the Decode waterfall strip.
+            </span>
           </div>
           <div className="field">
             <label>Window function</label>

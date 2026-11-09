@@ -34,7 +34,7 @@ export type TxStage =
   | "idle" | "cq" | "grid" | "report" | "r_report" | "rr73" | "bye73";
 
 /** Operating mode -- matches `crate::mode::Mode`'s `#[serde(rename_all = "lowercase")]`. */
-export type OperatingMode = "ft8" | "ft4";
+export type OperatingMode = "ft8" | "ft4" | "ft2";
 
 /** RX input-level health -- matches `crate::engine::InputLevelStatus` and
  *  Android's `AudioInputLevel.Status`. */
@@ -191,12 +191,25 @@ export interface OsLocation {
 /** Waterfall FFT window (developer setting, issue #428). */
 export type WfWindow = "rect" | "hann" | "hamming" | "blackman" | "blackman_harris";
 
-/** Live-waterfall FFT parameters. Defaults: hann / 2048 / 6. */
+/** Live-waterfall FFT parameters. Defaults: hann / 2048 / 6 / 3500. */
 export interface WaterfallConfig {
   window: WfWindow;
   fft_size: number;
   avg: number;
+  /** Displayed span of the audio band in Hz ("Width") -- clamped to
+   *  [WF_MIN_DISPLAY_HZ, WF_MAX_DISPLAY_HZ] = [2500, 5000] server-side,
+   *  matching Android's spectrumWidth range exactly. */
+  display_hz: number;
+  /** "NR" -- display-only band-tilt flattening, matching Android's deNoise.
+   *  Not edited from the Settings panel (Android doesn't duplicate NR
+   *  there either -- only Width), but must round-trip through here so a
+   *  Settings-panel edit to window/fft_size/avg doesn't silently reset it. */
+  denoise: boolean;
 }
+
+export const WF_MIN_DISPLAY_HZ = 2_500;
+export const WF_MAX_DISPLAY_HZ = 5_000;
+export const WF_DEFAULT_DISPLAY_HZ = 3_500;
 
 export type RigBackend = "none" | "flrig" | "hamlib" | "g106";
 
@@ -240,6 +253,7 @@ export const api = {
   listSerialPorts: () => invoke<SerialPortInfo[]>("list_serial_ports"),
   listHamlibRigs: () => invoke<HamlibRig[]>("list_hamlib_rigs"),
   listBands: () => invoke<BandInfo[]>("list_bands"),
+  listBandsForMode: (mode: OperatingMode) => invoke<BandInfo[]>("list_bands_for_mode", { mode }),
   listCustomBands: () => invoke<CustomBand[]>("list_custom_bands"),
   /** Add/rename a custom dial. Rejects bad input with a message (Err string). */
   addCustomBand: (freq: string, name: string) =>
@@ -316,6 +330,10 @@ export const api = {
   /** Apply + persist live-waterfall FFT parameters (Rust side persists). */
   setWaterfallConfig: (config: WaterfallConfig) =>
     invoke("set_waterfall_config", { config }),
+  /** "Width" -- merges into the engine's current waterfall config. */
+  setWfDisplayHz: (hz: number) => invoke("set_wf_display_hz", { hz }),
+  /** "NR" -- merges into the engine's current waterfall config. */
+  setWfDenoise: (denoise: boolean) => invoke("set_wf_denoise", { denoise }),
 
   /** Apply + persist WSJT-X UDP settings (Rust side persists the udp_* keys and
    * rebinds the socket/listener live). */

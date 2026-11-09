@@ -13,6 +13,7 @@ use std::os::raw::{c_char, c_int, c_void};
 // ftx_protocol_t
 pub const FTX_PROTOCOL_FT4: c_int = 0;
 pub const FTX_PROTOCOL_FT8: c_int = 1;
+pub const FTX_PROTOCOL_FT2: c_int = 2;
 
 // ftx_message_type_t (declaration order in message.h)
 pub const FTX_MESSAGE_TYPE_FREE_TEXT: c_int = 0;

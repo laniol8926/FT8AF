@@ -358,6 +358,15 @@ pub enum EngineCommand {
     ResyncTime,
     /// Apply new live-waterfall FFT parameters (developer knobs, issue #428).
     SetWaterfallConfig(WfConfig),
+    /// "Width" on the waterfall strip -- the displayed audio span in Hz,
+    /// merged into the current `WfConfig` so the operator can change it from
+    /// either the strip's own control or Settings without needing to know
+    /// the other waterfall knobs (unlike `SetWaterfallConfig`, which takes a
+    /// complete config). Matches Android's `GeneralVariables.setSpectrumWidth`.
+    SetWfDisplayHz(f32),
+    /// "NR" on the waterfall strip -- same merge-into-current-config
+    /// treatment as `SetWfDisplayHz`. Matches Android's `deNoise` toggle.
+    SetWfDenoise(bool),
     /// Apply new WSJT-X UDP settings (enable/host/port/accept-requests). Rebinds
     /// the socket + listener live so the Settings screen takes effect at once.
     SetUdpConfig(crate::udp::UdpConfig),
@@ -702,17 +711,17 @@ fn should_refresh_ptt(
 /// Spawn the decode worker: owns the (!Send) `Decoder` on its own thread so
 /// the heavy per-slot DSP never blocks the engine loop (which drives the live
 /// waterfall + UTC clock). Fed slot audio over the returned sender; decodes
-/// come back over the returned receiver. `is_ft8` selects the decode
-/// protocol (`Mode::is_ft8()`) -- called once from `Engine::new` and again
-/// from `switch_mode` whenever the operating mode changes, since a `Decoder`
-/// is built for one protocol for its whole lifetime.
-fn spawn_decoder_thread(is_ft8: bool) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
+/// come back over the returned receiver. `protocol` selects the decode
+/// protocol (`Mode::ffi_protocol()`) -- called once from `Engine::new` and
+/// again from `switch_mode` whenever the operating mode changes, since a
+/// `Decoder` is built for one protocol for its whole lifetime.
+fn spawn_decoder_thread(protocol: std::os::raw::c_int) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
     let (slot_tx, slot_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let (dec_tx, dec_rx) = std::sync::mpsc::channel::<Vec<DecodedMessage>>();
     std::thread::Builder::new()
         .name("ft8af-decoder".into())
         .spawn(move || {
-            let mut decoder = Decoder::new(SAMPLE_RATE, is_ft8);
+            let mut decoder = Decoder::new(SAMPLE_RATE, protocol);
             while let Ok(slot) = slot_rx.recv() {
                 decoder.feed_slot(&slot);
                 let n = decoder.find_sync();
@@ -780,11 +789,19 @@ impl Engine {
                 .get_config("wf_avg")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(wf_defaults.avg),
+            display_hz: db
+                .get_config("wf_display_hz")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(wf_defaults.display_hz),
+            denoise: db
+                .get_config("wf_denoise")
+                .map(|s| s == "true")
+                .unwrap_or(wf_defaults.denoise),
         }
         .sanitize();
         let wf = WfProcessor::new(wf_cfg);
 
-        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.is_ft8());
+        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol());
 
         Engine {
             db,
@@ -1098,13 +1115,26 @@ impl Engine {
 
     /// Switch operating mode (FT8/FT4) -- see `EngineCommand::SetMode`.
     ///
-    /// Stops any in-flight TX/QSO/tune first, the same precaution
-    /// `DisconnectRig` takes: a mode's cycle length and tone encoding are
-    /// baked into a transmission from the moment it starts (the CAT-tone
-    /// path in particular captures `symbol_period` once into `CatToneTx`),
-    /// so switching mode mid-transmission would desync the rig from what's
-    /// actually still being clocked out. A no-op (but still safe to call)
-    /// when `mode` is already the current mode.
+    /// **Rejected outright while actually transmitting** (audio playing, a
+    /// CAT-tone over in flight, or tuning) -- matches Android's
+    /// `MainViewModel.setOperatingMode`, which refuses mid-transmit rather
+    /// than interrupting: a mode's cycle length and tone encoding are baked
+    /// into a transmission from the moment it starts (the CAT-tone path in
+    /// particular captures `symbol_period` once into `CatToneTx`), so
+    /// switching mid-transmission would desync the rig from what's actually
+    /// still being clocked out -- and cutting the transmission off instead
+    /// is its own hazard (a half-sent message on the air). An *armed but not
+    /// currently keyed* QSO/CQ (`qso.active` true, waiting between slots) is
+    /// fine to interrupt and is stopped as part of the switch, same as
+    /// Android's `ft8TransmitSignal.setActivated(false)`. A no-op (but still
+    /// safe to call) when `mode` is already the current mode.
+    ///
+    /// Retunes within the **same band** to the new mode's dial frequency
+    /// (`bands::mode_band_freq`) -- never changes the band itself. Matches
+    /// Android's own documented radio-safety rule: jumping to a band the
+    /// operator hasn't tuned (antenna/ATU) could present high SWR and damage
+    /// the PA, so a band with no dial in the new mode (160m/60m have no FT4
+    /// allocation) is left exactly as-is rather than guessing a frequency.
     ///
     /// The decode worker thread is built for one protocol for its whole
     /// lifetime (see `spawn_decoder_thread`), so this tears the old one down
@@ -1118,11 +1148,16 @@ impl Engine {
         if mode == self.mode {
             return;
         }
+        if self.tx_playback.is_some() || self.tx_cat.is_some() || self.tx_tune.is_some() {
+            self.emit(EngineEvent::Error(
+                "can't switch mode while transmitting -- try again after this over".into(),
+            ));
+            return;
+        }
         self.qso.stop();
         self.tx_parity = None;
-        self.finalize_tx();
 
-        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.is_ft8());
+        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol());
         self.slot_tx = slot_tx;
         self.dec_rx = dec_rx;
 
@@ -1133,9 +1168,24 @@ impl Engine {
         self.txed_slot = -1;
         self.last_wf_slot = -1;
 
+        // Retune within the same band only -- see doc comment above.
+        let wave_length = bands::band_for_freq_hz(self.dial_hz);
+        if let Some(new_hz) = bands::mode_band_freq(wave_length, mode) {
+            if new_hz != self.dial_hz {
+                self.dial_hz = new_hz;
+                self.qso.band = bands::band_for_freq_hz(new_hz).to_string();
+                self.qso.freq_mhz = bands::freq_mhz_string(new_hz);
+                let _ = self.db.set_config("dial_hz", &new_hz.to_string());
+                if let Some(rig) = self.rig.as_mut() {
+                    let _ = rig.set_frequency(new_hz);
+                }
+            }
+        }
+
         let _ = self.db.set_config("operating_mode", mode.display_name());
         self.emit(EngineEvent::Info(format!("switched to {}", mode.display_name())));
         self.publish_tx_state();
+        self.publish_rig_status();
     }
 
     /// Begin transmitting `message`, returning immediately. Playback runs off the
@@ -1148,6 +1198,19 @@ impl Engine {
     /// device / playback error). The caller uses this to tell the sequencer the
     /// message really went out.
     fn start_transmit(&mut self, message: &str) -> bool {
+        // FT2 has no encoder anywhere (see Mode's doc comment) -- refuse before
+        // touching PTT or the rig, rather than letting generate_signal silently
+        // produce an unverified waveform. Covers both the audio path below and
+        // start_transmit_cat_tones (QMX CAT-tone path), which this falls through
+        // to. TUNE (a steady unmodulated carrier, no message encoding) is exempt
+        // -- it's mode-independent and Android's own FT2 screen leaves it enabled.
+        if !self.mode.can_transmit() {
+            self.emit(EngineEvent::Error(format!(
+                "{} is receive-only -- switch mode to transmit",
+                self.mode.display_name()
+            )));
+            return false;
+        }
         // Never key a second transmission over a live one, or over an active tune.
         if self.tx_playback.is_some() || self.tx_cat.is_some() || self.tx_tune.is_some() {
             return false;
@@ -1558,6 +1621,31 @@ impl Engine {
         self.broadcast_status();
     }
 
+    /// Sanitize, persist, and apply a new `WfConfig` -- shared by
+    /// `SetWaterfallConfig` (a complete config from the Settings editor) and
+    /// `SetWfDisplayHz`/`SetWfDenoise` (the waterfall strip's own Width/NR
+    /// controls, which merge a single field into `self.wf.config()` first
+    /// so the operator doesn't need to know the other knobs to change one).
+    /// Rebuilds the FFT plan + window table; the noise-floor EMA restarts
+    /// and reconverges within a couple of seconds.
+    fn apply_wf_config(&mut self, cfg: WfConfig) {
+        let cfg = cfg.sanitize();
+        let _ = self.db.set_config("wf_window", cfg.window.as_str());
+        let _ = self.db.set_config("wf_fft_size", &cfg.fft_size.to_string());
+        let _ = self.db.set_config("wf_avg", &cfg.avg.to_string());
+        let _ = self.db.set_config("wf_display_hz", &cfg.display_hz.to_string());
+        let _ = self.db.set_config("wf_denoise", if cfg.denoise { "true" } else { "false" });
+        self.wf = WfProcessor::new(cfg);
+        self.emit(EngineEvent::Info(format!(
+            "waterfall: {} {} avg {} width {}Hz{}",
+            cfg.window.as_str(),
+            cfg.fft_size,
+            cfg.avg,
+            cfg.display_hz as i32,
+            if cfg.denoise { " NR" } else { "" },
+        )));
+    }
+
     fn publish_rig_status(&self) {
         let (connected, model) = match &self.rig {
             Some(r) => (r.connected(), r.name()),
@@ -1660,20 +1748,16 @@ impl Engine {
                     input.set_gain(self.rx_gain);
                 }
             }
-            EngineCommand::SetWaterfallConfig(cfg) => {
-                let cfg = cfg.sanitize();
-                let _ = self.db.set_config("wf_window", cfg.window.as_str());
-                let _ = self.db.set_config("wf_fft_size", &cfg.fft_size.to_string());
-                let _ = self.db.set_config("wf_avg", &cfg.avg.to_string());
-                // Rebuild plan + window table; the noise-floor EMA restarts and
-                // reconverges within a couple of seconds.
-                self.wf = WfProcessor::new(cfg);
-                self.emit(EngineEvent::Info(format!(
-                    "waterfall: {} {} avg {}",
-                    cfg.window.as_str(),
-                    cfg.fft_size,
-                    cfg.avg
-                )));
+            EngineCommand::SetWaterfallConfig(cfg) => self.apply_wf_config(cfg),
+            EngineCommand::SetWfDisplayHz(hz) => {
+                let mut cfg = self.wf.config();
+                cfg.display_hz = hz;
+                self.apply_wf_config(cfg);
+            }
+            EngineCommand::SetWfDenoise(denoise) => {
+                let mut cfg = self.wf.config();
+                cfg.denoise = denoise;
+                self.apply_wf_config(cfg);
             }
             EngineCommand::SetUdpConfig(cfg) => {
                 // Persist the four settings, then rebind live.
@@ -1863,9 +1947,9 @@ impl Engine {
 mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, should_refresh_ptt,
-        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, CLIP_PEAK, DEFAULT_RX_GAIN,
-        DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ,
-        PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
+        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, TuneHandle, CLIP_PEAK,
+        DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ,
+        MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::db::Db;
     use crate::dsp::DecodedMessage;
@@ -1950,6 +2034,63 @@ mod tests {
         engine.handle(EngineCommand::SetTxPeriod(None));
         engine.handle(EngineCommand::StartCq);
         assert_eq!(engine.tx_parity, None);
+    }
+
+    #[test]
+    fn switch_mode_retunes_within_the_same_band() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+
+        // 40m has an FT4 dial (7.0475 MHz) -- switching retunes to it, same band.
+        engine.dial_hz = 7_074_000;
+        engine.handle(EngineCommand::SetMode(Mode::Ft4));
+        assert_eq!(engine.mode, Mode::Ft4);
+        assert_eq!(engine.dial_hz, 7_047_500);
+        assert_eq!(engine.qso.band, "40m");
+        assert_eq!(db.get_config("dial_hz").as_deref(), Some("7047500"));
+
+        // Switching back to FT8 retunes to 40m's FT8 dial.
+        engine.handle(EngineCommand::SetMode(Mode::Ft8));
+        assert_eq!(engine.dial_hz, 7_074_000);
+    }
+
+    #[test]
+    fn switch_mode_leaves_the_dial_untouched_with_no_entry_for_the_new_mode() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+
+        // 160m has no FT4 allocation -- the radio-safety rule is "never guess
+        // a different band's dial," so the frequency must stay exactly put.
+        engine.dial_hz = 1_840_000;
+        engine.handle(EngineCommand::SetMode(Mode::Ft4));
+        assert_eq!(engine.mode, Mode::Ft4);
+        assert_eq!(engine.dial_hz, 1_840_000, "no FT4 dial for 160m -- must not jump bands");
+    }
+
+    #[test]
+    fn switch_mode_is_rejected_while_actually_transmitting() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+
+        // Simulate a live transmission (a CAT tune key-down -- no real audio
+        // device needed to construct this variant) without actually keying
+        // any hardware; switch_mode must refuse rather than interrupt it.
+        engine.tx_tune = Some(TuneHandle::Cat);
+        engine.dial_hz = 7_074_000;
+        engine.handle(EngineCommand::SetMode(Mode::Ft4));
+        assert_eq!(engine.mode, Mode::Ft8, "must not switch while transmitting");
+        assert_eq!(engine.dial_hz, 7_074_000, "must not retune while transmitting");
+
+        // Once the transmission ends, the switch goes through normally.
+        engine.tx_tune = None;
+        engine.handle(EngineCommand::SetMode(Mode::Ft4));
+        assert_eq!(engine.mode, Mode::Ft4);
     }
 
     #[test]

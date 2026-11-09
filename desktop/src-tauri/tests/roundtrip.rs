@@ -5,7 +5,7 @@
 //! feed it back through the monitor + sync search + LDPC decoder and confirm the
 //! original text is recovered. This is the gate for the whole project.
 
-use ft8af::dsp::{encode, Decoder, SAMPLE_RATE, SLOT_SAMPLES};
+use ft8af::dsp::{encode, ffi, Decoder, SAMPLE_RATE, SLOT_SAMPLES};
 
 #[test]
 fn encode_then_decode_recovers_message() {
@@ -19,7 +19,7 @@ fn encode_then_decode_recovers_message() {
     encode::synth_gfsk(&tones, freq_hz, SAMPLE_RATE, &mut signal, 0);
 
     // 4-5. monitor -> find_sync -> decode.
-    let mut decoder = Decoder::new(SAMPLE_RATE, true);
+    let mut decoder = Decoder::new(SAMPLE_RATE, ffi::FTX_PROTOCOL_FT8);
     decoder.feed_slot(&signal);
     let n = decoder.find_sync();
     assert!(n > 0, "expected at least one sync candidate, got {n}");
