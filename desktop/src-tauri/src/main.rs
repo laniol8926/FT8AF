@@ -11,6 +11,7 @@ use ft8af::audio::{self, AudioDevice};
 use ft8af::bands::{self, BandEntry, CustomBand};
 use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
+use ft8af::fcc_grid::{self, FccSeedSummary};
 use ft8af::os_location::{self, OsLocation};
 use ft8af::rig::{self, HamlibRig, RigConfig, SerialPortInfo};
 use ft8af::wf::WfConfig;
@@ -353,6 +354,42 @@ fn import_adif(
     })
 }
 
+/// Total rows in `callsign_qth` -- the frontend's first-run check: an empty
+/// table means `import_fcc_grid_seed` hasn't run yet (see `db.rs` schema
+/// v7's doc comment).
+#[tauri::command]
+fn callsign_qth_count(state: State<AppState>) -> i64 {
+    state.db.callsign_qth_count()
+}
+
+/// Download the FCC amateur-license database, cross-reference it against the
+/// bundled Census ZCTA Gazetteer, and seed `callsign_qth` -- see
+/// `fcc_grid.rs`'s module doc comment for the full pipeline. Emits
+/// `"fcc-grid-progress"` events (payload: [`FccSeedProgress`]) throughout
+/// both the download and the processing phase, since either one alone can
+/// take long enough that a silent wait would look like a hang (the download
+/// is ~200MB; processing scans ~1.7M FCC records).
+///
+/// Wrapped in `catch_unwind` like `import_adif`: this also parses an
+/// external file of content this app doesn't control.
+#[tauri::command]
+fn import_fcc_grid_seed(
+    state: State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<FccSeedSummary, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fcc_grid::download_and_seed(&state.db, &app_data_dir(), |progress| {
+            let _ = app.emit("fcc-grid-progress", progress);
+        })
+    }))
+    .map_err(|_| {
+        "The US grid table download hit an unexpected error partway through and stopped; \
+         any stations already added are kept."
+            .to_string()
+    })
+    .and_then(|r| r.map_err(|e| e.to_string()))
+}
+
 #[tauri::command]
 fn get_config(state: State<AppState>, key: String) -> Option<String> {
     state.db.get_config(&key)
@@ -662,6 +699,8 @@ fn main() {
             save_qso,
             export_adif,
             import_adif,
+            callsign_qth_count,
+            import_fcc_grid_seed,
             get_config,
             set_config,
             all_config,

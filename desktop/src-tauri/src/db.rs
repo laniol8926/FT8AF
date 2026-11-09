@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// One logged QSO. Field names follow ADIF.
 ///
@@ -313,6 +313,21 @@ impl Db {
             conn.execute_batch(
                 "CREATE INDEX IF NOT EXISTS qso_log_lotw_twin_idx
                      ON qso_log(UPPER(call), qso_date, UPPER(band), UPPER(mode));",
+            )?;
+        }
+        if version < 7 {
+            // v7: callsign -> Maidenhead-grid cache for the (not yet built)
+            // Map screen, matching Android's `CallsignQTH` table exactly --
+            // just callsign/grid/updated_at, no extra columns. Populated from
+            // four sources (see `upsert_callsign_qth_live`/
+            // `upsert_callsign_qth_if_absent_locked`'s doc comments): live
+            // decodes, ADIF import, and a first-run FCC/Census bulk seed.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS callsign_qth (
+                    callsign   TEXT PRIMARY KEY,
+                    grid       TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );",
             )?;
         }
         conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
@@ -721,6 +736,13 @@ impl Db {
             match crate::adif::adif_record_to_qso(&rec.fields) {
                 None => summary.skipped += 1,
                 Some(qso) => {
+                    // Backfill the callsign/grid cache for the Map screen --
+                    // never overwrites a live-heard grid (see
+                    // `upsert_callsign_qth_if_absent_locked`'s doc comment),
+                    // and rides this same already-open transaction.
+                    if !qso.gridsquare.is_empty() {
+                        Self::upsert_callsign_qth_if_absent_locked(&conn, &qso.call, &qso.gridsquare);
+                    }
                     let existing = Self::find_duplicate_locked(
                         &conn, &qso.call, &qso.qso_date, &qso.time_on,
                     )
@@ -854,6 +876,121 @@ impl Db {
         }
         out
     }
+
+    // --- callsign/grid cache (`callsign_qth`, schema v7) ---------------------
+    //
+    // Four write paths, two priority tiers, matching Android's
+    // `CallsignQTH`/`addCallsignQTH`/`fillCallsignQTHFromLog`:
+    //   - Live decode (`engine.rs::publish_decodes`) is the most authoritative
+    //     source -- directly heard over the air just now -- so it always wins
+    //     (`upsert_callsign_qth_live`, `INSERT OR REPLACE`).
+    //   - ADIF import and the FCC/Census first-run seed are both best-effort
+    //     backfill for gaps only: neither may clobber a live-heard grid
+    //     (`upsert_callsign_qth_if_absent_locked`, `INSERT OR IGNORE`).
+    // Every write normalizes to uppercase grid4 (first 4 chars), matching the
+    // `LENGTH(gridsquare) >= 4` / `UPPER(...)` convention used elsewhere in
+    // this file (e.g. the ADIF export/dedup queries) -- a caller passing a
+    // 6-char subsquare or stray whitespace still lands correctly.
+
+    /// Record a station's grid from a live decode. Always overwrites any
+    /// existing entry for that callsign -- see the section doc comment above.
+    /// No-ops if `grid` isn't at least a 4-char locator.
+    pub fn upsert_callsign_qth_live(&self, call: &str, grid: &str) {
+        let Some(grid4) = normalize_grid4(grid) else { return };
+        let _ = self.conn.lock().execute(
+            "INSERT OR REPLACE INTO callsign_qth (callsign, grid, updated_at) VALUES (?1, ?2, ?3)",
+            params![call.trim().to_ascii_uppercase(), grid4, crate::util::now_unix_ms()],
+        );
+    }
+
+    /// Backfill a callsign's grid if it has none yet (ADIF import, FCC/Census
+    /// seed). Never overwrites an existing row -- see the section doc comment
+    /// above. Takes an already-locked connection so bulk callers (the ADIF
+    /// import loop, the FCC seed's own transaction) can batch many of these
+    /// under one transaction without re-locking the non-reentrant mutex.
+    /// No-ops (returning `false`) if `grid` isn't at least a 4-char locator.
+    /// Returns whether a row was actually inserted (`false` for a no-op grid
+    /// or an already-present callsign, matching `INSERT OR IGNORE`).
+    fn upsert_callsign_qth_if_absent_locked(conn: &Connection, call: &str, grid: &str) -> bool {
+        let Some(grid4) = normalize_grid4(grid) else { return false };
+        conn.execute(
+            "INSERT OR IGNORE INTO callsign_qth (callsign, grid, updated_at) VALUES (?1, ?2, ?3)",
+            params![call.trim().to_ascii_uppercase(), grid4, crate::util::now_unix_ms()],
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
+    /// Batch-seed `callsign_qth` from an iterator of (callsign, grid) pairs
+    /// -- the FCC/Census first-run import (`fcc_grid.rs`). One transaction
+    /// for the whole batch (same batching rationale as
+    /// `import_adif_with_progress`'s doc comment: a few hundred thousand
+    /// individually-committed inserts would be a multi-minute per-row-fsync
+    /// operation), never overwriting an existing row. Returns the number of
+    /// rows actually inserted.
+    ///
+    /// `on_progress(processed, total, last_call)` fires every 500 items (with
+    /// the callsign just processed, for a "Processing Callsign: W1AW" style
+    /// readout) and once more, unconditionally, when the iterator is
+    /// exhausted (clamped to `total`, `last_call` empty), so a caller always
+    /// sees a definitive "done" tick even if fewer items were actually
+    /// yielded than `total` predicted (e.g. some active licenses' ZIPs don't
+    /// resolve in the Gazetteer).
+    pub fn seed_callsign_qth_batch(
+        &self,
+        entries: impl Iterator<Item = (String, String)>,
+        total: i64,
+        mut on_progress: impl FnMut(i64, i64, &str),
+    ) -> i64 {
+        let conn = self.conn.lock();
+        let _ = conn.execute_batch("BEGIN");
+        let mut seeded = 0i64;
+        let mut processed = 0i64;
+        for (call, grid) in entries {
+            if Self::upsert_callsign_qth_if_absent_locked(&conn, &call, &grid) {
+                seeded += 1;
+            }
+            processed += 1;
+            if processed % 500 == 0 {
+                on_progress(processed.min(total), total, &call);
+            }
+        }
+        let _ = conn.execute_batch("COMMIT");
+        on_progress(total, total, "");
+        seeded
+    }
+
+    /// Total rows in `callsign_qth` -- drives the frontend's first-run check
+    /// (an empty table means the FCC/Census seed hasn't run yet).
+    pub fn callsign_qth_count(&self) -> i64 {
+        self.conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM callsign_qth", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// The cached grid for a callsign, if any -- for the (not yet built) Map
+    /// screen.
+    pub fn qth_for_call(&self, call: &str) -> Option<String> {
+        self.conn
+            .lock()
+            .query_row(
+                "SELECT grid FROM callsign_qth WHERE callsign = ?1",
+                params![call.trim().to_ascii_uppercase()],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+}
+
+/// Normalize a candidate grid locator to an uppercase grid4, or `None` if
+/// it's too short to be one. Shared by every `callsign_qth` write path.
+fn normalize_grid4(grid: &str) -> Option<String> {
+    let g = grid.trim();
+    if g.len() < 4 {
+        return None;
+    }
+    Some(crate::util::grid4(&g.to_ascii_uppercase()))
 }
 
 fn row_to_qso(r: &rusqlite::Row) -> rusqlite::Result<QsoRecord> {
@@ -2351,6 +2488,124 @@ mod tests {
         });
         assert_eq!(summary.imported, 450);
         assert_eq!(calls, vec![(200, 450), (400, 450), (450, 450)]);
+    }
+
+    #[test]
+    fn import_adif_with_progress_backfills_callsign_qth_from_gridsquare() {
+        let db = Db::open_in_memory().unwrap();
+        let adif = "<call:5>K1ABC <mode:3>FT8 <qso_date:8>20260604 \
+                     <time_on:6>120000 <gridsquare:4>FN42 <eor>";
+        db.import_adif_with_progress(adif, |_, _| {});
+        assert_eq!(db.qth_for_call("K1ABC"), Some("FN42".to_string()));
+    }
+
+    #[test]
+    fn import_adif_with_progress_never_overwrites_a_live_heard_grid() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_callsign_qth_live("K1ABC", "EN37");
+        let adif = "<call:5>K1ABC <mode:3>FT8 <qso_date:8>20260604 \
+                     <time_on:6>120000 <gridsquare:4>FN42 <eor>";
+        db.import_adif_with_progress(adif, |_, _| {});
+        assert_eq!(
+            db.qth_for_call("K1ABC"),
+            Some("EN37".to_string()),
+            "ADIF backfill must never clobber a live-heard grid"
+        );
+    }
+
+    #[test]
+    fn migrates_v6_log_in_place_and_adds_callsign_qth() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE qso_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call TEXT NOT NULL, gridsquare TEXT, mode TEXT, rst_sent TEXT,
+                rst_rcvd TEXT, qso_date TEXT, time_on TEXT, qso_date_off TEXT,
+                time_off TEXT, band TEXT, freq TEXT, station_callsign TEXT,
+                my_gridsquare TEXT, comment TEXT, created_at INTEGER,
+                qsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                synced_cloudlog INTEGER NOT NULL DEFAULT 0,
+                synced_qrz INTEGER NOT NULL DEFAULT 0,
+                qsl_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_rcvd INTEGER NOT NULL DEFAULT 0,
+                eqsl_sent INTEGER NOT NULL DEFAULT 0,
+                eqsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                qrz_qsl INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT ''
+            );
+            INSERT INTO qso_log(call, mode, qso_date, time_on)
+                VALUES('K1ABC', 'FT8', '20260604', '120000');
+            PRAGMA user_version = 6;
+            "#,
+        )
+        .unwrap();
+        let db = Db::from_conn(conn).unwrap();
+        assert_eq!(db.count(), 1, "existing rows must survive the migration");
+        assert_eq!(db.callsign_qth_count(), 0);
+        db.upsert_callsign_qth_live("K1ABC", "FN42");
+        assert_eq!(db.callsign_qth_count(), 1);
+    }
+
+    #[test]
+    fn upsert_callsign_qth_live_always_replaces() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_callsign_qth_live("K1ABC", "FN42");
+        db.upsert_callsign_qth_live("K1ABC", "EN37");
+        assert_eq!(db.qth_for_call("K1ABC"), Some("EN37".to_string()));
+    }
+
+    #[test]
+    fn upsert_callsign_qth_live_ignores_a_too_short_grid() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_callsign_qth_live("K1ABC", "FN4");
+        assert_eq!(db.qth_for_call("K1ABC"), None);
+    }
+
+    #[test]
+    fn upsert_callsign_qth_live_normalizes_case_and_truncates_to_grid4() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_callsign_qth_live("k1abc", "fn42aa");
+        assert_eq!(db.qth_for_call("K1ABC"), Some("FN42".to_string()));
+    }
+
+    #[test]
+    fn seed_callsign_qth_batch_never_overwrites_a_live_heard_row() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_callsign_qth_live("K1ABC", "EN37");
+        let seeded = db.seed_callsign_qth_batch(
+            vec![("K1ABC".to_string(), "FN42".to_string())].into_iter(),
+            1,
+            |_, _, _| {},
+        );
+        assert_eq!(seeded, 0, "the FCC seed must not count a no-op as seeded");
+        assert_eq!(db.qth_for_call("K1ABC"), Some("EN37".to_string()));
+    }
+
+    #[test]
+    fn seed_callsign_qth_batch_fills_gaps_and_reports_progress() {
+        let db = Db::open_in_memory().unwrap();
+        let entries: Vec<(String, String)> =
+            (0..1200).map(|i| (format!("K{i}"), "FN42".to_string())).collect();
+        let mut ticks = Vec::new();
+        let seeded = db.seed_callsign_qth_batch(entries.into_iter(), 1200, |p, t, call| {
+            ticks.push((p, t, call.to_string()))
+        });
+        assert_eq!(seeded, 1200);
+        assert_eq!(db.callsign_qth_count(), 1200);
+        // Every 500 plus a final unconditional (total, total, "") tick, each
+        // carrying the callsign just processed (for "Processing Callsign:
+        // W1AW" style UI) -- K499/K999 are the 500th/1000th entries (0-indexed).
+        assert_eq!(
+            ticks,
+            vec![
+                (500, 1200, "K499".to_string()),
+                (1000, 1200, "K999".to_string()),
+                (1200, 1200, String::new()),
+            ]
+        );
     }
 
     #[test]

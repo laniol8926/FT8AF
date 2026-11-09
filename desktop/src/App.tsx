@@ -3,12 +3,15 @@ import {
   api,
   onEngineEvent,
   onImportProgress,
+  onFccGridProgress,
   type AudioDevice,
   type BandInfo,
   type ClockSyncEvent,
   type CustomBand,
   type CycleTick,
   type EngineEvent,
+  type FccSeedProgress,
+  type FccSeedSummary,
   type HamlibRig,
   type ImportProgress,
   type ImportSummary,
@@ -312,6 +315,29 @@ export default function App() {
   // reason refreshWorkedCalls re-fetches on dialHz.
   useEffect(refreshWorkedStates, [dialHz]);
 
+  // First-run callsign/grid table seed (Map screen prerequisite, fcc_grid.rs).
+  // `fccSeedProgress` null = not running; non-null drives the dialog, which
+  // auto-starts (no button) the moment the mount effect below finds the
+  // table empty -- see that effect's comment for why.
+  const [fccSeedProgress, setFccSeedProgress] = useState<FccSeedProgress | null>(null);
+  const [fccSeedSummary, setFccSeedSummary] = useState<FccSeedSummary | null>(null);
+  const [fccSeedError, setFccSeedError] = useState<string | null>(null);
+
+  async function startFccGridSeed() {
+    setFccSeedSummary(null);
+    setFccSeedError(null);
+    setFccSeedProgress({ phase: "downloading", processed: 0, total: 0, current_callsign: "" });
+    const unlisten = await onFccGridProgress(setFccSeedProgress);
+    try {
+      setFccSeedSummary(await api.importFccGridSeed());
+    } catch (err) {
+      setFccSeedError(String(err));
+    } finally {
+      unlisten();
+      setFccSeedProgress(null);
+    }
+  }
+
   // keep latest decoding flag for the toggle without stale closure
   const decodingRef = useRef(decoding);
   decodingRef.current = decoding;
@@ -455,6 +481,15 @@ export default function App() {
       setHuntMinSnr(Number.isNaN(n) ? null : n);
     });
     maybeAutoStartDecode();
+    // First-run grid-table seed: an empty callsign_qth table means this
+    // install has never run the FCC/Census import (a fresh install, or an
+    // upgrade from before this feature existed) -- auto-start it with no
+    // button, matching the "if the table is empty... display a popup"
+    // request directly, the same unprompted-auto-trigger shape as the
+    // existing rig/band/gain hydration calls right above this one.
+    api.callsignQthCount().then((n) => {
+      if (n === 0) startFccGridSeed();
+    });
     return () => {
       cancelled = true;
       unlisten?.();
@@ -677,6 +712,13 @@ export default function App() {
 
   return (
     <>
+      {fccSeedProgress && <FccGridSeedDialog progress={fccSeedProgress} />}
+      {fccSeedSummary && (
+        <FccGridSeedCompleteDialog summary={fccSeedSummary} onDone={() => setFccSeedSummary(null)} />
+      )}
+      {fccSeedError && (
+        <FccGridSeedErrorDialog message={fccSeedError} onDone={() => setFccSeedError(null)} />
+      )}
       <TopBar
         cycle={cycle}
         bands={bands}
@@ -2270,6 +2312,65 @@ function ImportErrorDialog(props: { message: string; onDone: () => void }) {
     <div className="modal-overlay">
       <div className="modal import-dialog">
         <h3>Import failed</h3>
+        <div className="import-summary error">{props.message}</div>
+        <button className="primary import-done" onClick={props.onDone}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+// First-run callsign/grid table seed (fcc_grid.rs), same structural shape as
+// ImportProgressDialog/ImportCompleteDialog/ImportErrorDialog above -- reuses
+// the same .import-dialog/.bar/.count/.working classes. Two distinct phases:
+// "downloading" (byte progress; true per-record counting isn't possible
+// while the file is still a compressed blob in flight) and "processing"
+// (the FCC->Gazetteer cross-reference + DB insert, where the real total
+// record count is known and each tick names the callsign just processed).
+function FccGridSeedDialog(props: { progress: FccSeedProgress }) {
+  const { phase, processed, total, current_callsign } = props.progress;
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  const mb = (bytes: number) => (bytes / 1_000_000).toFixed(1);
+  return (
+    <div className="modal-overlay">
+      <div className="modal import-dialog">
+        <h3>Creating US Grid Table</h3>
+        <div className="bar">
+          <div style={{ width: `${pct}%` }} />
+        </div>
+        <div className="count">
+          {phase === "downloading"
+            ? total > 0
+              ? `Downloading… ${mb(processed)} of ${mb(total)} MB`
+              : `Downloading… ${mb(processed)} MB`
+            : `Processing Callsign: ${current_callsign || "…"} (${processed.toLocaleString()} of ${total.toLocaleString()})`}
+        </div>
+        <div className="working">Working…</div>
+      </div>
+    </div>
+  );
+}
+
+function FccGridSeedCompleteDialog(props: { summary: FccSeedSummary; onDone: () => void }) {
+  const { summary, onDone } = props;
+  return (
+    <div className="modal-overlay">
+      <div className="modal import-dialog">
+        <h3>US Grid Table Ready</h3>
+        <div className="import-summary">
+          <div>Added: {summary.seeded.toLocaleString()} stations</div>
+          <div>Active US licenses found: {summary.active_licenses.toLocaleString()}</div>
+        </div>
+        <button className="primary import-done" onClick={onDone}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+function FccGridSeedErrorDialog(props: { message: string; onDone: () => void }) {
+  return (
+    <div className="modal-overlay">
+      <div className="modal import-dialog">
+        <h3>US grid table download failed</h3>
         <div className="import-summary error">{props.message}</div>
         <button className="primary import-done" onClick={props.onDone}>Done</button>
       </div>

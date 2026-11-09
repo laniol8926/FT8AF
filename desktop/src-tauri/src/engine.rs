@@ -1482,6 +1482,17 @@ impl Engine {
 
     fn publish_decodes(&self, decoded: &[DecodedMessage]) {
         let now = self.now();
+        // Callsign/grid cache for the (not yet built) Map screen: any decode
+        // that actually resolved a grid (m.grid is only non-empty when
+        // dsp/decoder.rs's looks_like_grid passed -- never a signal report,
+        // RRR, or 73) is worth recording, regardless of who it's addressed
+        // to. Live-heard data always wins over ADIF/FCC backfill, see
+        // Db::upsert_callsign_qth_live's doc comment.
+        for m in decoded {
+            if !m.grid.is_empty() {
+                self.db.upsert_callsign_qth_live(&m.call_from, &m.grid);
+            }
+        }
         let ui: Vec<UiMessage> = decoded
             .iter()
             .map(|m| {
@@ -2123,6 +2134,41 @@ mod tests {
 
         assert_eq!(engine.rx_offset_ms, 0);
         assert_eq!(db.get_config("rx_offset_ms").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn publish_decodes_records_a_real_grid_in_the_callsign_cache() {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+
+        engine.publish_decodes(&[DecodedMessage {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            ..Default::default()
+        }]);
+
+        assert_eq!(db.qth_for_call("K1ABC"), Some("FN42".to_string()));
+    }
+
+    #[test]
+    fn publish_decodes_ignores_messages_with_no_grid() {
+        // A signal-report/RRR/73 exchange never populates DecodedMessage.grid
+        // (dsp/decoder.rs's looks_like_grid gate) -- nothing to record.
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+
+        engine.publish_decodes(&[DecodedMessage {
+            call_from: "K1ABC".into(),
+            grid: "".into(),
+            extra: "RRR".into(),
+            ..Default::default()
+        }]);
+
+        assert_eq!(db.qth_for_call("K1ABC"), None);
     }
 
     #[test]

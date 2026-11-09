@@ -28,10 +28,15 @@ ringbuf = "0.4"
 rustfft = "6"
 # serial CAT control
 serialport = "4"
-# HTTP client for FLrig XML-RPC (localhost only — TLS disabled)
-ureq = { version = "2", default-features = false }
+# HTTP client: FLrig XML-RPC (localhost, plain HTTP) and the FCC/Census
+# bulk-grid-import download (data.fcc.gov, HTTPS) -- `tls` pulls in rustls
+# (pure Rust, no system OpenSSL dependency, which matters on the ARM SBC
+# this app also targets) rather than native-tls.
+ureq = { version = "2", default-features = false, features = ["tls"] }
 # dynamic loading of the Hamlib shared library (hamlib-4.dll / libhamlib)
 libloading = "0.8"
+# in-memory unzip for the FCC amateur-license bulk download (l_amat.zip)
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # persistence (bundled SQLite — no system dependency)
 rusqlite = { version = "0.32", features = ["bundled"] }
 # async runtime for the UTC scheduler

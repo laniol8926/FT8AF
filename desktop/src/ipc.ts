@@ -149,6 +149,30 @@ export function onImportProgress(cb: (p: ImportProgress) => void): Promise<Unlis
   return listen<ImportProgress>("import-progress", (ev) => cb(ev.payload));
 }
 
+/** First-run FCC/Census grid-table seed: see Rust `fcc_grid.rs`'s module doc
+ *  comment. "downloading" is the ~200MB FCC amateur-license zip (`total` is
+ *  bytes, from Content-Length); "processing" is the per-record FCC→Gazetteer
+ *  cross-reference + DB insert (`total` is the active-license count). */
+export type FccSeedPhase = "downloading" | "processing";
+
+export interface FccSeedProgress {
+  phase: FccSeedPhase;
+  processed: number;
+  total: number;
+  /** The callsign just processed -- empty during "downloading" and on the
+   *  final completion tick. */
+  current_callsign: string;
+}
+
+export interface FccSeedSummary {
+  seeded: number;
+  active_licenses: number;
+}
+
+export function onFccGridProgress(cb: (p: FccSeedProgress) => void): Promise<UnlistenFn> {
+  return listen<FccSeedProgress>("fcc-grid-progress", (ev) => cb(ev.payload));
+}
+
 export interface AudioDevice {
   id: string;
   name: string;
@@ -318,6 +342,13 @@ export const api = {
     invoke<string>("export_adif", { start: start ?? null, end: end ?? null }),
   /** Import ADIF text (already read client-side from the chosen file). */
   importAdif: (adif: string) => invoke<ImportSummary>("import_adif", { adif }),
+
+  /** Rows in the callsign/grid cache -- 0 means the FCC/Census seed hasn't run yet. */
+  callsignQthCount: () => invoke<number>("callsign_qth_count"),
+  /** Download + cross-reference the FCC/Census data, seeding the callsign/grid
+   *  cache. Long-running (~200MB download + ~1.7M-record scan) -- pair with
+   *  `onFccGridProgress` for a live counter. */
+  importFccGridSeed: () => invoke<FccSeedSummary>("import_fcc_grid_seed"),
 
   getConfig: (key: string) => invoke<string | null>("get_config", { key }),
   setConfig: (key: string, value: string) => invoke("set_config", { key, value }),
