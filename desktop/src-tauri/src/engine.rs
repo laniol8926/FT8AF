@@ -196,6 +196,77 @@ fn rms_dbfs(samples: &[f32]) -> f32 {
     (20.0 * (rms.max(1e-12)).log10()).max(-120.0) as f32
 }
 
+// RX input-level classification, ported from Android's AudioInputLevel.java
+// (issue #405 there): the waterfall strip's RX meter uses these exact
+// thresholds so the two apps' operators get the same gain-setting guidance.
+
+/// Peak at/above this linear magnitude counts as clipping (~ -0.13 dBFS) --
+/// matches `AudioInputLevel.CLIP_PEAK`.
+const CLIP_PEAK: f32 = 0.985;
+/// Peak dBFS at/above this is "hot" (clipping risk on transients) -- matches
+/// `AudioInputLevel.HIGH_PEAK_DBFS`.
+const HIGH_PEAK_DBFS: f32 = -3.0;
+/// RMS dBFS below this (but above `SILENCE_DBFS`) is too quiet for reliable
+/// weak-signal decode -- matches `AudioInputLevel.LOW_RMS_DBFS`.
+const LOW_RMS_DBFS: f32 = -45.0;
+
+/// Coarse RX input-level health, matching Android's `AudioInputLevel.Status`
+/// -- drives the waterfall strip's RX meter color and status word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputLevelStatus {
+    /// Essentially no input -- disconnected cable, wrong source, or muted radio.
+    Silent,
+    /// Audible but too quiet; weak signals will sit below the decode threshold.
+    Low,
+    /// In the healthy window -- what the operator should aim for.
+    Good,
+    /// Hot: peaks are close to full scale, raise nothing further.
+    High,
+    /// Peaks pinned at full scale; clipping distortion will block decodes.
+    Clipping,
+}
+
+/// Largest sample magnitude in a mono buffer, linear (0..~1). Companion to
+/// `rms_dbfs` -- together they feed `classify_input_level`.
+fn peak_linear(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()))
+}
+
+/// RMS magnitude of a mono buffer, linear (0..~1) -- the same computation
+/// `rms_dbfs` does internally, exposed separately for the meter bar's fill
+/// fraction (which wants the linear value, not dBFS).
+fn rms_linear(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum_sq / samples.len() as f64).sqrt() as f32
+}
+
+/// Linear magnitude (>=0) to dBFS, with the same -120 floor as `rms_dbfs`.
+fn to_dbfs(linear: f32) -> f32 {
+    (20.0 * linear.max(1e-12).log10()).max(-120.0)
+}
+
+/// Classify a peak/RMS reading into a coarse status -- matches
+/// `AudioInputLevel.classify` exactly: clipping is judged from the peak
+/// (a lone hot transient should flag red even if the RMS looks fine),
+/// "too quiet" from the RMS (tracks noise/signal energy, not a lone dip).
+fn classify_input_level(peak: f32, peak_dbfs: f32, rms_dbfs: f32) -> InputLevelStatus {
+    if peak >= CLIP_PEAK {
+        InputLevelStatus::Clipping
+    } else if peak_dbfs >= HIGH_PEAK_DBFS {
+        InputLevelStatus::High
+    } else if rms_dbfs < SILENCE_DBFS {
+        InputLevelStatus::Silent
+    } else if rms_dbfs < LOW_RMS_DBFS {
+        InputLevelStatus::Low
+    } else {
+        InputLevelStatus::Good
+    }
+}
+
 /// True once per cycle, on the first waterfall row at/after a UTC slot boundary
 /// (15 s FT8, 7.5 s FT4 -- `cycle_ms`, the caller's current mode's
 /// `Mode::cycle_ms()`), advancing `last_slot`. The decoder and waterfall use
@@ -408,9 +479,18 @@ pub enum EngineEvent {
 pub struct InputLevelEvent {
     /// RMS level of the recent capture in dBFS (≈ -100 for digital silence).
     pub db: f32,
-    /// True when the level is at/below the silence floor while decoding — the
-    /// "no audio reaching the app" condition.
-    pub silent: bool,
+    /// Peak sample magnitude of the recent capture, linear (0..~1) -- feeds
+    /// the RX meter's peak tick and percent readout, matching Android's
+    /// `InputLevelIndicator` (`peak`/`inputLevelPercent`).
+    pub peak: f32,
+    /// RMS sample magnitude, linear (0..~1) -- feeds the RX meter's bar fill
+    /// (Android's `rms`/`inputLevelFraction`).
+    pub rms: f32,
+    /// Coarse health classification (matches Android's `AudioInputLevel.Status`)
+    /// -- drives the meter's color and status word ("Low"/"Good"/"High"/"Clip").
+    /// `Silent` is also the "no audio reaching the app" condition the old
+    /// `silent: bool` field used to flag on its own.
+    pub status: InputLevelStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -822,10 +902,11 @@ impl Engine {
                 if self.decoding {
                     let recent = self.accum.peek_recent(SAMPLE_RATE as usize / 2); // ~0.5 s
                     let db = rms_dbfs(&recent);
-                    self.emit(EngineEvent::InputLevel(InputLevelEvent {
-                        db,
-                        silent: db <= SILENCE_DBFS,
-                    }));
+                    let peak = peak_linear(&recent);
+                    let rms = rms_linear(&recent);
+                    let peak_dbfs = to_dbfs(peak);
+                    let status = classify_input_level(peak, peak_dbfs, db);
+                    self.emit(EngineEvent::InputLevel(InputLevelEvent { db, peak, rms, status }));
                 }
 
                 // QMX SWR/power meters, read over CAT -- ported from Android's
@@ -1782,8 +1863,9 @@ impl Engine {
 mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, should_refresh_ptt,
-        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, DEFAULT_RX_GAIN,
-        DEFAULT_TX_GAIN, MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
+        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, CLIP_PEAK, DEFAULT_RX_GAIN,
+        DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ,
+        PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::db::Db;
     use crate::dsp::DecodedMessage;
@@ -1834,6 +1916,17 @@ mod tests {
         let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
         let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
         let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+        // Pin the clock mid-cycle, safely past tx_latest_ms: StartCq calls
+        // maybe_transmit immediately, and without this the test is flaky --
+        // whenever the real wall clock happens to land inside the TX window
+        // (~15% of the time for FT8's 2260ms/15000ms), tx_parity locks to
+        // the real current slot's parity instead of staying None, failing
+        // the assertions below. This test is about tx_parity's *initial*
+        // value from the preference, not about whether a real transmission
+        // window is open right now.
+        let cycle_ms = engine.mode.cycle_ms();
+        let into_cycle = crate::util::now_unix_ms().rem_euclid(cycle_ms);
+        engine.clock_offset_ms = cycle_ms / 2 - into_cycle;
 
         // No preference set: CQ starts free to key in any slot's parity (the
         // existing default behavior), locking only once it actually transmits.
@@ -1952,6 +2045,46 @@ mod tests {
         let db_signal = rms_dbfs(&signal);
         assert!((db_signal - -6.02).abs() < 0.1, "0.5 RMS should be ~-6 dBFS, got {db_signal}");
         assert!(db_signal > SILENCE_DBFS);
+    }
+
+    #[test]
+    fn peak_and_rms_linear_match_known_buffers() {
+        use super::{peak_linear, rms_linear};
+        // A buffer with one hot sample: peak catches it, RMS is pulled down
+        // by the mostly-quiet rest -- the two must disagree here, which is
+        // exactly why classify_input_level checks them separately.
+        let mut mixed = vec![0.1f32; 100];
+        mixed[50] = 0.9;
+        assert!((peak_linear(&mixed) - 0.9).abs() < 1e-6);
+        assert!(rms_linear(&mixed) < 0.2, "RMS should stay low despite one hot sample");
+
+        assert_eq!(peak_linear(&[]), 0.0);
+        assert_eq!(rms_linear(&[]), 0.0);
+
+        // Sign doesn't matter -- both measure magnitude.
+        assert!((peak_linear(&[-0.7, 0.3]) - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn classify_input_level_matches_androids_priority_order() {
+        use super::{classify_input_level, to_dbfs, InputLevelStatus};
+        // Silent: strictly below the silence floor -- matches Android's own
+        // strict `<` (AudioInputLevel.classify), so exactly AT the floor
+        // already falls through to Low in both apps, not Silent.
+        assert_eq!(classify_input_level(0.0, to_dbfs(0.0), SILENCE_DBFS), InputLevelStatus::Low);
+        assert_eq!(classify_input_level(0.0, to_dbfs(0.0), SILENCE_DBFS - 1.0), InputLevelStatus::Silent);
+        // Low: above silence, below the low/good boundary.
+        assert_eq!(classify_input_level(0.05, to_dbfs(0.05), SILENCE_DBFS + 1.0), InputLevelStatus::Low);
+        // Good: comfortably in the healthy window.
+        assert_eq!(classify_input_level(0.2, to_dbfs(0.2), LOW_RMS_DBFS + 1.0), InputLevelStatus::Good);
+        // High: peak dBFS hits the hot threshold even though RMS alone would read Good.
+        assert_eq!(
+            classify_input_level(0.9, HIGH_PEAK_DBFS, LOW_RMS_DBFS + 1.0),
+            InputLevelStatus::High,
+        );
+        // Clipping takes priority over everything else once the peak pins near full scale,
+        // even with a quiet/silent RMS (a single hot transient in an otherwise-dead buffer).
+        assert_eq!(classify_input_level(CLIP_PEAK, 0.0, SILENCE_DBFS - 10.0), InputLevelStatus::Clipping);
     }
 
     #[test]

@@ -128,16 +128,11 @@ select option {
 .topbar-row .spacer { flex: 1; }
 .topbar-clock { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
 
-/* Band/mode title + chevron, with the real <select> invisibly stacked on top
-   so clicking the styled label opens a working native dropdown without a
-   hand-built listbox. */
-.band-picker { position: relative; display: flex; align-items: center; gap: 4px; }
+/* Band/mode title + chevron -- clicking it (BandModePicker's own onClick,
+   see .band-mode-picker below) opens the BandModeSheet. */
+.band-picker { display: flex; align-items: center; gap: 4px; }
 .band-picker-label { font-size: 20px; font-weight: 700; color: var(--text); white-space: nowrap; }
 .band-picker .chevron { color: var(--muted); font-size: 14px; }
-.band-picker-select {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  opacity: 0; cursor: pointer; padding: 0; border: none;
-}
 
 /* Generic pill button, matching Android's StatusPill/chip shape: fully
    rounded, dark fill, used for Hunt/Radio/TUNE/slot-parity. */
@@ -307,6 +302,28 @@ select option {
 .wf-status-live { color: var(--ok); font-weight: 700; letter-spacing: 0.5px; }
 .wf-status-live.off { color: var(--text-faint); }
 
+/* Width/NR/MSG toggle chips, matching Android's ToggleChip in the waterfall
+   bottom strip. */
+.wf-toggle-chip {
+  padding: 2px 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  border-radius: var(--radius-sm); background: var(--panel-2); color: var(--muted);
+}
+.wf-toggle-chip.active { background: var(--accent-soft); color: var(--accent); border-color: var(--border-amber); }
+
+/* RX input-level meter, matching Android's InputLevelIndicator.kt: RX label,
+   a small RMS-filled bar with a peak tick, a percent readout, and a
+   color-coded status word. */
+.input-level-indicator { display: flex; align-items: center; gap: 4px; }
+.input-level-label { font-weight: 700; letter-spacing: 0.06em; color: var(--muted); }
+.input-level-bar {
+  position: relative; width: 44px; height: 6px; border-radius: 3px;
+  background: var(--panel-2); overflow: hidden;
+}
+.input-level-bar-fill { position: absolute; inset: 0 auto 0 0; height: 100%; }
+.input-level-bar-peak { position: absolute; top: 0; bottom: 0; width: 1px; }
+.input-level-percent { color: var(--muted); font-variant-numeric: tabular-nums; }
+.input-level-status { font-weight: 700; letter-spacing: 0.06em; }
+
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 12px; }
 .panel h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 
@@ -315,11 +332,10 @@ select option {
 .txbar { display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; background: var(--panel-2); border-top: 1px solid var(--border); }
 .txbar-row { display: flex; align-items: center; gap: 12px; }
 
-/* Shared Band & Mode picker (BandModePicker): the band-select + mode-toggle
-   row, in both its "title" (bare, big label -- TopBar) and "card" (bordered,
-   labeled -- the More panel's BandModeRow) layouts. */
-.band-mode-picker { display: flex; flex-direction: column; gap: 6px; }
-.band-mode-picker-row { display: flex; align-items: center; gap: 10px; }
+/* Shared Band & Mode picker (BandModePicker): the clickable label+chevron
+   that opens BandModeSheet, in both its "title" (bare, big label -- TopBar)
+   and "card" (bordered, labeled -- the More panel's BandModeRow) layouts. */
+.band-mode-picker { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
 .band-mode-picker-card {
   flex: 1; background: var(--panel); border: 1px solid var(--border);
   border-radius: var(--radius-md); padding: 8px 12px;
@@ -327,12 +343,37 @@ select option {
 .band-picker-row-label { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; color: var(--text-faint); }
 .band-mode-picker-card .band-picker-label { font-size: 14px; }
 
-/* Mode toggle (FT8/FT4), a true sibling of .band-picker so its own <select>
-   overlay can't swallow clicks here -- see BandModePicker's comment. */
-.mode-toggle { display: flex; gap: 4px; background: var(--panel-2); border-radius: var(--radius-sm); padding: 3px; flex: none; }
-.band-mode-picker-card .mode-toggle { background: var(--panel-2); }
-.mode-toggle-btn { padding: 4px 10px; font-size: 12px; font-weight: 700; }
-.mode-toggle-btn.active { background: var(--accent); color: #1a1200; border-color: var(--accent); }
+/* Band & Mode sheet (BandModeSheet), matching Android's BandModeSheet.kt:
+   a 3-way mode-toggle tile row (name + cycle time) over a scrollable band
+   list, each row with a trailing checkmark on the current selection. */
+.band-mode-sheet { width: 480px; max-height: 80vh; }
+.mode-tile-row {
+  display: flex; gap: 4px; background: var(--panel-2); border-radius: var(--radius-md);
+  padding: 4px; margin-bottom: 12px;
+}
+.mode-tile {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 4px; border-radius: var(--radius-sm); background: transparent; border: none;
+}
+.mode-tile.active { background: var(--accent-soft); }
+.mode-tile-name { font-size: 14px; font-weight: 700; color: var(--text); }
+.mode-tile.active .mode-tile-name { color: var(--accent); }
+.mode-tile-cycle { font-size: 11px; color: var(--muted); }
+.mode-tile.active .mode-tile-cycle { color: var(--accent); opacity: 0.85; }
+.mode-tile:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.band-sheet-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 50vh; }
+.band-sheet-row {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border-radius: var(--radius-md); background: var(--panel-2); border: 1px solid transparent;
+  cursor: pointer;
+}
+.band-sheet-row:hover { background: var(--panel); }
+.band-sheet-row.active { background: var(--accent-soft); border-color: var(--border-amber); }
+.band-sheet-name { font-weight: 700; color: var(--muted); width: 40px; flex: none; }
+.band-sheet-row.active .band-sheet-name { color: var(--accent); }
+.band-sheet-freq { color: var(--text); font-variant-numeric: tabular-nums; flex: 1; }
+.band-sheet-check { color: var(--accent); font-weight: 700; }
 
 /* TX-period (Even/Odd) picker, matching Android's TxPeriodControl/
    PeriodTuneDxRow (TxStrip.kt): a labeled segmented control, AUTO/1st/2nd. */

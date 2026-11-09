@@ -36,6 +36,20 @@ export type TxStage =
 /** Operating mode -- matches `crate::mode::Mode`'s `#[serde(rename_all = "lowercase")]`. */
 export type OperatingMode = "ft8" | "ft4";
 
+/** RX input-level health -- matches `crate::engine::InputLevelStatus` and
+ *  Android's `AudioInputLevel.Status`. */
+export type InputLevelStatus = "silent" | "low" | "good" | "high" | "clipping";
+
+export interface InputLevelEvent {
+  /** RMS level of the recent capture in dBFS (≈ -100 for digital silence). */
+  db: number;
+  /** Peak sample magnitude, linear (0..~1) -- feeds the meter's peak tick and percent readout. */
+  peak: number;
+  /** RMS sample magnitude, linear (0..~1) -- feeds the meter's bar fill. */
+  rms: number;
+  status: InputLevelStatus;
+}
+
 export interface QsoStatus {
   active: boolean;
   stage: TxStage;
@@ -206,7 +220,7 @@ export type EngineEvent =
   | { type: "qso_completed"; data: QsoRecord }
   | { type: "waterfall"; data: { bins: number[]; rows: number; cols: number; hz_per_col: number } }
   | { type: "waterfall_row"; data: { bins: number[]; hz_per_col: number; boundary: boolean } }
-  | { type: "input_level"; data: { db: number; silent: boolean } }
+  | { type: "input_level"; data: InputLevelEvent }
   /** SWR/output-power readings polled over CAT while transmitting (QMX only
    *  -- see rig.rs's supports_meter_query). Either field is null when that
    *  particular query didn't return a valid reading. */

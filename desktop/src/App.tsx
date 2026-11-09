@@ -12,6 +12,7 @@ import {
   type HamlibRig,
   type ImportProgress,
   type ImportSummary,
+  type InputLevelEvent,
   type OperatingMode,
   type QsoRecord,
   type RigConfig,
@@ -184,7 +185,7 @@ export default function App() {
   const [rig, setRig] = useState<RigStatusEvent | null>(null);
   const [clock, setClock] = useState<ClockSyncEvent | null>(null);
   const [decoding, setDecoding] = useState(false);
-  const [audio, setAudio] = useState<{ db: number; silent: boolean } | null>(null);
+  const [audio, setAudio] = useState<InputLevelEvent | null>(null);
   const [status, setStatus] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   // Decode list sort/collapse mode (Time/Call/SNR/DX), matching Android's
@@ -798,14 +799,24 @@ const MODE_LABEL: Record<OperatingMode, string> = { ft8: "FT8", ft4: "FT4" };
 // itself needs no separate fix -- its rows are pushed by the backend's own
 // per-mode wf_boundary_row cadence, not computed from a cycle length here.
 const MODE_CYCLE_MS: Record<OperatingMode, number> = { ft8: 15_000, ft4: 7_500 };
+// Cycle-time subtext shown on each mode tile in BandModeSheet, matching
+// Android's BandModeSheet.kt (formatSlotSeconds: 15000->"15s", 7500->"7.5s",
+// 3750->"3.75s"). Includes FT2 even though it isn't selectable here.
+const MODE_CYCLE_LABEL: Record<"ft8" | "ft4" | "ft2", string> = {
+  ft8: "15s", ft4: "7.5s", ft2: "3.75s",
+};
 
 // Shared Band & Mode control, used identically by TopBar's title (the
 // upper-left picker) and the More panel's Band & Mode card -- matching
-// Android, which reuses one bandModeLabel/mode-toggle construction in both
-// the title row and the TxStrip/drawer rows rather than keeping two
-// independently-built pickers that could drift apart. `variant` only
-// changes layout/sizing (a big borderless title vs. a bordered labeled
-// card); the band-select and mode-toggle logic underneath is identical.
+// Android, which reuses one bandModeLabel construction in both the title
+// row and the TxStrip/drawer rows rather than keeping two independently-
+// built pickers that could drift apart. `variant` only changes layout/sizing
+// (a big borderless title vs. a bordered labeled card); both open the same
+// BandModeSheet. Matches Android's actual BandModeSheet.kt design (a bottom
+// sheet: a 3-way mode toggle with cycle times, over a band list with a
+// checkmark on the current selection) rather than inline toggle buttons --
+// mode selection lives in this one sheet, not as separate buttons next to
+// the label.
 function BandModePicker(props: {
   variant: "title" | "card";
   bands: BandInfo[];
@@ -815,45 +826,94 @@ function BandModePicker(props: {
   onMode: (m: OperatingMode) => void;
 }) {
   const { variant, bands, dialHz, onBand, mode, onMode } = props;
+  const [open, setOpen] = useState(false);
   const band = bands.find((b) => b.dial_hz === dialHz);
   const card = variant === "card";
   return (
-    <div className={"band-mode-picker" + (card ? " band-mode-picker-card" : "")}>
-      {card && <span className="band-picker-row-label">BAND & MODE</span>}
-      <div className="band-mode-picker-row">
+    <>
+      <div
+        className={"band-mode-picker" + (card ? " band-mode-picker-card" : "")}
+        onClick={() => setOpen(true)}
+        role="button"
+        tabIndex={0}
+      >
+        {card && <span className="band-picker-row-label">BAND & MODE</span>}
         <div className="band-picker">
           <span className="band-picker-label">
             {card ? `${(dialHz / 1e6).toFixed(3)} MHz · ` : ""}
             {band ? band.name : "--"} · {MODE_LABEL[mode]}
           </span>
           <span className="chevron">⌄</span>
-          <select
-            className="band-picker-select"
-            aria-label="Band"
-            value={dialHz}
-            onChange={(e) => onBand(parseInt(e.target.value, 10))}
-          >
-            {bands.map((b) => (
-              <option key={b.dial_hz} value={b.dial_hz}>
-                {b.custom ? "★ " : ""}{b.name} · {(b.dial_hz / 1e6).toFixed(3)}
-              </option>
-            ))}
-          </select>
         </div>
-        {/* A true sibling of .band-picker, not nested inside it: that div's
-            <select> is an inset:0 overlay over the whole label (the
-            whole-label-is-clickable trick), which would swallow clicks on
-            these buttons if they were inside it too. */}
-        <div className="mode-toggle">
-          {(["ft8", "ft4"] as const).map((m) => (
-            <button
-              key={m}
-              className={"mode-toggle-btn" + (mode === m ? " active" : "")}
-              onClick={() => onMode(m)}
-            >
-              {MODE_LABEL[m]}
-            </button>
-          ))}
+      </div>
+      {open && (
+        <BandModeSheet
+          bands={bands}
+          dialHz={dialHz}
+          onBand={(hz) => { onBand(hz); setOpen(false); }}
+          mode={mode}
+          onMode={onMode}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+// The "Band & mode" bottom sheet, matching Android's BandModeSheet.kt: a
+// 3-way mode toggle (FT8/FT4/FT2, each with its cycle time) over a band
+// list, each row showing name + dial frequency with a checkmark on the
+// current selection. FT2 is shown (not omitted -- Android lists it) but
+// disabled: desktop's FFI layer has no FT2 protocol binding at all (unlike
+// FT4, which the shared C ft8_lib already exported -- see mode.rs). Android's
+// band rows also carry a short descriptive subtitle ("Local, evenings",
+// "Daytime, worldwide") that desktop's BandInfo has no data for -- omitted
+// rather than inventing text that might not match Android's actual wording.
+function BandModeSheet(props: {
+  bands: BandInfo[];
+  dialHz: number;
+  onBand: (hz: number) => void;
+  mode: OperatingMode;
+  onMode: (m: OperatingMode) => void;
+  onClose: () => void;
+}) {
+  const { bands, dialHz, onBand, mode, onMode, onClose } = props;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal band-mode-sheet" onClick={(e) => e.stopPropagation()}>
+        <h3>Band &amp; Mode</h3>
+        <div className="mode-tile-row">
+          {(["ft8", "ft4", "ft2"] as const).map((m) => {
+            const isFt2 = m === "ft2";
+            return (
+              <button
+                key={m}
+                className={"mode-tile" + (mode === m ? " active" : "")}
+                disabled={isFt2}
+                title={isFt2 ? "FT2 isn't implemented yet -- no decode protocol binding on desktop" : undefined}
+                onClick={() => onMode(m as OperatingMode)}
+              >
+                <span className="mode-tile-name">{m.toUpperCase()}</span>
+                <span className="mode-tile-cycle">{MODE_CYCLE_LABEL[m]}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="band-sheet-list">
+          {bands.map((b) => {
+            const active = b.dial_hz === dialHz;
+            return (
+              <div
+                key={b.dial_hz}
+                className={"band-sheet-row" + (active ? " active" : "")}
+                onClick={() => onBand(b.dial_hz)}
+              >
+                <span className="band-sheet-name">{b.custom ? "★ " : ""}{b.name}</span>
+                <span className="band-sheet-freq">{(b.dial_hz / 1e6).toFixed(3)} MHz</span>
+                {active && <span className="band-sheet-check">✓</span>}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -1223,37 +1283,53 @@ function CqOptionsModal(props: {
   );
 }
 
-// RX input-level indicator. Shows the captured level in dBFS while decoding, and
-// a clear "no audio" warning when the input is silent — the case where the source
-// (e.g. a DAX/soundcard channel) isn't actually routed and the waterfall is blank.
-function AudioBadge({
+// Status word + color per InputLevelStatus, matching Android's
+// InputLevelIndicator.kt exactly (inputLevelStatusText/inputLevelColor):
+// SILENT reuses the "too low" wording (the actionable advice -- turn the
+// input up / check the cable -- is the same), the muted color is what
+// distinguishes a dead input from a merely-quiet one.
+const INPUT_LEVEL_META: Record<InputLevelEvent["status"], { label: string; color: string }> = {
+  silent: { label: "Low", color: "var(--muted)" },
+  low: { label: "Low", color: "#5cd6e8" }, // Android StatusWorked
+  good: { label: "Good", color: "var(--ok)" },
+  high: { label: "High", color: "var(--yellow)" },
+  clipping: { label: "Clip", color: "var(--tx)" },
+};
+
+// RX input-level meter: an RMS-filled bar with a peak tick, a percent
+// readout of the window peak, and a color-coded status word -- ported from
+// Android's InputLevelIndicator.kt (RX label / meter bar / "NN%" / status).
+function InputLevelIndicator({
   decoding,
   audio,
 }: {
   decoding: boolean;
-  audio: { db: number; silent: boolean } | null;
+  audio: InputLevelEvent | null;
 }) {
   if (!decoding) return null;
   if (!audio) {
-    return <span className="muted" title="Waiting for the first input-level reading">audio …</span>;
+    return <span className="muted" title="Waiting for the first input-level reading">RX …</span>;
   }
-  if (audio.silent) {
-    return (
-      <span
-        style={{ color: "var(--tx)", fontVariantNumeric: "tabular-nums" }}
-        title="No audio is reaching the app. Check that the selected input device is the right one and that its source is routed (e.g. SmartSDR slice → DAX RX channel, soundcard input not muted)."
-      >
-        ⚠ no audio
-      </span>
-    );
-  }
+  const meta = INPUT_LEVEL_META[audio.status];
+  const rmsFrac = Math.min(1, Math.max(0, audio.rms));
+  const peakFrac = Math.min(1, Math.max(0, audio.peak));
+  const peakPercent = Math.round(peakFrac * 100);
   return (
     <span
-      className="muted"
-      style={{ fontVariantNumeric: "tabular-nums" }}
-      title="RX input level (dBFS) of the captured audio"
+      className="input-level-indicator"
+      title={
+        audio.status === "silent"
+          ? "No audio is reaching the app. Check that the selected input device is the right one and that its source is routed (e.g. SmartSDR slice → DAX RX channel, soundcard input not muted)."
+          : `RX input level: ${audio.db.toFixed(0)} dBFS RMS, ${peakPercent}% peak`
+      }
     >
-      audio {audio.db.toFixed(0)} dB
+      <span className="input-level-label">RX</span>
+      <span className="input-level-bar">
+        <span className="input-level-bar-fill" style={{ width: `${rmsFrac * 100}%`, background: meta.color }} />
+        <span className="input-level-bar-peak" style={{ left: `${peakFrac * 100}%`, background: meta.color }} />
+      </span>
+      <span className="input-level-percent">{peakPercent}%</span>
+      <span className="input-level-status" style={{ color: meta.color }}>{meta.label}</span>
     </span>
   );
 }
@@ -1437,7 +1513,7 @@ function DecodeScreen(props: {
   onSelectFreq: (hz: number) => void;
   onAnswer: (m: UiMessage) => void;
   decoding: boolean;
-  audio: { db: number; silent: boolean } | null;
+  audio: InputLevelEvent | null;
 }) {
   const {
     messages, sortMode, myGrid, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids,
@@ -1586,11 +1662,20 @@ function DecodeScreen(props: {
   );
 }
 
-// Bottom info strip under the waterfall. Only shows data desktop actually
-// has (current TX/cursor frequency, live/idle state, the real RX input
-// level via AudioBadge) -- no Width/NR/MSG controls or a fabricated signal-
-// quality percentage, since desktop has no noise-reduction/bandwidth-filter
-// DSP or quality score to back them.
+// Bottom info strip under the waterfall, matching Android's WaterfallScreen.kt
+// bottom strip layout: Width/NR/MSG toggle chips, the RX input-level meter,
+// current TX/cursor frequency, and LIVE/IDLE status.
+//
+// All three chips are shown -- in the right place, in Android's order --
+// but disabled with an explanatory tooltip rather than silently omitted or
+// faked, same treatment as the More panel's DX button: Width needs the
+// waterfall's displayed Hz span to become a runtime config (today it's a
+// fixed WF_TOP_HZ/WF_MAX_HZ constant on both ends), NR needs a real
+// noise-reduction DSP stage desktop doesn't have, and MSG (labeling decoded
+// callsigns directly on the waterfall at their frequency) needs real canvas
+// work in drawWaterfallRow to place text per-decode, not just a toggle --
+// lower effort than NR since the backend already carries each decode's
+// freq_hz, but still its own pass, not something to bolt on here.
 function WaterfallStatusStrip({
   txFreq,
   decoding,
@@ -1598,11 +1683,32 @@ function WaterfallStatusStrip({
 }: {
   txFreq: number;
   decoding: boolean;
-  audio: { db: number; silent: boolean } | null;
+  audio: InputLevelEvent | null;
 }) {
   return (
     <div className="wf-status-strip">
-      <AudioBadge decoding={decoding} audio={audio} />
+      <button
+        className="wf-toggle-chip"
+        disabled
+        title="Spectrum width -- not yet adjustable on desktop (the displayed span is still a fixed 3500 Hz)"
+      >
+        Width
+      </button>
+      <button
+        className="wf-toggle-chip"
+        disabled
+        title="Noise reduction -- not yet implemented on desktop (no NR DSP stage)"
+      >
+        NR
+      </button>
+      <button
+        className="wf-toggle-chip"
+        disabled
+        title="Label decoded callsigns on the waterfall at their frequency -- not yet implemented on desktop"
+      >
+        MSG
+      </button>
+      <InputLevelIndicator decoding={decoding} audio={audio} />
       <div className="spacer" />
       <span className="wf-status-freq">{txFreq} Hz</span>
       <span className={"wf-status-live" + (decoding ? "" : " off")}>{decoding ? "LIVE" : "IDLE"}</span>

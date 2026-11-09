@@ -246,6 +246,12 @@ go-ahead given the stakes.
 
 ## Done this round, part 6: real FT4 mode, a shared Band & Mode picker, FT4 timing throughout
 
+**The inline FT8/FT4 toggle-buttons design below was superseded in part 7**:
+real Android screenshots showed mode selection belongs inside a proper
+"Band & mode" bottom sheet, not separate buttons next to the label. Left
+here, append-only, so the reasoning that led to the first (wrong) design is
+still on record.
+
 The Band & Mode dropdown only ever listed bands -- there was no way to change
 operating mode at all, and the upper-left TopBar picker and the More panel's
 Band & Mode card were two independently-built controls (noticed when a
@@ -326,6 +332,70 @@ confirmed via the in-app log ("switched to FT4"), waterfall continuing to
 paint correctly post-switch with FT4-cadence row spacing, both pickers
 (TopBar and More panel) staying in sync, and zero `ptt=1` events throughout
 all testing -- no live transmission was attempted or authorized this round.
+
+## Done this round, part 7: real Band & Mode sheet, a real RX meter, honest Width/NR/MSG gaps
+
+Two corrections/additions, driven by an actual Android screenshot the
+operator shared (not a guess from reading Kotlin) and a direct comparison of
+the waterfall bottom strip:
+
+- **Band & Mode is a real bottom sheet now**, replacing part 6's inline
+  FT8/FT4 toggle buttons. The screenshot showed Android's actual
+  `BandModeSheet.kt`: a "Band & mode" sheet titled dialog with a 3-way mode
+  tile row (FT8/FT4/FT2, each showing its cycle time -- 15s/7.5s/3.75s) over
+  a scrollable band list (name, dial frequency, a checkmark on the current
+  selection). `BandModePicker` now just renders the clickable label+chevron
+  trigger (still the one shared component behind both TopBar's title and the
+  More panel's card); clicking either opens the new `BandModeSheet` modal.
+  **FT2 is shown, not omitted** -- it's a real option in Android's sheet --
+  but disabled with a tooltip: unlike FT4 (which the shared `ft8_lib` already
+  exports `ft4_encode` for), desktop's FFI layer has no FT2 protocol binding
+  at all. Android's band rows also carry a short descriptive subtitle
+  ("Local, evenings", "Daytime, worldwide") that desktop's `BandInfo` has no
+  data for -- left out rather than inventing text that might not match
+  Android's actual wording.
+- **RX input-level meter, ported for real**: Android's
+  `InputLevelIndicator.kt`/`AudioInputLevel.java` classify a peak+RMS reading
+  into SILENT/LOW/GOOD/HIGH/CLIPPING and show an RMS-filled bar with a peak
+  tick, a percent-of-peak readout, and a color-coded status word ("Low"/
+  "Good"/"High"/"Clip"). Desktop's old `AudioBadge` only ever had an RMS
+  dBFS number -- `engine.rs` now also computes peak (`peak_linear`) and
+  exposes both linear values plus the classification
+  (`classify_input_level`, `InputLevelStatus`) on `InputLevelEvent`, using
+  Android's exact thresholds (`CLIP_PEAK`, `HIGH_PEAK_DBFS`, `LOW_RMS_DBFS`;
+  `SILENCE_DBFS` already matched). The frontend's new `InputLevelIndicator`
+  is a close visual port of Android's component. Found and fixed two bugs
+  while building this: a copy-paste placeholder (`rms: db` instead of the
+  real linear RMS) caught before commit, and a genuinely pre-existing flaky
+  test (`preferred_tx_period_seeds_the_lock_on_cq_start`, from the TX-period
+  work two rounds ago) that depended on real wall-clock position within the
+  TX cycle -- ~15% of real-time instants fall inside FT8's TX window, which
+  silently changed `tx_parity`'s expected value. Fixed by pinning
+  `clock_offset_ms` to mid-cycle in that test, not by weakening the
+  assertion.
+- **Width/NR/MSG chips**: added to the waterfall bottom strip in Android's
+  order and position, but each disabled with an explanatory tooltip rather
+  than omitted or faked -- same treatment as the More panel's DX button.
+  Width needs the waterfall's displayed Hz span to become a runtime config
+  (today `WF_TOP_HZ`/`WF_MAX_HZ` are fixed constants on both ends). NR needs
+  a real noise-reduction DSP stage desktop doesn't have. MSG (labeling
+  decoded callsigns directly on the waterfall at their frequency) is lower
+  effort than NR -- the backend already carries each decode's `freq_hz` --
+  but still needs real canvas work in `drawWaterfallRow` to place text
+  per-decode, so it's deferred as its own pass rather than rushed in here.
+
+239 Rust lib tests (+2 over part 6), 125 vitest tests (unchanged). Verified
+live against the running app and real decodes: the RX meter reads live
+peak/RMS/status correctly (confirmed "Good"/"Low" at different input
+levels), the Band & Mode sheet opens and matches the Android screenshot's
+layout exactly (mode tiles, band list, checkmark), and FT8↔FT4 switching
+through the sheet works. One environment note, not a code issue: screenshots
+taken ~1s+ after a click intermittently showed spurious state changes (mode
+tiles toggling, the More panel opening) with no further input sent --
+zero `ptt=1` events throughout, and an instant (zero-delay) screenshot
+confirmed the sheet renders and behaves correctly the moment it opens. This
+matches a class of input-delivery quirk already noted earlier on this branch
+(xdotool/this test harness), not a React bug.
 
 ## Note for when Map work starts
 
