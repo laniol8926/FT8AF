@@ -881,7 +881,10 @@ function BandModeSheet(props: {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal band-mode-sheet" onClick={(e) => e.stopPropagation()}>
-        <h3>Band &amp; Mode</h3>
+        <div className="modal-header">
+          <h3>Band &amp; Mode</h3>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
         <div className="mode-tile-row">
           {(["ft8", "ft4", "ft2"] as const).map((m) => {
             const isFt2 = m === "ft2";

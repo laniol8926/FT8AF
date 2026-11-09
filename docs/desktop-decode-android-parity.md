@@ -397,6 +397,19 @@ confirmed the sheet renders and behaves correctly the moment it opens. This
 matches a class of input-delivery quirk already noted earlier on this branch
 (xdotool/this test harness), not a React bug.
 
+Added right after: an explicit close "X" (`.modal-close`, top-right of the
+sheet header) matching the circular button in Android's own screenshot --
+`BandModeSheet` previously only closed via the overlay-click-outside
+pattern other modals on this branch use. The same phantom-input quirk above
+recurred once more while testing this, this time including a visible focus
+ring on the Call CQ button after a single real click -- still zero `ptt=1`
+both times, and the X button itself was confirmed working via a screenshot
+taken immediately after clicking it, but given this project's TX-safety
+history, further interactive verification of this specific flow was
+deliberately stopped rather than pushed further near the Call CQ control.
+Worth a closer look (not blocking, not reproduced as a code bug) before
+relying on scripted clicks near TX-adjacent controls again.
+
 ## Note for when Map work starts
 
 Not started this round -- just a pointer so the prerequisite isn't lost.

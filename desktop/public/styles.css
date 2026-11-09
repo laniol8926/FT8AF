@@ -446,6 +446,17 @@ select option {
   padding: 16px; width: 520px; max-width: 92vw; max-height: 88vh; overflow: auto;
 }
 .modal h3 { margin: 0 0 12px; font-size: 14px; color: var(--accent); }
+/* Header row for a modal that needs an explicit close "X" (e.g. BandModeSheet,
+   matching Android's circular top-right close button) instead of relying on
+   the overlay-click-to-close + a bottom Cancel button alone. */
+.modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.modal-header h3 { margin: 0; }
+.modal-close {
+  width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; background: var(--panel-2); color: var(--muted);
+  font-size: 13px; padding: 0; flex: none;
+}
+.modal-close:hover { background: var(--panel); color: var(--text); }
 /* Wide enough that the 8 CQ-direction preset chips (CQ/DX/NA/EU/SA/AS/OC/AF)
    fit on one row instead of wrapping after "CQ AS" at the default 520px. */
 .modal-cq-options { width: 640px; }
