@@ -58,6 +58,11 @@ pub struct QsoEngine {
     pub my_grid: String, // 4-char
     pub band: String,
     pub freq_mhz: String,
+    /// Operating mode ("FT8"/"FT4"), logged on every completed QSO. Set by the
+    /// engine (mirroring `band`/`freq_mhz`) from `Mode::display_name()`, kept
+    /// as a plain `String` here (not `crate::mode::Mode`) so `qso.rs` doesn't
+    /// need to depend on it for what's otherwise just a logged label.
+    pub mode: String,
     pub active: bool,
     pub auto_return_to_cq: bool,
 
@@ -82,6 +87,7 @@ impl QsoEngine {
             my_grid: util::grid4(&my_grid.into()).to_uppercase(),
             band: String::new(),
             freq_mhz: String::new(),
+            mode: "FT8".to_string(),
             active: false,
             auto_return_to_cq: true,
             stage: TxStage::Idle,
@@ -330,7 +336,7 @@ impl QsoEngine {
             id: None,
             call: dx.to_string(),
             gridsquare: self.grid_rcvd.clone().unwrap_or_default(),
-            mode: "FT8".to_string(),
+            mode: self.mode.clone(),
             rst_sent: self.report_sent.map(fmt_report).unwrap_or_default(),
             rst_rcvd: self.report_rcvd.map(fmt_report).unwrap_or_default(),
             qso_date: util::yyyymmdd_from_ms(self.started_ms),

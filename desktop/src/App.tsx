@@ -12,6 +12,7 @@ import {
   type HamlibRig,
   type ImportProgress,
   type ImportSummary,
+  type OperatingMode,
   type QsoRecord,
   type RigConfig,
   type RigStatusEvent,
@@ -201,6 +202,11 @@ export default function App() {
   const [rigLabel, setRigLabel] = useState(""); // optional display-name override
   const [bands, setBands] = useState<BandInfo[]>([]);
   const [dialHz, setDialHz] = useState<number>(14074000);
+  // Operating mode (FT8/FT4), matching Android's Band & Mode selector --
+  // shared by TopBar's title picker and the More panel's Band & Mode card
+  // (see BandModePicker), same as Android reuses one bandModeLabel in both
+  // its title row and its TxStrip/drawer rows.
+  const [operatingMode, setOperatingModeState] = useState<OperatingMode>("ft8");
   // Calls already worked on the current band (upper-cased), for the Decode
   // list's worked-station strikethrough. Desktop only ever logs "FT8" today
   // (see qso.rs), so that's the only mode checked for now.
@@ -358,6 +364,9 @@ export default function App() {
     api.listBands().then(setBands);
     api.getConfig("dial_hz").then((v) => {
       if (v) setDialHz(parseInt(v, 10));
+    });
+    api.getConfig("operating_mode").then((v) => {
+      if (v && v.toUpperCase() === "FT4") setOperatingModeState("ft4");
     });
     api.getConfig("base_freq").then((v) => {
       if (v) setTxFreq(parseInt(v, 10));
@@ -535,6 +544,13 @@ export default function App() {
     api.setBand(hz);
   }
 
+  // Shared with both BandModePicker instances (TopBar's title and the More
+  // panel's Band & Mode card -- same underlying control, see BandModePicker).
+  function onMode(mode: OperatingMode) {
+    setOperatingModeState(mode);
+    api.setMode(mode);
+  }
+
   // Shared with Settings -> Audio and the More panel's TX-volume row (Android
   // shows TxVolumeRow in both the drawer and nowhere else -- desktop also
   // keeps it in Settings for discoverability, so this one handler drives both).
@@ -578,6 +594,8 @@ export default function App() {
         bands={bands}
         dialHz={dialHz}
         onBand={onBand}
+        operatingMode={operatingMode}
+        onMode={onMode}
         myCall={myCall}
         myGrid={myGrid}
         savedFreeText={savedFreeText}
@@ -699,6 +717,8 @@ export default function App() {
           bands={bands}
           dialHz={dialHz}
           onBand={onBand}
+          operatingMode={operatingMode}
+          onMode={onMode}
           onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
           txGain={txGain}
           onTxGain={onTxGain}
@@ -772,11 +792,81 @@ function TabBar({
   );
 }
 
+const MODE_LABEL: Record<OperatingMode, string> = { ft8: "FT8", ft4: "FT4" };
+// TX/RX cycle length in ms per mode -- matches Rust's Mode::cycle_ms()
+// (mode.rs). Drives the countdown/progress-bar timing below; the waterfall
+// itself needs no separate fix -- its rows are pushed by the backend's own
+// per-mode wf_boundary_row cadence, not computed from a cycle length here.
+const MODE_CYCLE_MS: Record<OperatingMode, number> = { ft8: 15_000, ft4: 7_500 };
+
+// Shared Band & Mode control, used identically by TopBar's title (the
+// upper-left picker) and the More panel's Band & Mode card -- matching
+// Android, which reuses one bandModeLabel/mode-toggle construction in both
+// the title row and the TxStrip/drawer rows rather than keeping two
+// independently-built pickers that could drift apart. `variant` only
+// changes layout/sizing (a big borderless title vs. a bordered labeled
+// card); the band-select and mode-toggle logic underneath is identical.
+function BandModePicker(props: {
+  variant: "title" | "card";
+  bands: BandInfo[];
+  dialHz: number;
+  onBand: (hz: number) => void;
+  mode: OperatingMode;
+  onMode: (m: OperatingMode) => void;
+}) {
+  const { variant, bands, dialHz, onBand, mode, onMode } = props;
+  const band = bands.find((b) => b.dial_hz === dialHz);
+  const card = variant === "card";
+  return (
+    <div className={"band-mode-picker" + (card ? " band-mode-picker-card" : "")}>
+      {card && <span className="band-picker-row-label">BAND & MODE</span>}
+      <div className="band-mode-picker-row">
+        <div className="band-picker">
+          <span className="band-picker-label">
+            {card ? `${(dialHz / 1e6).toFixed(3)} MHz · ` : ""}
+            {band ? band.name : "--"} · {MODE_LABEL[mode]}
+          </span>
+          <span className="chevron">⌄</span>
+          <select
+            className="band-picker-select"
+            aria-label="Band"
+            value={dialHz}
+            onChange={(e) => onBand(parseInt(e.target.value, 10))}
+          >
+            {bands.map((b) => (
+              <option key={b.dial_hz} value={b.dial_hz}>
+                {b.custom ? "★ " : ""}{b.name} · {(b.dial_hz / 1e6).toFixed(3)}
+              </option>
+            ))}
+          </select>
+        </div>
+        {/* A true sibling of .band-picker, not nested inside it: that div's
+            <select> is an inset:0 overlay over the whole label (the
+            whole-label-is-clickable trick), which would swallow clicks on
+            these buttons if they were inside it too. */}
+        <div className="mode-toggle">
+          {(["ft8", "ft4"] as const).map((m) => (
+            <button
+              key={m}
+              className={"mode-toggle-btn" + (mode === m ? " active" : "")}
+              onClick={() => onMode(m)}
+            >
+              {MODE_LABEL[m]}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TopBar(props: {
   cycle: CycleTick | null;
   bands: BandInfo[];
   dialHz: number;
   onBand: (hz: number) => void;
+  operatingMode: OperatingMode;
+  onMode: (m: OperatingMode) => void;
   myCall: string;
   myGrid: string;
   savedFreeText: string;
@@ -798,7 +888,7 @@ function TopBar(props: {
   onRefresh: () => void;
 }) {
   const {
-    cycle, bands, dialHz, onBand, myCall, myGrid, savedFreeText, onSaveFreeText,
+    cycle, bands, dialHz, onBand, operatingMode, onMode, myCall, myGrid, savedFreeText, onSaveFreeText,
     rig, clock, rigLabel, txState, meter,
     onCq, onStop, onFreeText, onToggleTune, huntEnabled, onToggleHunt,
     sortMode, onCycleSortMode, onClearDecodes, onRefresh,
@@ -808,9 +898,9 @@ function TopBar(props: {
   const [customModifierDraft, setCustomModifierDraft] = useState("");
   const [freeTextDraft, setFreeTextDraft] = useState("");
 
-  const band = bands.find((b) => b.dial_hz === dialHz);
-  const secondsLeft = cycle ? Math.max(0, Math.ceil(15 - cycle.ms_into_cycle / 1000)) : null;
-  const pct = cycle ? (cycle.ms_into_cycle / 15000) * 100 : 0;
+  const cycleMs = MODE_CYCLE_MS[operatingMode];
+  const secondsLeft = cycle ? Math.max(0, Math.ceil((cycleMs - cycle.ms_into_cycle) / 1000)) : null;
+  const pct = cycle ? (cycle.ms_into_cycle / cycleMs) * 100 : 0;
   const transmitting = txState?.transmitting ?? false;
   const tuning = txState?.tuning ?? false;
   // The CQ/QSO auto-sequencer is running (whether keyed up right now or just
@@ -831,22 +921,14 @@ function TopBar(props: {
     <>
     <div className="topbar-android">
       <div className="topbar-row">
-        <div className="band-picker">
-          <span className="band-picker-label">{band ? band.name : "--"} · FT8</span>
-          <span className="chevron">⌄</span>
-          <select
-            className="band-picker-select"
-            aria-label="Band"
-            value={dialHz}
-            onChange={(e) => onBand(parseInt(e.target.value, 10))}
-          >
-            {bands.map((b) => (
-              <option key={b.dial_hz} value={b.dial_hz}>
-                {b.custom ? "★ " : ""}{b.name} · {(b.dial_hz / 1e6).toFixed(3)}
-              </option>
-            ))}
-          </select>
-        </div>
+        <BandModePicker
+          variant="title"
+          bands={bands}
+          dialHz={dialHz}
+          onBand={onBand}
+          mode={operatingMode}
+          onMode={onMode}
+        />
 
         <button
           className={"pill pill-cq" + (cqActive ? " pill-cq-stop" : "")}
@@ -2874,38 +2956,36 @@ function TxBar(props: {
   bands: BandInfo[];
   dialHz: number;
   onBand: (hz: number) => void;
+  operatingMode: OperatingMode;
+  onMode: (m: OperatingMode) => void;
   onToggleTune: () => void;
   txGain: number;
   onTxGain: (v: number) => void;
 }) {
-  const { txState, onSetTxPeriod, bands, dialHz, onBand, onToggleTune, txGain, onTxGain } = props;
+  const {
+    txState, onSetTxPeriod, bands, dialHz, onBand, operatingMode, onMode,
+    onToggleTune, txGain, onTxGain,
+  } = props;
   const preferredParity = txState?.preferred_tx_parity ?? null;
   const tuning = txState?.tuning ?? false;
   const transmitting = txState?.transmitting ?? false;
-  const band = bands.find((b) => b.dial_hz === dialHz);
   return (
     <div className="txbar">
-      {/* Row 1 -- Band & Mode, matching Android's BandModeRow (tappable
-          card showing the current band/mode). Reuses the same label +
-          overlaid <select> pattern as TopBar's own band picker. */}
+      {/* Row 1 -- Band & Mode, matching Android's BandModeRow. Same
+          BandModePicker as TopBar's title, just the "card" layout -- the
+          full "14.074 MHz · 20m · FT8" label Android's TxStrip/drawer rows
+          use (TopBar's title deliberately uses the shorter band+mode-only
+          form instead, no room there for frequency -- see
+          FT8AFApp.kt's decodeTitleLabel). */}
       <div className="txbar-row">
-        <div className="band-picker band-picker-card">
-          <span className="band-picker-row-label">BAND & MODE</span>
-          <span className="band-picker-label">{band ? band.name : "--"} · FT8</span>
-          <span className="chevron">⌄</span>
-          <select
-            className="band-picker-select"
-            aria-label="Band"
-            value={dialHz}
-            onChange={(e) => onBand(parseInt(e.target.value, 10))}
-          >
-            {bands.map((b) => (
-              <option key={b.dial_hz} value={b.dial_hz}>
-                {b.custom ? "★ " : ""}{b.name} · {(b.dial_hz / 1e6).toFixed(3)}
-              </option>
-            ))}
-          </select>
-        </div>
+        <BandModePicker
+          variant="card"
+          bands={bands}
+          dialHz={dialHz}
+          onBand={onBand}
+          mode={operatingMode}
+          onMode={onMode}
+        />
       </div>
 
       {/* Row 2 -- TX period / Tune / DX, matching Android's PeriodTuneDxRow. */}

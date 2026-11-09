@@ -315,15 +315,24 @@ select option {
 .txbar { display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; background: var(--panel-2); border-top: 1px solid var(--border); }
 .txbar-row { display: flex; align-items: center; gap: 12px; }
 
-/* Band & Mode card, matching Android's BandModeRow -- same label+overlaid
-   <select> trick as TopBar's own band picker, but styled as a labeled card
-   (smaller label text than the TopBar title use) instead of a bare title. */
-.band-picker-card {
+/* Shared Band & Mode picker (BandModePicker): the band-select + mode-toggle
+   row, in both its "title" (bare, big label -- TopBar) and "card" (bordered,
+   labeled -- the More panel's BandModeRow) layouts. */
+.band-mode-picker { display: flex; flex-direction: column; gap: 6px; }
+.band-mode-picker-row { display: flex; align-items: center; gap: 10px; }
+.band-mode-picker-card {
   flex: 1; background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius-md); padding: 8px 12px; gap: 8px;
+  border-radius: var(--radius-md); padding: 8px 12px;
 }
-.band-picker-row-label { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; color: var(--text-faint); margin-right: auto; }
-.band-picker-card .band-picker-label { font-size: 14px; }
+.band-picker-row-label { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; color: var(--text-faint); }
+.band-mode-picker-card .band-picker-label { font-size: 14px; }
+
+/* Mode toggle (FT8/FT4), a true sibling of .band-picker so its own <select>
+   overlay can't swallow clicks here -- see BandModePicker's comment. */
+.mode-toggle { display: flex; gap: 4px; background: var(--panel-2); border-radius: var(--radius-sm); padding: 3px; flex: none; }
+.band-mode-picker-card .mode-toggle { background: var(--panel-2); }
+.mode-toggle-btn { padding: 4px 10px; font-size: 12px; font-weight: 700; }
+.mode-toggle-btn.active { background: var(--accent); color: #1a1200; border-color: var(--accent); }
 
 /* TX-period (Even/Odd) picker, matching Android's TxPeriodControl/
    PeriodTuneDxRow (TxStrip.kt): a labeled segmented control, AUTO/1st/2nd. */

@@ -244,6 +244,104 @@ go-ahead given the stakes.
   UI toggle — same category of real on-air-stakes work as Field Day above,
   left as a documented, visible gap rather than fully omitted or faked.
 
+## Done this round, part 6: real FT4 mode, a shared Band & Mode picker, FT4 timing throughout
+
+The Band & Mode dropdown only ever listed bands -- there was no way to change
+operating mode at all, and the upper-left TopBar picker and the More panel's
+Band & Mode card were two independently-built controls (noticed when a
+frequency fix to one didn't carry to the other). Both gaps are fixed together:
+
+- **`src/App.tsx`'s `BandModePicker`**: one shared component now backs *both*
+  the TopBar title (upper-left) and the
+  More panel's Band & Mode card -- same band `<select>` + FT8/FT4 mode
+  toggle, a `variant` prop only changing layout (bare title vs. bordered
+  labeled card), matching Android's single `bandModeLabel` reused across its
+  title row and TxStrip/drawer rows rather than two pickers that can drift
+  apart. The mode toggle is a true sibling of the band-select's own overlay
+  `<select>` (not nested inside it), since that select is an `inset:0`
+  overlay over the whole label and would otherwise swallow clicks meant for
+  the toggle buttons.
+- **FT4 is real, not a label**: investigated before building anything --
+  Android's `ModeProfile.java` already describes FT4 as a fully distinct
+  profile (7.5s cycle, 0.048s symbol period, BT=1.0, 105 tones, `isFt8 =
+  false`), and the shared C `ft8_lib` already exports `ft4_encode` right next
+  to `ft8_encode` (`ft8/encode.h`), with the decoder's `monitor_config_t`
+  already taking a raw `ftx_protocol_t` -- desktop's own `Decoder::new` already
+  accepted an `is_ft8` bool before this round, just never called with
+  `false`. That meant the real work was Rust-side plumbing, not new DSP:
+  - **`src-tauri/src/mode.rs`** (new, fully unit-tested): `Mode::{Ft8, Ft4}`,
+    ported field-for-field from `ModeProfile` -- `cycle_ms`, `symbol_period`,
+    `symbol_bt`, `num_tones`, `is_ft8`, plus derived `audio_ms`/
+    `audio_slack_ms`/`tx_latest_ms`/`decode_at_ms` that replace what used to
+    be fixed constants in `engine.rs` (`CYCLE_MS`, `TX_SLACK_MS`,
+    `TX_LATEST_MS`, `DECODE_AT_MS`). A test pins `Mode::Ft8`'s derived values
+    to engine.rs's old constants exactly (15000/12640/2260/13200), so the
+    refactor can't silently drift FT8's existing, already-correct timing.
+  - **`dsp/encode.rs`**: added `encode_tones_mode`/`generate_signal`/
+    `synth_gfsk_for`/`waveform_len_for`, mode-parameterized siblings of the
+    existing FT8-only `encode_tones`/`generate_ft8`/`synth_gfsk`/
+    `waveform_len` (kept as thin `Mode::Ft8` wrappers of the new ones, with a
+    test asserting byte-identical output -- this round must not change a
+    single sample of FT8's existing waveform).
+  - **`engine.rs`**: `Engine` gained a `mode: Mode` field (persisted via
+    `operating_mode` config, same pattern as `dial_hz`); every scheduling
+    site that read the old fixed constants now reads `self.mode.*()`
+    instead, including the pure, unit-tested gate functions
+    (`tx_slot_eligible`, `boundary_tx_ready`, `wf_boundary_row`), which now
+    take their cycle/window values as parameters rather than closing over a
+    module constant -- new tests exercise them with `Mode::Ft4`'s values to
+    confirm the parameterization actually varies behavior, not just FT8's.
+    The QMX CAT-tone path (`CatToneTx`) needed real restructuring: its
+    `tones` array was fixed at FT8's 79, too small for FT4's 105, so it's
+    now sized to the larger mode's tone count (105) with an explicit `len`
+    field, plus a `symbol_period` field captured at TX start (`service_cat_tx`
+    used to read the module-level FT8 constant directly). `qso.rs` gained a
+    real `mode` field (mirroring the existing `band`/`freq_mhz` pattern) so
+    logged QSOs record "FT4" instead of a hard-coded "FT8" literal.
+    `EngineCommand::SetMode` stops any in-flight TX/QSO/tune first (same
+    precaution `DisconnectRig` already took) and respawns the decode-worker
+    thread for the new protocol, since a `Decoder` is built for one protocol
+    for its whole lifetime (`spawn_decoder_thread`, extracted from what used
+    to be inline in `Engine::new` so `SetMode` can call it again).
+  - **Frontend**: `api.setMode`, an `OperatingMode` type, `operating_mode`
+    config persistence, and the TopBar countdown/progress-bar (`secondsLeft`/
+    `pct`), which had hard-coded FT8's 15000ms, now read a small
+    `MODE_CYCLE_MS` lookup keyed on the live mode. The waterfall itself
+    needed no separate fix: its rows are pushed by the backend's own
+    per-mode `wf_boundary_row` cadence, already covered above.
+  - **Scope line deliberately held**: per-mode dial frequencies (Android's
+    `OperationBand` carries a different FT4 calling frequency per band) were
+    *not* added -- the band list stays shared across modes, and the operator
+    picks whatever dial frequency they want for either mode (same as desktop
+    already allows for custom bands). Adding a real FT4-frequency table is a
+    separate, smaller follow-up if it turns out to matter in practice.
+  - **FT2** (Android's third mode, double FT4's baud) is *not* ported --
+    desktop's FFI layer has no protocol-3 binding at all (`FTX_PROTOCOL_FT4`/
+    `_FT8` only), unlike FT4 which the shared library already exported.
+    Left as a documented gap, consistent with Field Day/Hound above.
+
+237 Rust lib tests (+11 over the previous round), 125 vitest tests (unchanged
+-- no new frontend logic needed its own module). Verified live: mode switch
+confirmed via the in-app log ("switched to FT4"), waterfall continuing to
+paint correctly post-switch with FT4-cadence row spacing, both pickers
+(TopBar and More panel) staying in sync, and zero `ptt=1` events throughout
+all testing -- no live transmission was attempted or authorized this round.
+
+## Note for when Map work starts
+
+Not started this round -- just a pointer so the prerequisite isn't lost.
+Android's QSO-arrow/line rendering on the Map screen depends on a
+callsign-to-grid cache, `CallsignQTH(callsign, grid, updateTime)`
+(`database/DatabaseOpr.java`): populated on every decode
+(`MainViewModel.java` ~line 1447, `addCallsignQTH(msg.getCallsignFrom(),
+msg.maidenGrid)`), backfilled from the log at startup
+(`fillCallsignQTHFromLog`), and loaded into memory for fast lookup
+(`loadCallsignQTHToMemory`) -- because a station's grid only arrives on
+specific message types during a QSO, not every decode, so the Map needs this
+cache to know where *any* previously-heard station is, not just ones
+mid-QSO right now. Desktop has no equivalent table yet; building the Map
+screen needs this (or an equivalent) first.
+
 ## Build note
 
 `npm run tauri -- build --no-bundle` is the only way to get a real,

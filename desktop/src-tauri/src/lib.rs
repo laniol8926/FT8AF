@@ -17,6 +17,7 @@ pub mod db;
 pub mod dsp;
 pub mod dxcc;
 pub mod engine;
+pub mod mode;
 pub mod os_location;
 pub mod qmx_cat_tones;
 pub mod qmx_meters;

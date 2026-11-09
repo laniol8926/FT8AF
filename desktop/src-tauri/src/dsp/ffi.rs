@@ -159,6 +159,7 @@ extern "C" {
     pub fn pack77(msg: *const c_char, c77: *mut u8) -> c_int;
     pub fn packtext77(text: *const c_char, b77: *mut u8);
     pub fn ft8_encode(payload: *const u8, tones: *mut u8);
+    pub fn ft4_encode(payload: *const u8, tones: *mut u8);
     pub fn ftx_add_crc(payload: *const u8, a91: *mut u8);
 
     // gfsk glue

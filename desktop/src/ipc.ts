@@ -33,6 +33,9 @@ export interface CycleTick {
 export type TxStage =
   | "idle" | "cq" | "grid" | "report" | "r_report" | "rr73" | "bye73";
 
+/** Operating mode -- matches `crate::mode::Mode`'s `#[serde(rename_all = "lowercase")]`. */
+export type OperatingMode = "ft8" | "ft4";
+
 export interface QsoStatus {
   active: boolean;
   stage: TxStage;
@@ -250,6 +253,7 @@ export const api = {
   setStage: (stage: TxStage) => invoke("set_stage", { stage }),
   stopTx: () => invoke("stop_tx"),
   setTxPeriod: (parity: number | null) => invoke("set_tx_period", { parity }),
+  setMode: (mode: OperatingMode) => invoke("set_mode", { mode }),
   freeText: (text: string) => invoke("free_text", { text }),
   startTune: () => invoke("start_tune"),
   stopTune: () => invoke("stop_tune"),

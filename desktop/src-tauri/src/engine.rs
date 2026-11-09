@@ -15,6 +15,7 @@ use crate::bands;
 use crate::db::{Db, QsoRecord};
 use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
+use crate::mode::Mode;
 use crate::qmx_cat_tones as cat_tones;
 use crate::qmx_meters;
 use crate::qso::{QsoEngine, QsoOutcome, QsoStatus};
@@ -22,27 +23,17 @@ use crate::rig::{RigConfig, RigConnection};
 use crate::util;
 use crate::wf::{WfConfig, WfProcessor, WfWindow};
 
-const CYCLE_MS: i64 = 15_000;
-const TX_SLACK_MS: i64 = 2_360; // 12.64 s audio in a 15 s slot
+// Cycle/TX-timing constants (15s/12.64s-audio FT8, 7.5s/5.04s-audio FT4) now
+// live on `Mode` (cycle_ms/audio_slack_ms/tx_latest_ms/decode_at_ms) instead
+// of as fixed consts here -- see mode.rs. PTT_DELAY_MS stays a plain const:
+// it's rig-settle time, not FT8/FT4-specific.
 const PTT_DELAY_MS: u64 = 100;
 // Run-loop tick while a QMX CAT-tone transmission is in flight (see
-// `service_cat_tx`): short enough that each 160 ms-spaced symbol goes out
-// close to on time despite being polled rather than slept-to directly (no
-// separate timer thread touches the rig -- see CatToneTx's doc comment for
-// why), long enough not to burn the CPU busy-polling for ~12.64 s.
+// `service_cat_tx`): short enough that each symbol goes out close to on time
+// despite being polled rather than slept-to directly (no separate timer
+// thread touches the rig -- see CatToneTx's doc comment for why), long
+// enough not to burn the CPU busy-polling for the whole transmission.
 const TX_CAT_TICK_MS: u64 = 10;
-// Latest point into the cycle we can still key up and have the full 12.64 s
-// waveform (plus the PTT lead) land before the next slot boundary. Start later
-// than this and the leading Costas array gets clipped — audible but undecodable.
-const TX_LATEST_MS: i64 = TX_SLACK_MS - PTT_DELAY_MS as i64;
-// Point in the UTC cycle at which we hand the slot to the decoder.
-// The FT8 waveform is complete at 12.64 s, so decoding ~0.6 s later returns
-// results around the 15 s boundary even on a slow CPU — early enough that the
-// operator's reply lands in the very next slot instead of skipping a cycle.
-// Keep this anchored to UTC: shifting the trigger while copying only the
-// shifted elapsed sample count can remove the leading Costas sync block.
-// 13.2 s keeps a comfortable margin above the 12.64 s waveform end.
-const DECODE_AT_MS: i64 = 13_200;
 const DEFAULT_TX_AUDIO_HZ: i32 = 1_500;
 /// How often a rig that drops CAT PTT on its own (the Xiegu G106 releases after
 /// ~2 s) gets its PTT-on frame refreshed while keyed. Measured on a monotonic
@@ -106,15 +97,17 @@ fn reply_tx_audio_hz(delta_freq: u32) -> Option<i32> {
 ///   * a locked TX parity (set when answering a CQ) matches this slot's parity —
 ///     `None` leaves us eligible in any slot and locks on the first transmission,
 ///   * we have not already transmitted in this slot, and
-///   * we are early enough in the cycle to fit the full 12.64 s waveform before the
-///     next boundary (`into_cycle_ms <= TX_LATEST_MS`); starting later clips the
-///     leading Costas array — audible but undecodable.
+///   * we are early enough in the cycle to fit the full waveform before the next
+///     boundary (`into_cycle_ms <= tx_latest_ms`, the caller's current mode's
+///     `Mode::tx_latest_ms()`); starting later clips the leading Costas array —
+///     audible but undecodable.
 fn tx_slot_eligible(
     active: bool,
     tx_parity: Option<i64>,
     slot_id: i64,
     txed_slot: i64,
     into_cycle_ms: i64,
+    tx_latest_ms: i64,
 ) -> bool {
     if !active {
         return false;
@@ -127,7 +120,7 @@ fn tx_slot_eligible(
     if txed_slot == slot_id {
         return false;
     }
-    into_cycle_ms <= TX_LATEST_MS
+    into_cycle_ms <= tx_latest_ms
 }
 
 /// Whether any decode batch is still outstanding, gating the boundary TX trigger.
@@ -158,7 +151,7 @@ fn waterfall_row_due(decoding: bool, ptt: bool) -> bool {
 /// on a quick decode lands mid-slot, past the TX window, dropping the reply.
 ///
 /// "Early in its slot" is the whole TX window, not a hard boundary: the gate only
-/// requires `into_cycle_ms <= TX_LATEST_MS` (via [`tx_slot_eligible`]). In practice
+/// requires `into_cycle_ms <= tx_latest_ms` (via [`tx_slot_eligible`]). In practice
 /// the run loop ticks fast, so the first eligible tick after the decodes settle is
 /// near the top of the slot — but a reply that becomes eligible a little later in
 /// the window is still keyed rather than dropped.
@@ -178,10 +171,11 @@ fn boundary_tx_ready(
     slot_id: i64,
     txed_slot: i64,
     into_cycle_ms: i64,
+    tx_latest_ms: i64,
 ) -> bool {
     decoding
         && !awaiting_decode
-        && tx_slot_eligible(active, tx_parity, slot_id, txed_slot, into_cycle_ms)
+        && tx_slot_eligible(active, tx_parity, slot_id, txed_slot, into_cycle_ms, tx_latest_ms)
 }
 // Live-waterfall FFT parameters (window/size/averaging + display constants)
 // live in `crate::wf` and are runtime-configurable via SetWaterfallConfig.
@@ -202,10 +196,12 @@ fn rms_dbfs(samples: &[f32]) -> f32 {
     (20.0 * (rms.max(1e-12)).log10()).max(-120.0) as f32
 }
 
-/// True once per cycle, on the first waterfall row at/after a UTC 15 s boundary,
-/// advancing `last_slot`. The decoder and waterfall use this same fixed clock.
-fn wf_boundary_row(now_ms: i64, last_slot: &mut i64) -> bool {
-    let slot = now_ms.div_euclid(CYCLE_MS);
+/// True once per cycle, on the first waterfall row at/after a UTC slot boundary
+/// (15 s FT8, 7.5 s FT4 -- `cycle_ms`, the caller's current mode's
+/// `Mode::cycle_ms()`), advancing `last_slot`. The decoder and waterfall use
+/// this same fixed clock.
+fn wf_boundary_row(now_ms: i64, last_slot: &mut i64, cycle_ms: i64) -> bool {
+    let slot = now_ms.div_euclid(cycle_ms);
     if slot != *last_slot {
         *last_slot = slot;
         true
@@ -268,6 +264,12 @@ pub enum EngineCommand {
     /// Even, 1 = Odd; `None` = no preference) -- matches Android's
     /// `TxPeriodControl`. Does not affect an already-locked in-progress QSO.
     SetTxPeriod(Option<i64>),
+    /// Switch operating mode (FT8/FT4) -- matches Android's Band & Mode mode
+    /// toggle. Stops any in-flight TX/QSO/tune first (same precaution as
+    /// `DisconnectRig`): a mode's cycle length and tone encoding are baked
+    /// into an in-flight transmission the moment it starts, so switching
+    /// mid-transmission would desync the rig from what's actually being sent.
+    SetMode(crate::mode::Mode),
     StopTx,
     /// Transmit a steady carrier at the TX offset for antenna tuning, with no
     /// FT8 message involved — see [`Engine::start_tune`].
@@ -473,7 +475,19 @@ pub fn spawn(db: Arc<Db>) -> (EngineHandle, Receiver<EngineEvent>) {
 /// into `self`.
 #[derive(Debug, Clone, Copy)]
 struct CatToneTx {
-    tones: [u8; encode::FT8_NN],
+    /// Fixed-size at `encode::FT4_NN` (105), the larger of the two supported
+    /// modes' tone counts (FT8 uses 79) -- `len` below marks how many of
+    /// these are actually in use for this transmission's mode. A fixed array
+    /// (rather than a `Vec`) keeps `CatToneTx` `Copy`, see the struct's own
+    /// doc comment for why that matters.
+    tones: [u8; encode::FT4_NN],
+    /// Number of `tones` entries actually populated (79 FT8, 105 FT4).
+    len: usize,
+    /// This transmission's mode's GFSK symbol period in seconds (`Mode::symbol_period()`,
+    /// captured at TX start since `self.mode` could in principle change while
+    /// this struct is still in flight) -- drives `service_cat_tx`'s per-symbol
+    /// timing and `cat_tones::tone_hz`'s frequency spacing.
+    symbol_period: f32,
     /// TX audio offset in Hz (`tx_audio_hz`, same number the audio path
     /// centers its waveform on) -- tone 0's CAT frequency.
     base_hz: f64,
@@ -508,6 +522,12 @@ struct Engine {
     accum: Arc<SlotAccumulator>,
     slot_tx: Sender<Vec<f32>>,
     dec_rx: Receiver<Vec<DecodedMessage>>,
+    /// Current operating mode (FT8/FT4) -- drives cycle length, TX
+    /// encode/timing, and which decoder protocol `spawn_decoder_thread` runs.
+    /// Changed only via `EngineCommand::SetMode` (see `switch_mode`), never
+    /// written directly elsewhere, so the decoder thread and this field never
+    /// disagree about which protocol is live.
+    mode: Mode,
     txed_slot: i64,
     qso: QsoEngine,
     rig: Option<RigConnection>,
@@ -599,6 +619,31 @@ fn should_refresh_ptt(
         && since_last_on.map_or(true, |d| d >= PTT_KEEPALIVE_INTERVAL)
 }
 
+/// Spawn the decode worker: owns the (!Send) `Decoder` on its own thread so
+/// the heavy per-slot DSP never blocks the engine loop (which drives the live
+/// waterfall + UTC clock). Fed slot audio over the returned sender; decodes
+/// come back over the returned receiver. `is_ft8` selects the decode
+/// protocol (`Mode::is_ft8()`) -- called once from `Engine::new` and again
+/// from `switch_mode` whenever the operating mode changes, since a `Decoder`
+/// is built for one protocol for its whole lifetime.
+fn spawn_decoder_thread(is_ft8: bool) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
+    let (slot_tx, slot_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let (dec_tx, dec_rx) = std::sync::mpsc::channel::<Vec<DecodedMessage>>();
+    std::thread::Builder::new()
+        .name("ft8af-decoder".into())
+        .spawn(move || {
+            let mut decoder = Decoder::new(SAMPLE_RATE, is_ft8);
+            while let Ok(slot) = slot_rx.recv() {
+                decoder.feed_slot(&slot);
+                let n = decoder.find_sync();
+                let msgs = if n > 0 { decoder.decode_all() } else { Vec::new() };
+                let _ = dec_tx.send(msgs);
+            }
+        })
+        .expect("spawn decoder thread");
+    (slot_tx, dec_rx)
+}
+
 impl Engine {
     fn new(db: Arc<Db>, evt: Sender<EngineEvent>, cmd_tx: Sender<EngineCommand>) -> Self {
         // Restore persisted station + band where present.
@@ -633,9 +678,11 @@ impl Engine {
         // receive windows anchored to UTC.
         let rx_offset_ms = 0;
         let _ = db.set_config("rx_offset_ms", "0");
+        let mode = Mode::from_config(&db.get_config("operating_mode").unwrap_or_default());
         let mut qso = QsoEngine::new(my_call, my_grid);
         qso.band = bands::band_for_freq_hz(dial_hz).to_string();
         qso.freq_mhz = bands::freq_mhz_string(dial_hz);
+        qso.mode = mode.display_name().to_string();
 
         // Restore persisted waterfall FFT knobs (issue #428); defaults match
         // the historical hard-coded pipeline (Hann, 2048, 6-segment Welch).
@@ -657,23 +704,7 @@ impl Engine {
         .sanitize();
         let wf = WfProcessor::new(wf_cfg);
 
-        // Decode worker: owns the (!Send) Decoder on its own thread so the heavy
-        // per-slot DSP never blocks the engine loop (which drives the live
-        // waterfall + UTC clock). Fed slot audio over a channel; returns decodes.
-        let (slot_tx, slot_rx) = std::sync::mpsc::channel::<Vec<f32>>();
-        let (dec_tx, dec_rx) = std::sync::mpsc::channel::<Vec<DecodedMessage>>();
-        std::thread::Builder::new()
-            .name("ft8af-decoder".into())
-            .spawn(move || {
-                let mut decoder = Decoder::new(SAMPLE_RATE, true);
-                while let Ok(slot) = slot_rx.recv() {
-                    decoder.feed_slot(&slot);
-                    let n = decoder.find_sync();
-                    let msgs = if n > 0 { decoder.decode_all() } else { Vec::new() };
-                    let _ = dec_tx.send(msgs);
-                }
-            })
-            .expect("spawn decoder thread");
+        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.is_ft8());
 
         Engine {
             db,
@@ -681,6 +712,7 @@ impl Engine {
             accum: Arc::new(SlotAccumulator::new()),
             slot_tx,
             dec_rx,
+            mode,
             txed_slot: -1,
             qso,
             rig: None,
@@ -766,8 +798,8 @@ impl Engine {
             }
 
             let now = self.now();
-            let ms_into = now.rem_euclid(CYCLE_MS);
-            let slot_id = now.div_euclid(CYCLE_MS);
+            let ms_into = now.rem_euclid(self.mode.cycle_ms());
+            let slot_id = now.div_euclid(self.mode.cycle_ms());
 
             // 1 Hz UI clock.
             if now - self.last_tick_ms >= 1000 {
@@ -836,9 +868,11 @@ impl Engine {
             // We fire once per slot as soon as the 12.64 s waveform is captured
             // (~13.2 s in) rather than at the 15 s boundary, so decodes land a slot
             // earlier and the operator can reply on the next cycle (not skip one).
-            let rx_slot_id = now.div_euclid(CYCLE_MS);
-            let into_rx_cycle = now.rem_euclid(CYCLE_MS);
-            if self.decoding && rx_slot_id != self.last_decoded_slot && into_rx_cycle >= DECODE_AT_MS
+            let rx_slot_id = now.div_euclid(self.mode.cycle_ms());
+            let into_rx_cycle = now.rem_euclid(self.mode.cycle_ms());
+            if self.decoding
+                && rx_slot_id != self.last_decoded_slot
+                && into_rx_cycle >= self.mode.decode_at_ms()
             {
                 self.last_decoded_slot = rx_slot_id;
                 // The slot's audio so far = the most recent `into_rx_cycle` of it,
@@ -883,7 +917,8 @@ impl Engine {
                 self.tx_parity,
                 slot_id,
                 self.txed_slot,
-                now.rem_euclid(CYCLE_MS),
+                now.rem_euclid(self.mode.cycle_ms()),
+                self.mode.tx_latest_ms(),
             ) {
                 self.maybe_transmit(slot_id);
             }
@@ -950,7 +985,8 @@ impl Engine {
             self.tx_parity,
             slot_id,
             self.txed_slot,
-            self.now().rem_euclid(CYCLE_MS),
+            self.now().rem_euclid(self.mode.cycle_ms()),
+            self.mode.tx_latest_ms(),
         ) {
             return;
         }
@@ -971,12 +1007,54 @@ impl Engine {
 
     /// The TX slot index we're currently in, by real UTC.
     fn cur_slot(&self) -> i64 {
-        self.now().div_euclid(CYCLE_MS)
+        self.now().div_euclid(self.mode.cycle_ms())
     }
 
     /// Parity (0/1) of the slot we're currently in.
     fn cur_parity(&self) -> i64 {
         self.cur_slot().rem_euclid(2)
+    }
+
+    /// Switch operating mode (FT8/FT4) -- see `EngineCommand::SetMode`.
+    ///
+    /// Stops any in-flight TX/QSO/tune first, the same precaution
+    /// `DisconnectRig` takes: a mode's cycle length and tone encoding are
+    /// baked into a transmission from the moment it starts (the CAT-tone
+    /// path in particular captures `symbol_period` once into `CatToneTx`),
+    /// so switching mode mid-transmission would desync the rig from what's
+    /// actually still being clocked out. A no-op (but still safe to call)
+    /// when `mode` is already the current mode.
+    ///
+    /// The decode worker thread is built for one protocol for its whole
+    /// lifetime (see `spawn_decoder_thread`), so this tears the old one down
+    /// (dropping `self.slot_tx` ends its `recv()` loop) and spawns a fresh
+    /// one for the new mode. Scheduling state tied to slot boundaries
+    /// (`last_decoded_slot`, `pending_decodes`, `txed_slot`, `last_wf_slot`)
+    /// is reset too, since FT8's and FT4's slot grids don't line up --
+    /// carrying over a stale slot id from the old cycle length could skip a
+    /// decode or key a transmission on a bogus "already sent this slot" check.
+    fn switch_mode(&mut self, mode: Mode) {
+        if mode == self.mode {
+            return;
+        }
+        self.qso.stop();
+        self.tx_parity = None;
+        self.finalize_tx();
+
+        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.is_ft8());
+        self.slot_tx = slot_tx;
+        self.dec_rx = dec_rx;
+
+        self.mode = mode;
+        self.qso.mode = mode.display_name().to_string();
+        self.last_decoded_slot = -1;
+        self.pending_decodes = 0;
+        self.txed_slot = -1;
+        self.last_wf_slot = -1;
+
+        let _ = self.db.set_config("operating_mode", mode.display_name());
+        self.emit(EngineEvent::Info(format!("switched to {}", mode.display_name())));
+        self.publish_tx_state();
     }
 
     /// Begin transmitting `message`, returning immediately. Playback runs off the
@@ -996,7 +1074,7 @@ impl Engine {
         if self.tx_via_cat_tones {
             return self.start_transmit_cat_tones(message);
         }
-        let signal = match crate::dsp::encode::generate_ft8(message, self.tx_audio_hz as f32, SAMPLE_RATE) {
+        let signal = match crate::dsp::encode::generate_signal(message, self.tx_audio_hz as f32, SAMPLE_RATE, self.mode) {
             Some(s) => s,
             None => {
                 self.emit(EngineEvent::Error(format!("cannot encode '{message}'")));
@@ -1030,8 +1108,8 @@ impl Engine {
         // here, right before audio starts, so it reflects the real lateness after
         // the PTT settle — `maybe_transmit`'s window check keeps this at 0 in
         // normal operation.
-        let into_cycle = self.now().rem_euclid(CYCLE_MS);
-        let ms_late = (into_cycle - TX_SLACK_MS).max(0);
+        let into_cycle = self.now().rem_euclid(self.mode.cycle_ms());
+        let ms_late = (into_cycle - self.mode.audio_slack_ms()).max(0);
         if let Err(e) = prepared.start(ms_late) {
             self.emit(EngineEvent::Error(format!("playback failed: {e}")));
             self.set_ptt(false);
@@ -1042,7 +1120,7 @@ impl Engine {
         true
     }
 
-    /// The QMX CAT-tone TX path: no audio at all, just a `TA` command per FT8
+    /// The QMX CAT-tone TX path: no audio at all, just a `TA` command per
     /// symbol sent from [`Engine::service_cat_tx`] on the run loop's own
     /// tick. See [`CatToneTx`] and [`crate::qmx_cat_tones`].
     fn start_transmit_cat_tones(&mut self, message: &str) -> bool {
@@ -1053,21 +1131,26 @@ impl Engine {
                 return false;
             }
         };
-        let tones = encode::encode_tones(&payload);
+        let tones_vec = encode::encode_tones_mode(&payload, self.mode);
+        let symbol_period = self.mode.symbol_period();
+        let mut tones = [0u8; encode::FT4_NN];
+        tones[..tones_vec.len()].copy_from_slice(&tones_vec);
 
         // Key up, let the rig's T/R relay settle -- same as the audio path.
         self.set_ptt(true);
         std::thread::sleep(Duration::from_millis(PTT_DELAY_MS));
 
         // Same lateness math as the audio path (AGENTS.md gotcha: ms_late =
-        // max(0, into_cycle - 2360), NOT into_cycle % 15000), just converted
-        // to whole symbols instead of samples.
-        let into_cycle = self.now().rem_euclid(CYCLE_MS);
-        let ms_late = (into_cycle - TX_SLACK_MS).max(0);
-        let skip_until = cat_tones::symbols_to_skip(ms_late, encode::FT8_SYMBOL_PERIOD, tones.len());
+        // max(0, into_cycle - audio_slack_ms), NOT into_cycle % cycle_ms), just
+        // converted to whole symbols instead of samples.
+        let into_cycle = self.now().rem_euclid(self.mode.cycle_ms());
+        let ms_late = (into_cycle - self.mode.audio_slack_ms()).max(0);
+        let skip_until = cat_tones::symbols_to_skip(ms_late, symbol_period, tones_vec.len());
 
         self.tx_cat = Some(CatToneTx {
             tones,
+            len: tones_vec.len(),
+            symbol_period,
             base_hz: self.tx_audio_hz as f64,
             start: Instant::now(),
             sent_through: skip_until,
@@ -1123,15 +1206,15 @@ impl Engine {
     fn service_cat_tx(&mut self) {
         let Some(mut cat) = self.tx_cat else { return };
         let elapsed = cat.start.elapsed();
-        while cat.sent_through < cat.tones.len() {
+        while cat.sent_through < cat.len {
             let since_start = cat.sent_through - cat.skip_until;
-            let due_at = Duration::from_secs_f32(encode::FT8_SYMBOL_PERIOD) * since_start as u32;
+            let due_at = Duration::from_secs_f32(cat.symbol_period) * since_start as u32;
             if elapsed < due_at {
                 break;
             }
             let idx = cat.sent_through;
             cat.sent_through += 1;
-            let hz = cat_tones::tone_hz(cat.base_hz, cat.tones[idx], encode::FT8_SYMBOL_PERIOD);
+            let hz = cat_tones::tone_hz(cat.base_hz, cat.tones[idx], cat.symbol_period);
             if let Some(rig) = self.rig.as_mut() {
                 if let Err(e) = rig.send_raw_cat(&cat_tones::ta_command(hz)) {
                     self.emit(EngineEvent::Error(format!("CAT tone send failed: {e}")));
@@ -1142,8 +1225,8 @@ impl Engine {
         // instead of cutting it short the instant it's sent -- matches the
         // audio path, whose waveform already ends with a full-length symbol.
         let total_since_start =
-            Duration::from_secs_f32(encode::FT8_SYMBOL_PERIOD) * (cat.tones.len() - cat.skip_until) as u32;
-        let finished = cat.sent_through >= cat.tones.len() && elapsed >= total_since_start;
+            Duration::from_secs_f32(cat.symbol_period) * (cat.len - cat.skip_until) as u32;
+        let finished = cat.sent_through >= cat.len && elapsed >= total_since_start;
         self.tx_cat = Some(cat);
         if finished {
             self.finalize_tx();
@@ -1249,7 +1332,7 @@ impl Engine {
         };
         // Mark the first row at/after each UTC cycle boundary, matching the
         // fixed clock used for decoder windows.
-        let boundary = wf_boundary_row(self.now(), &mut self.last_wf_slot);
+        let boundary = wf_boundary_row(self.now(), &mut self.last_wf_slot, self.mode.cycle_ms());
         self.emit(EngineEvent::WaterfallRow(WaterfallRow { bins, hz_per_col, boundary }));
     }
 
@@ -1569,6 +1652,7 @@ impl Engine {
                 self.preferred_tx_parity = parity;
                 self.publish_tx_state();
             }
+            EngineCommand::SetMode(mode) => self.switch_mode(mode),
             EngineCommand::StartCq => {
                 self.tx_parity = self.preferred_tx_parity;
                 self.qso.start_cq();
@@ -1698,11 +1782,12 @@ impl Engine {
 mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, should_refresh_ptt,
-        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, CYCLE_MS, DEFAULT_RX_GAIN,
+        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, DEFAULT_RX_GAIN,
         DEFAULT_TX_GAIN, MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::db::Db;
     use crate::dsp::DecodedMessage;
+    use crate::mode::Mode;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1897,17 +1982,27 @@ mod tests {
 
     #[test]
     fn wf_boundary_fires_once_per_cycle() {
+        let cycle_ms = Mode::Ft8.cycle_ms();
         let mut last = -1;
         // First call always marks (initial slot differs from the -1 sentinel).
-        assert!(wf_boundary_row(0, &mut last));
+        assert!(wf_boundary_row(0, &mut last, cycle_ms));
         // Subsequent rows within the same 15 s slot do not re-mark.
-        assert!(!wf_boundary_row(100, &mut last));
-        assert!(!wf_boundary_row(CYCLE_MS - 1, &mut last));
+        assert!(!wf_boundary_row(100, &mut last, cycle_ms));
+        assert!(!wf_boundary_row(cycle_ms - 1, &mut last, cycle_ms));
         // Crossing into the next slot marks exactly once.
-        assert!(wf_boundary_row(CYCLE_MS, &mut last));
-        assert!(!wf_boundary_row(CYCLE_MS + 500, &mut last));
+        assert!(wf_boundary_row(cycle_ms, &mut last, cycle_ms));
+        assert!(!wf_boundary_row(cycle_ms + 500, &mut last, cycle_ms));
         // And again at the following boundary.
-        assert!(wf_boundary_row(2 * CYCLE_MS + 10, &mut last));
+        assert!(wf_boundary_row(2 * cycle_ms + 10, &mut last, cycle_ms));
+    }
+
+    #[test]
+    fn wf_boundary_fires_on_ft4s_shorter_cycle() {
+        let cycle_ms = Mode::Ft4.cycle_ms();
+        let mut last = -1;
+        assert!(wf_boundary_row(0, &mut last, cycle_ms));
+        assert!(!wf_boundary_row(cycle_ms - 1, &mut last, cycle_ms));
+        assert!(wf_boundary_row(cycle_ms, &mut last, cycle_ms));
     }
 
     #[test]
@@ -1921,45 +2016,60 @@ mod tests {
 
     #[test]
     fn tx_slot_eligible_enforces_active_parity_once_and_window() {
-        use super::{tx_slot_eligible, TX_LATEST_MS};
+        use super::tx_slot_eligible;
+        let tx_latest_ms = Mode::Ft8.tx_latest_ms();
         // Inactive QSO never keys.
-        assert!(!tx_slot_eligible(false, None, 10, -1, 0));
+        assert!(!tx_slot_eligible(false, None, 10, -1, 0, tx_latest_ms));
         // Active, no parity lock, fresh slot, at the very top of the cycle → eligible.
-        assert!(tx_slot_eligible(true, None, 10, -1, 0));
+        assert!(tx_slot_eligible(true, None, 10, -1, 0, tx_latest_ms));
         // The last instant that still fits the waveform is eligible; one ms later is not.
-        assert!(tx_slot_eligible(true, None, 10, -1, TX_LATEST_MS));
-        assert!(!tx_slot_eligible(true, None, 10, -1, TX_LATEST_MS + 1));
+        assert!(tx_slot_eligible(true, None, 10, -1, tx_latest_ms, tx_latest_ms));
+        assert!(!tx_slot_eligible(true, None, 10, -1, tx_latest_ms + 1, tx_latest_ms));
         // Already transmitted in this slot → no second keying.
-        assert!(!tx_slot_eligible(true, None, 10, 10, 0));
+        assert!(!tx_slot_eligible(true, None, 10, 10, 0, tx_latest_ms));
         // A locked parity must match the slot's parity (slot 10 is even, 11 is odd).
-        assert!(tx_slot_eligible(true, Some(0), 10, -1, 0));
-        assert!(!tx_slot_eligible(true, Some(1), 10, -1, 0));
-        assert!(tx_slot_eligible(true, Some(1), 11, -1, 0));
+        assert!(tx_slot_eligible(true, Some(0), 10, -1, 0, tx_latest_ms));
+        assert!(!tx_slot_eligible(true, Some(1), 10, -1, 0, tx_latest_ms));
+        assert!(tx_slot_eligible(true, Some(1), 11, -1, 0, tx_latest_ms));
+    }
+
+    #[test]
+    fn tx_slot_eligible_respects_whatever_tx_latest_ms_the_caller_passes() {
+        use super::tx_slot_eligible;
+        // FT4's TX window (2360ms) is a different, independently-computed value
+        // from FT8's (2260ms) -- the gate must use exactly whichever one the
+        // caller passes in, not a hard-coded FT8 assumption.
+        let ft4_latest = Mode::Ft4.tx_latest_ms();
+        assert_ne!(ft4_latest, Mode::Ft8.tx_latest_ms());
+        assert!(tx_slot_eligible(true, None, 10, -1, ft4_latest, ft4_latest));
+        assert!(!tx_slot_eligible(true, None, 10, -1, ft4_latest + 1, ft4_latest));
     }
 
     #[test]
     fn boundary_tx_keys_at_slot_top_only_after_this_slots_decode() {
-        use super::{boundary_tx_ready, TX_LATEST_MS};
+        use super::boundary_tx_ready;
+        let tx_latest_ms = Mode::Ft8.tx_latest_ms();
         // Fast decode: this slot's decodes are already processed (awaiting=false), so a
         // reply computed in the previous cycle keys at the top of its slot. This is the
         // case the decode-arrival trigger used to miss — it fires mid-slot, past the
         // window, so the queued reply/CQ was silently dropped. (First arg is `decoding`,
         // true throughout here — the normal case.)
-        assert!(boundary_tx_ready(true, true, false, None, 4, -1, 0));
+        assert!(boundary_tx_ready(true, true, false, None, 4, -1, 0, tx_latest_ms));
         // Slow decode still pending: must NOT key a (stale) message; handle_decoded
         // keys the fresh one when the decode lands.
-        assert!(!boundary_tx_ready(true, true, true, None, 4, -1, 0));
+        assert!(!boundary_tx_ready(true, true, true, None, 4, -1, 0, tx_latest_ms));
         // Past the window, already transmitted this slot, wrong parity, or inactive all
         // block it too (it delegates to tx_slot_eligible).
-        assert!(!boundary_tx_ready(true, true, false, None, 4, -1, TX_LATEST_MS + 1));
-        assert!(!boundary_tx_ready(true, true, false, None, 4, 4, 0));
-        assert!(!boundary_tx_ready(true, true, false, Some(1), 4, -1, 0)); // wants odd, slot 4 even
-        assert!(!boundary_tx_ready(true, false, false, None, 4, -1, 0));
+        assert!(!boundary_tx_ready(true, true, false, None, 4, -1, tx_latest_ms + 1, tx_latest_ms));
+        assert!(!boundary_tx_ready(true, true, false, None, 4, 4, 0, tx_latest_ms));
+        assert!(!boundary_tx_ready(true, true, false, Some(1), 4, -1, 0, tx_latest_ms)); // wants odd, slot 4 even
+        assert!(!boundary_tx_ready(true, false, false, None, 4, -1, 0, tx_latest_ms));
     }
 
     #[test]
     fn boundary_tx_is_dormant_while_decoding_is_stopped() {
         use super::boundary_tx_ready;
+        let tx_latest_ms = Mode::Ft8.tx_latest_ms();
         // Regression for the StopDecode runaway-TX bug: after the operator stops
         // decoding, `pending_decodes` is reset to 0 (so the awaiting gate opens) but a
         // CQ/QSO left `active` keeps `qso.active` and `tx_parity` set. The per-tick
@@ -1967,10 +2077,10 @@ mod tests {
         // keys every eligible slot with the receiver muted (transmitting unattended).
         // Every other input here is exactly the "would key" case from the test above;
         // only `decoding == false` must hold it back.
-        assert!(!boundary_tx_ready(false, true, false, None, 4, -1, 0));
-        assert!(!boundary_tx_ready(false, true, false, Some(0), 4, -1, 0));
+        assert!(!boundary_tx_ready(false, true, false, None, 4, -1, 0, tx_latest_ms));
+        assert!(!boundary_tx_ready(false, true, false, Some(0), 4, -1, 0, tx_latest_ms));
         // Turning decoding back on restores keying (the fix changes nothing else).
-        assert!(boundary_tx_ready(true, true, false, None, 4, -1, 0));
+        assert!(boundary_tx_ready(true, true, false, None, 4, -1, 0, tx_latest_ms));
     }
 
     #[test]
