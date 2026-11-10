@@ -473,27 +473,66 @@ select option {
 .muted { color: var(--muted); }
 
 /* Logbook tab: inline search/filter/export controls + edit dialog. */
+/* Logbook sub-tabs (Stats / Recent / Awards) -- matches Android's segmented
+   control at the top of the Logbook screen. Stats/Awards are themselves
+   honest "not built yet" placeholders (ComingSoonScreen); this is just the
+   tab row that was missing entirely before. */
+.log-subtabs {
+  display: flex; background: var(--panel-2); border-radius: var(--radius-pill);
+  padding: 3px; margin-bottom: 12px; gap: 2px;
+}
+.log-subtab {
+  flex: 1; padding: 8px 0; border-radius: var(--radius-pill);
+  background: transparent; color: var(--muted); font-weight: 600; font-size: 13px;
+  cursor: pointer;
+}
+.log-subtab.active { background: var(--panel-3); color: var(--accent); }
+
 .logbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .logbar .search { min-width: 160px; }
 .logbar .date { width: 140px; }
 .confirm-dot { color: var(--ok); font-weight: 700; }
 
-/* Logbook table: sortable headers, status pill + sync chips, QSL marks. */
+/* Logbook table: matches Android's QsoTableHeader/QsoTableRow/QsoTableCell
+   almost cell-for-cell -- monospace (Android's Geist Mono; this app's own
+   .mono stack), a real border around every cell (not just row separators),
+   and the same per-column text colors, not just a `.call-cell` exception. */
+.qso-table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  font-family: "Geist Mono", "Cascadia Code", "SF Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.qso-table th, .qso-table td {
+  border: 1px solid var(--border);
+  padding: 7px 6px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* Fixed row height, enforced here rather than left to content: the Logbook
    table is virtualized (see LogScreen in App.tsx) and the windowing math
-   needs an exact, known row height to compute scroll offsets and spacers. */
-.qso-table tbody tr { height: 26px; }
+   needs an exact, known row height to compute scroll offsets and spacers.
+   32, not the cells' own natural height -- see ROW_HEIGHT's comment in
+   App.tsx for why this exact number, and keep the two in sync. */
+.qso-table tbody tr { height: 32px; }
 /* Headers stack onto two lines on an explicit \n in the label (not ordinary
    word-wrap, which would break at an unpredictable width) -- narrower
    columns for the wide ones (Freq MHz, RST Sent/Rcvd), freeing up width for
    the rest of the table. Data cells stay single-line (base `td` rule). */
-.qso-table th { white-space: pre-line; line-height: 1.25; }
+.qso-table th {
+  white-space: pre-line; line-height: 1.25; text-align: left;
+  color: var(--muted); font-weight: 700;
+}
 .qso-table th.sortable { cursor: pointer; user-select: none; }
 .qso-table th.sortable:hover { color: var(--text); }
-.qso-table th.sorted {
-  color: var(--yellow); background: rgba(255,193,7,0.16); font-weight: 700;
-}
+/* Matches Android's QsoTableHeader exactly: Accent text on an AccentSoft
+   background for the sorted column -- this was --yellow (Android
+   StatusWarn) before, a color that role never actually uses on Android. */
+.qso-table th.sorted { color: var(--accent); background: var(--accent-soft); font-weight: 700; }
 .qso-table .call-cell { font-weight: 700; color: var(--accent); }
+/* Matches Android's QsoTableRow cell-color list exactly (Grid = Signal). */
+.qso-table .grid-cell { color: var(--signal); }
 .qso-table .status-cell, .qso-table .qsl-cell {
   white-space: nowrap; display: flex; align-items: center; gap: 4px;
 }
@@ -502,9 +541,20 @@ select option {
   font-size: 10px; font-weight: 700; letter-spacing: 0.3px;
 }
 .status-pill.conf { background: rgba(63,174,106,0.18); color: var(--ok); }
+/* Sync-to-service chips (CL/QRZ): matches Android's SyncChip exactly --
+   Signal color at the same alphas, no "↑" prefix (that's only shown in
+   Android's portrait card view; this table is the "tight" landscape style). */
+.sync-chip {
+  display: inline-block; padding: 2px 5px; border-radius: 4px;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.2px;
+  background: rgba(92, 214, 232, 0.14); color: var(--signal);
+  border: 1px solid rgba(92, 214, 232, 0.32);
+}
 .qsl-mark { font-size: 10.5px; font-weight: 600; }
 .qsl-mark.rcvd { color: var(--ok); }
-.qsl-mark.sent { color: var(--accent); }
+/* Matches Android's QslMarksText: the sent/upload mark uses Signal (cyan),
+   not Accent -- this was wrong (amber) until the user asked for exact parity. */
+.qsl-mark.sent { color: var(--signal); }
 .qsl-mark.none { color: var(--muted); }
 
 /* Edit-QSO dialog: QSL/upload checkboxes in two columns. */

@@ -203,9 +203,9 @@ export const QSO_COL_QSL = 10;
 // white-space: pre-line) -- narrower columns for the wider headers, freeing
 // up width for the rest of the table, matching Android's header style.
 export const QSO_TABLE_COLUMNS = [
-  { col: QSO_COL_DATE, label: "Date" },
-  { col: QSO_COL_TIME, label: "Time" },
-  { col: QSO_COL_CALL, label: "Call" },
+  { col: QSO_COL_DATE, label: "QSO\nDate" },
+  { col: QSO_COL_TIME, label: "QSO\nTime" },
+  { col: QSO_COL_CALL, label: "Callsign" },
   { col: QSO_COL_GRID, label: "Grid" },
   { col: QSO_COL_STATE, label: "State" },
   { col: QSO_COL_FREQ, label: "Freq\nMHz" },
@@ -215,6 +215,12 @@ export const QSO_TABLE_COLUMNS = [
   { col: QSO_COL_STATUS, label: "Status" },
   { col: QSO_COL_QSL, label: "QSL" },
 ] as const;
+
+/** Column width weights, same order as `QSO_TABLE_COLUMNS`, matching
+ *  Android's `QsoTableWeights` exactly (`LogbookScreen.kt`) -- the
+ *  trailing fixed-width delete-button column isn't weighted, same as
+ *  Android's own `QsoTableMenuWidth` (36dp) sits outside this list. */
+export const QSO_TABLE_WEIGHTS = [1.02, 0.58, 0.95, 0.62, 0.75, 0.68, 0.75, 0.55, 0.55, 0.62, 0.98] as const;
 
 /**
  * The State column's display value: a non-US logged COUNTRY is shown as is;
@@ -271,6 +277,28 @@ function qslScore(r: QsoRecord): number {
  */
 export function qsoStatusLabel(r: QsoRecord): "CONF" | null {
   return r.lotw_rcvd || r.qrz_qsl ? "CONF" : null;
+}
+
+/**
+ * Sync-to-service chip labels shown beside the Status pill -- which online
+ * logbooks this row has already been uploaded to ("CL" for Cloudlog/
+ * Wavelog/Nextlog, "QRZ" for QRZ.com), ported from Android's
+ * `syncChipLabels`/`SyncChips`. Previously omitted here on the theory that
+ * the QRZ tag read as a confirmation when it only means "uploaded" -- the
+ * user's direct call was to match Android exactly instead, so this is back;
+ * `qsoStatusLabel`'s own CONF-vs-not logic is unchanged (it never looked at
+ * these flags for confirmation, only `lotw_rcvd`/`qrz_qsl`). Android also
+ * has a "WRL" (World Radio League) chip; desktop has no WRL upload tracking
+ * to port that from, so only CL/QRZ apply. No distinct Wavelog/Nextlog
+ * hostname label either (Android picks "WL"/"NL"/"CL" from the configured
+ * server address) -- desktop's `synced_cloudlog` doesn't carry which one it
+ * was, so this always shows the generic "CL".
+ */
+export function qsoSyncLabels(r: QsoRecord): string[] {
+  const labels: string[] = [];
+  if (r.synced_cloudlog) labels.push("CL");
+  if (r.synced_qrz) labels.push("QRZ");
+  return labels;
 }
 
 /** Sortable status score: confirmed first, then newest (via the stable sort's

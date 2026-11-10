@@ -14,6 +14,7 @@ import {
   qslMarks,
   qsoCountLabel,
   qsoStatusLabel,
+  qsoSyncLabels,
   QSO_COL_CALL,
   QSO_COL_DATE,
   QSO_COL_FREQ,
@@ -251,7 +252,8 @@ describe("qslMarks", () => {
 
 describe("qsoStatusLabel", () => {
   // User's explicit call (2026-11-03, ported from Android): CONF only for
-  // LoTW or QRZ.com confirmation; no WORKED tier, no upload-sync chips here.
+  // LoTW or QRZ.com confirmation; no WORKED tier. Upload-sync chips
+  // (qsoSyncLabels, below) are a separate, independent indicator.
   it("LoTW or QRZ.com confirmation shows CONF", () => {
     expect(qsoStatusLabel(qso({ lotw_rcvd: true }))).toBe("CONF");
     expect(qsoStatusLabel(qso({ qrz_qsl: true }))).toBe("CONF");
@@ -264,6 +266,28 @@ describe("qsoStatusLabel", () => {
 
   it("no confirmation at all is no pill", () => {
     expect(qsoStatusLabel(qso({}))).toBeNull();
+  });
+});
+
+describe("qsoSyncLabels", () => {
+  it("no uploads shows no chips", () => {
+    expect(qsoSyncLabels(qso({}))).toEqual([]);
+  });
+
+  it("Cloudlog upload shows CL", () => {
+    expect(qsoSyncLabels(qso({ synced_cloudlog: true }))).toEqual(["CL"]);
+  });
+
+  it("QRZ.com upload shows QRZ", () => {
+    expect(qsoSyncLabels(qso({ synced_qrz: true }))).toEqual(["QRZ"]);
+  });
+
+  it("both uploads show both chips, Cloudlog first", () => {
+    expect(qsoSyncLabels(qso({ synced_cloudlog: true, synced_qrz: true }))).toEqual(["CL", "QRZ"]);
+  });
+
+  it("a confirmation flag alone (no upload) shows no sync chips", () => {
+    expect(qsoSyncLabels(qso({ qrz_qsl: true, lotw_rcvd: true }))).toEqual([]);
   });
 });
 

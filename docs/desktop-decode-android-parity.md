@@ -808,6 +808,115 @@ one-line change to an existing, already-tested `api.searchLog` call; the
 underlying `search_qsos` pagination was already covered by
 `search_qsos_matches_predicate_and_paginates`).
 
+## Done this round, part 12: Logbook display parity audit
+
+The user asked for a direct side-by-side comparison (`~/Pictures/android.png`
+vs `~/Pictures/desktop.png`, a real device screenshot vs. this build) with
+the explicit goal "they should be identical." Found and fixed two real
+divergences, confirmed against Android's actual current source (not
+guessed from the screenshot):
+
+- **Status column was missing the upload-sync chips.** Android's Status
+  cell shows the CONF pill *and* a separate "QRZ"/"CL" chip when the row's
+  been uploaded to QRZ.com or Cloudlog/Wavelog/Nextlog
+  (`syncChipLabels`/`SyncChip` in `LogbookScreen.kt`) -- a different signal
+  from confirmation (`qsoStatusOf`, CONF only for LoTW/QRZ.com
+  confirmation). Desktop's `qsoStatusLabel` already matched the CONF logic
+  exactly, but a previous round (2026-11-03) deliberately left the sync
+  chips out, reasoning the QRZ tag "read as a confirmation when it only
+  meant uploaded." The user's direct call tonight was to match Android
+  exactly instead, so they're back: new `qsoSyncLabels(r)` in `logbook.ts`
+  (`synced_cloudlog` -> "CL", `synced_qrz` -> "QRZ", in that order,
+  matching Android's fixed order -- no WRL chip, desktop has no World Radio
+  League upload tracking to port that from), rendered in `App.tsx`'s
+  Status cell next to the CONF pill, styled as a small bordered chip
+  (`.sync-chip` in `styles.css`) using the exact same Signal-color
+  alphas as Android's `SyncChip` composable. Not visually confirmed live
+  with real data -- no row in the current database has either flag set
+  (desktop has no live Cloudlog/QRZ upload-sync feature yet to ever set
+  them, a separate, already-documented gap), and directly editing the
+  production database to manufacture a test case was (correctly) blocked
+  as a destructive action. Covered by new unit tests instead
+  (`qsoSyncLabels` x5 in `logbook.test.ts`).
+- **QSL "sent" mark was the wrong color.** Android's `QslMarksText` uses
+  `StatusConfirmed` (green) for a received mark, `Signal` (cyan) for a
+  sent-only mark, `TextFaint` (dim) for neither. Desktop's `.qsl-mark.sent`
+  was `var(--accent)` (amber) -- confirmed live after the fix, now
+  `var(--signal)` (cyan), matching exactly.
+- **Column header text**: "Date"/"Time"/"Call" -> "QSO\nDate"/"QSO\nTime"/
+  "Callsign", matching Android's actual string resources
+  (`strings_compose.xml`'s `log_col_qso_date`/`log_col_qso_time`/
+  `log_col_callsign`) exactly -- the other 8 header labels already matched.
+
+**Confirmed already matching, not changed**: the sorted-column header
+highlight color (`AccentSoft`/`Accent` in Android, `--accent-soft`/
+`--accent` on desktop -- the android.png screenshot's compression made
+this look like a different grey-brown color at a glance, but the source
+confirms both use the same amber-family token).
+
+**Round 2, after "the display looks nowhere like the android display"**:
+the first pass above was real but too shallow -- logic/data fixes without
+touching the table's actual visual structure, which had never been styled
+to match Android's grid-like look in the first place (confirmed: no base
+`table`/`th`/`td` rule existed at all; only a few specific exceptions like
+`.call-cell`). Read Android's `QsoTableHeader`/`QsoTableRow`/`QsoTableCell`
+in full and ported the visual structure itself, not just colors:
+
+- **Per-cell borders.** Android draws a `0.5dp` border around *every* cell,
+  header and data alike (`QsoTableCell`'s own `.border(0.5.dp, Border)`) --
+  that's what gives the grid-like, boxed-header look, not a header-only
+  style. Desktop had no cell borders at all. Added `.qso-table th, .qso-table
+  td { border: 1px solid var(--border); }`.
+- **Monospace font.** Android uses `GeistMonoFamily` ("Geist Mono") for
+  the whole table, "kept for tabular data columns... whose numeric/column
+  alignment relies on Geist Mono's fixed advance widths." Desktop already
+  had a `.mono` utility class with the same font stack (used elsewhere,
+  e.g. the waterfall) but the Logbook table never used it. Applied directly
+  to `.qso-table`.
+- **Column widths.** Android weights each column (`QsoTableWeights =
+  [1.02, 0.58, 0.95, 0.62, 0.75, 0.68, 0.75, 0.55, 0.55, 0.62, 0.98]`,
+  `LogbookScreen.kt`); desktop's columns were all equal width. Ported the
+  exact same weights as a new `QSO_TABLE_WEIGHTS` export (`logbook.ts`),
+  applied via a `<colgroup>` of percentage widths (`table-layout: fixed`
+  for them to take effect) instead of letting the browser auto-size by
+  content.
+- **Per-column text colors.** Android's `QsoTableRow` colors each cell
+  individually (Grid = `Signal`/cyan, Call = `Accent`/bold -- already had
+  this one, State/place = `TextMuted`). Desktop only had the Call-cell
+  color; added `.grid-cell` (signal) and a `muted` class on the State cell.
+- **Sorted-header color, a real bug, not just a shade difference.**
+  Desktop's `.qso-table th.sorted` used `var(--yellow)` -- Android's
+  `QsoTableHeader` uses `Accent`/`AccentSoft` for this, a role `--yellow`
+  (Android's own `StatusWarn`) never actually plays. Fixed to
+  `var(--accent)`/`var(--accent-soft)`.
+- **Row height** bumped from 26px to 32px (`ROW_HEIGHT` in `App.tsx`,
+  kept in sync with the CSS as the row-virtualization code requires) to
+  fit the real padding (7px vertical, matching Android's `7.dp`) instead
+  of a tight single-line squeeze -- this is what reads as Android's
+  "noticeably taller rows" from a straight screenshot comparison, it just
+  needed the real padding Android actually uses, not an arbitrary bump.
+- **The missing Stats / Recent / Awards row.** Added the three-way tab row
+  itself (`.log-subtabs`/`.log-subtab`, a segmented control matching the
+  screenshot) -- "Recent" is the only functional one (today's table);
+  Stats and Awards show an honest `ComingSoonScreen` placeholder rather
+  than fake content, since those are real, separate, much larger bodies of
+  work (VUCC/WAS/WAC award tracking, a "Best DX" card), not a display fix.
+  This was flagged as out-of-scope-for-tonight in round 1 of this parity
+  pass; the user's follow-up made clear the *tab row itself* (even empty)
+  was still a visible, expected part of "identical," so it's back as a
+  real but honestly-labeled part of the screen.
+
+**Still genuinely out of scope** (separate features, not display): Stats'
+and Awards' actual content (as above); a real per-band filter/indicator to
+match Android's "· All bands" subtitle (would need new filtering logic,
+not just a label); the search box's magnifying-glass/clear-button icons
+(cosmetic, deferred, not requested again after round 1).
+
+**Testing**: 177 vitest tests (+5 net: `qsoSyncLabels`, 5 cases). No Rust
+changes this round -- everything in both rounds was TS/CSS. Verified live
+both rounds, not just by reading the diff; memory stayed flat (~2.6GB
+available) through both rebuild-and-relaunch cycles.
+
 ## Build note
 
 `npm run tauri -- build --no-bundle` is the only way to get a real,

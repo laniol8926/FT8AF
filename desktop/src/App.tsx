@@ -53,8 +53,10 @@ import {
   qslMarks,
   qsoCountLabel,
   qsoStatusLabel,
+  qsoSyncLabels,
   QSO_COL_DATE,
   QSO_TABLE_COLUMNS,
+  QSO_TABLE_WEIGHTS,
   sortQsoTable,
   type ConfirmFilter,
   type QsoEditForm,
@@ -2444,7 +2446,17 @@ function SpectrumWidthDialog({
   );
 }
 
+// Sum of QSO_TABLE_WEIGHTS, for turning each weight into a <col> percentage.
+const QSO_TABLE_WEIGHT_TOTAL = QSO_TABLE_WEIGHTS.reduce((a, b) => a + b, 0);
+
 function LogScreen() {
+  // Android's Logbook is three sub-tabs (Stats / Recent / Awards); desktop
+  // only has Recent's equivalent (the QSO table) built. Stats and Awards
+  // are real, separate bodies of work (VUCC/WAS/WAC award tracking, a
+  // "Best DX" card, etc.) -- not a display-parity fix -- so they show
+  // honestly as not-yet-built rather than faking content, same pattern as
+  // the Map/POTA tabs before they were real.
+  const [logbookTab, setLogbookTab] = useState<"stats" | "recent" | "awards">("recent");
   const [rows, setRows] = useState<QsoRecord[]>([]);
   const [count, setCount] = useState(0);
   const [search, setSearch] = useState("");
@@ -2479,7 +2491,10 @@ function LogScreen() {
   // rows stand in for the rest so the scrollbar still reflects the true
   // total. ROW_HEIGHT must match the CSS-enforced `.qso-table tbody tr`
   // height exactly, or the windowing math and the real scroll height disagree.
-  const ROW_HEIGHT = 26;
+  // 32, not 26: matches Android's QsoTableCell padding (6dp horizontal, 7dp
+  // vertical -- i.e. real visible row padding, not just a tight single-line
+  // squeeze) now that the table actually carries per-cell borders/padding.
+  const ROW_HEIGHT = 32;
   const OVERSCAN = 8;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -2572,6 +2587,31 @@ function LogScreen() {
 
   return (
     <>
+      <div className="log-subtabs">
+        {(["stats", "recent", "awards"] as const).map((tab) => (
+          <button
+            key={tab}
+            className={logbookTab === tab ? "log-subtab active" : "log-subtab"}
+            onClick={() => setLogbookTab(tab)}
+          >
+            {tab === "stats" ? "Stats" : tab === "recent" ? "Recent" : "Awards"}
+          </button>
+        ))}
+      </div>
+      {logbookTab === "stats" && (
+        <ComingSoonScreen
+          title="Stats"
+          detail="VUCC grid-square progress, a Best DX card, and other logbook statistics, matching the Android app's Stats tab, are planned but not built yet."
+        />
+      )}
+      {logbookTab === "awards" && (
+        <ComingSoonScreen
+          title="Awards"
+          detail="Worked All States (WAS), Worked All Continents (WAC), and other award tracking, matching the Android app's Awards tab, are planned but not built yet."
+        />
+      )}
+      {logbookTab === "recent" && (
+        <>
       <div className="logbar">
         <strong>
           {qsoCountLabel(count, rows.length, isLogFiltered(search, filter) || rows.length < count)}
@@ -2621,6 +2661,12 @@ function LogScreen() {
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
       >
       <table className="qso-table">
+        <colgroup>
+          {QSO_TABLE_WEIGHTS.map((w, i) => (
+            <col key={i} style={{ width: `${(w / QSO_TABLE_WEIGHT_TOTAL) * 100}%` }} />
+          ))}
+          <col style={{ width: "36px" }} />
+        </colgroup>
         <thead>
           <tr>
             {QSO_TABLE_COLUMNS.map(({ col, label }) => {
@@ -2654,8 +2700,8 @@ function LogScreen() {
                 <td onClick={() => setEditing(r)}>{adifToDateInput(r.qso_date)}</td>
                 <td onClick={() => setEditing(r)}>{formatHhmm(r.time_on)}</td>
                 <td onClick={() => setEditing(r)} className="call-cell">{r.call}</td>
-                <td onClick={() => setEditing(r)}>{r.gridsquare}</td>
-                <td onClick={() => setEditing(r)}>{logbookPlace(r) ?? ""}</td>
+                <td onClick={() => setEditing(r)} className="grid-cell">{r.gridsquare}</td>
+                <td onClick={() => setEditing(r)} className="muted">{logbookPlace(r) ?? ""}</td>
                 <td onClick={() => setEditing(r)}>{r.freq}</td>
                 <td onClick={() => setEditing(r)}>{r.mode}</td>
                 <td onClick={() => setEditing(r)}>{displayReport(r.rst_sent)}</td>
@@ -2663,6 +2709,9 @@ function LogScreen() {
                 <td onClick={() => setEditing(r)}>
                   <div className="status-cell">
                     {status && <span className="status-pill conf">{status}</span>}
+                    {qsoSyncLabels(r).map((label) => (
+                      <span key={label} className="sync-chip">{label}</span>
+                    ))}
                   </div>
                 </td>
                 <td onClick={() => setEditing(r)}>
@@ -2698,6 +2747,8 @@ function LogScreen() {
         </tbody>
       </table>
       </div>
+        </>
+      )}
       {editing !== undefined && (
         <EditQsoDialog
           record={editing}
