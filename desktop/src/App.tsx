@@ -361,6 +361,64 @@ export default function App() {
   const [fccSeedSummary, setFccSeedSummary] = useState<FccSeedSummary | null>(null);
   const [fccSeedError, setFccSeedError] = useState<string | null>(null);
 
+  // Logbook import/export state, lifted up from LogScreen: Android's three-
+  // icon action row (Upload/Download/Share, LogbookScreen.kt's TopBar
+  // `actions`) lives in LogbookTopBar, a sibling of LogScreen rather than its
+  // parent (App()'s layout always renders a top bar above `.content`, unlike
+  // Android where one composable owns both) -- so the state those icons
+  // drive has to live here, the nearest common ancestor, not inside
+  // LogScreen. logRefreshKey mirrors Android's own `refreshKey` pattern
+  // (LogbookScreen.kt: "Bumped after an edit or delete to re-run the
+  // loader") so LogScreen's own refresh() still re-runs after an import
+  // completes without lifting its search/filter/rows state too.
+  const [logRefreshKey, setLogRefreshKey] = useState(0);
+  const [exportRangeStart, setExportRangeStart] = useState("");
+  const [exportRangeEnd, setExportRangeEnd] = useState("");
+  const [exportSheetOpen, setExportSheetOpen] = useState(false);
+  const [importResult, setImportResult] = useState<ImportSummary | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
+  const [uploadSyncNotice, setUploadSyncNotice] = useState(false);
+
+  async function startImportAdif() {
+    // The file never crosses IPC as content -- a native dialog returns just
+    // a path, and the Rust side opens and streams the file itself (see
+    // ipc.ts's importAdif doc comment: the previous file.text()-then-invoke
+    // approach could buffer a large real log several times over in memory
+    // and locked this board up twice on a real ~80MB file).
+    const path = await api.pickAdifFile();
+    if (!path) return; // Cancel
+    // Set busy state synchronously, before the first await -- otherwise the
+    // button and progress popup stay unchanged (looking like the click did
+    // nothing) for however long the IPC round-trip takes to even start.
+    setImportResult(null);
+    setImportError(null);
+    setImportProgress({ processed: 0, total: 0 });
+    const unlisten = await onImportProgress(setImportProgress);
+    try {
+      setImportResult(await api.importAdif(path));
+    } catch (err) {
+      setImportError(String(err));
+    } finally {
+      unlisten();
+      setImportProgress(null);
+    }
+    setLogRefreshKey((k) => k + 1);
+  }
+
+  async function exportAdif() {
+    const { start, end } = buildExportArgs(exportRangeStart, exportRangeEnd);
+    const adif = await api.exportAdif(start, end);
+    const blob = new Blob([adif], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "ft8af_log.adi";
+    a.click();
+    URL.revokeObjectURL(url);
+    setExportSheetOpen(false);
+  }
+
   useEffect(() => {
     let cancelled = false;
     let unlistenProgress: (() => void) | undefined;
@@ -765,6 +823,24 @@ export default function App() {
       {fccSeedError && (
         <FccGridSeedErrorDialog message={fccSeedError} onDone={() => setFccSeedError(null)} />
       )}
+      {importProgress && <ImportProgressDialog progress={importProgress} />}
+      {importResult && (
+        <ImportCompleteDialog summary={importResult} onDone={() => setImportResult(null)} />
+      )}
+      {importError && (
+        <ImportErrorDialog message={importError} onDone={() => setImportError(null)} />
+      )}
+      {exportSheetOpen && (
+        <ExportLogSheet
+          rangeStart={exportRangeStart}
+          rangeEnd={exportRangeEnd}
+          onRangeStart={setExportRangeStart}
+          onRangeEnd={setExportRangeEnd}
+          onExport={exportAdif}
+          onClose={() => setExportSheetOpen(false)}
+        />
+      )}
+      {uploadSyncNotice && <UploadSyncNoticeDialog onDone={() => setUploadSyncNotice(false)} />}
       {tab === "log" ? (
         <LogbookTopBar
           cycle={cycle}
@@ -773,6 +849,10 @@ export default function App() {
           rigLabel={rigLabel}
           txState={txState}
           clock={clock}
+          importBusy={!!importProgress}
+          onUpload={() => setUploadSyncNotice(true)}
+          onImport={startImportAdif}
+          onExport={() => setExportSheetOpen(true)}
         />
       ) : (
       <TopBar
@@ -875,7 +955,7 @@ export default function App() {
             />
           </div>
         )}
-        {tab === "log" && <LogScreen />}
+        {tab === "log" && <LogScreen refreshKey={logRefreshKey} />}
         {tab === "settings" && (
           <SettingsScreen
             onStatus={setStatus}
@@ -1749,7 +1829,7 @@ function SyncRow({
  * Logbook tab only (not Map/Settings/POTA), matching this one screen.
  */
 function LogbookTopBar({
-  cycle, operatingMode, rig, rigLabel, txState, clock,
+  cycle, operatingMode, rig, rigLabel, txState, clock, importBusy, onUpload, onImport, onExport,
 }: {
   cycle: CycleTick | null;
   operatingMode: OperatingMode;
@@ -1757,6 +1837,10 @@ function LogbookTopBar({
   rigLabel: string;
   txState: TxStateEvent | null;
   clock: ClockSyncEvent | null;
+  importBusy: boolean;
+  onUpload: () => void;
+  onImport: () => void;
+  onExport: () => void;
 }) {
   // Not lifted from LogScreen's own `count` state (a sibling, not a parent/
   // child of this component) -- a second, independent fetch of the same
@@ -1764,7 +1848,7 @@ function LogbookTopBar({
   const [count, setCount] = useState(0);
   useEffect(() => {
     api.logCount().then(setCount);
-  }, []);
+  }, [importBusy]);
 
   const cycleMs = MODE_CYCLE_MS[operatingMode];
   const secondsLeft = cycle ? Math.max(0, Math.ceil((cycleMs - cycle.ms_into_cycle) / 1000)) : null;
@@ -1778,6 +1862,27 @@ function LogbookTopBar({
         <span className="logbook-subtitle muted">{count} QSOs &middot; All bands</span>
         <div className="spacer" />
         <RxTxRadioChips transmitting={transmitting} secondsLeft={secondsLeft} rig={rig} rigLabel={rigLabel} />
+        {/* Matches LogbookScreen.kt's TopBar `actions`: Upload (CloudUpload,
+            "sync to logging services"), Download (FileDownload, import), Share
+            (export) -- in that order, after the status chips. Desktop has no
+            Cloudlog/QRZ upload-sync integration yet (a separate, already-
+            documented gap, see docs/desktop-decode-android-parity.md), so
+            Upload shows an honest "not available" notice instead of either
+            silently doing nothing or faking a real sync. */}
+        <button className="icon-button topbar-icon" title="Sync to logging services" onClick={onUpload}>
+          ↑
+        </button>
+        <button
+          className="icon-button topbar-icon"
+          title="Import QSOs"
+          onClick={onImport}
+          disabled={importBusy}
+        >
+          ↓
+        </button>
+        <button className="icon-button topbar-icon" title="Export QSOs" onClick={onExport}>
+          ↗
+        </button>
       </div>
       <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} />
     </div>
@@ -2615,7 +2720,7 @@ function QsoActionsMenu({ onEdit, onDelete }: { onEdit: () => void; onDelete: ()
   );
 }
 
-function LogScreen() {
+function LogScreen({ refreshKey }: { refreshKey: number }) {
   // Android's Logbook is three sub-tabs (Stats / Recent / Awards); desktop
   // only has Recent's equivalent (the QSO table) built. Stats and Awards
   // are real, separate bodies of work (VUCC/WAS/WAC award tracking, a
@@ -2627,17 +2732,8 @@ function LogScreen() {
   const [count, setCount] = useState(0);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ConfirmFilter>("all");
-  // ADIF-export date-range pickers (empty = open bound).
-  const [rangeStart, setRangeStart] = useState("");
-  const [rangeEnd, setRangeEnd] = useState("");
   // Edit-QSO dialog target: undefined = closed, null = new QSO, record = edit.
   const [editing, setEditing] = useState<QsoRecord | null | undefined>(undefined);
-  // Import completion dialog state: exactly one of these is set once an
-  // import finishes, matching the Android app's "Import Complete"/error
-  // popup (dismissed with its own "Done" button, not auto-hidden).
-  const [importResult, setImportResult] = useState<ImportSummary | null>(null);
-  const [importError, setImportError] = useState<string | null>(null);
-  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
   // Table sort: newest-first (Date, descending) by default.
   const [sortColumn, setSortColumn] = useState<number>(QSO_COL_DATE);
   const [sortAscending, setSortAscending] = useState(false);
@@ -2698,46 +2794,11 @@ function LogScreen() {
     api.searchLog(search, filter, LOG_FETCH_LIMIT, 0).then(setRows);
     api.logCount().then(setCount);
   }
-  // Re-query whenever the live search box or the confirmation filter changes.
-  useEffect(refresh, [search, filter]);
-
-  async function exportAdif() {
-    const { start, end } = buildExportArgs(rangeStart, rangeEnd);
-    const adif = await api.exportAdif(start, end);
-    const blob = new Blob([adif], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "ft8af_log.adi";
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function startImportAdif() {
-    // The file never crosses IPC as content -- a native dialog returns just
-    // a path, and the Rust side opens and streams the file itself (see
-    // ipc.ts's importAdif doc comment: the previous file.text()-then-invoke
-    // approach could buffer a large real log several times over in memory
-    // and locked this board up twice on a real ~80MB file).
-    const path = await api.pickAdifFile();
-    if (!path) return; // Cancel
-    // Set busy state synchronously, before the first await -- otherwise the
-    // button and progress popup stay unchanged (looking like the click did
-    // nothing) for however long the IPC round-trip takes to even start.
-    setImportResult(null);
-    setImportError(null);
-    setImportProgress({ processed: 0, total: 0 });
-    const unlisten = await onImportProgress(setImportProgress);
-    try {
-      setImportResult(await api.importAdif(path));
-    } catch (err) {
-      setImportError(String(err));
-    } finally {
-      unlisten();
-      setImportProgress(null);
-    }
-    refresh();
-  }
+  // Re-query whenever the live search box or the confirmation filter changes,
+  // or App()'s refreshKey bumps after an ADIF import completes (see
+  // LogScreen's own doc comment at the top of this file for why that state
+  // lives in App(), not here).
+  useEffect(refresh, [search, filter, refreshKey]);
 
   async function remove(id?: number | null) {
     if (id == null) return;
@@ -2797,29 +2858,6 @@ function LogScreen() {
         <div className="spacer" style={{ flex: 1 }} />
         <button onClick={() => setEditing(null)}>+ Add QSO</button>
         <button onClick={refresh}>Refresh</button>
-      </div>
-      <div className="logbar">
-        <span className="muted">Export range:</span>
-        <input
-          className="date"
-          type="date"
-          value={rangeStart}
-          onChange={(e) => setRangeStart(e.target.value)}
-          aria-label="Export start date"
-        />
-        <span className="muted">→</span>
-        <input
-          className="date"
-          type="date"
-          value={rangeEnd}
-          onChange={(e) => setRangeEnd(e.target.value)}
-          aria-label="Export end date"
-        />
-        <button className="primary" onClick={exportAdif}>Export ADIF</button>
-        <span className="muted">·</span>
-        <button onClick={startImportAdif} disabled={!!importProgress}>
-          Import ADIF…
-        </button>
       </div>
       <div
         className="decode-list log-table-list"
@@ -2925,13 +2963,6 @@ function LogScreen() {
           onSave={saveEdit}
         />
       )}
-      {importProgress && <ImportProgressDialog progress={importProgress} />}
-      {importResult && (
-        <ImportCompleteDialog summary={importResult} onDone={() => setImportResult(null)} />
-      )}
-      {importError && (
-        <ImportErrorDialog message={importError} onDone={() => setImportError(null)} />
-      )}
     </>
   );
 }
@@ -2986,6 +3017,85 @@ function ImportErrorDialog(props: { message: string; onDone: () => void }) {
         <h3>Import failed</h3>
         <div className="import-summary error">{props.message}</div>
         <button className="primary import-done" onClick={props.onDone}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Export sheet, opened from the Logbook top bar's Share icon -- matches
+ * Android's `ExportLogSheet.kt`: a date-range filter (empty = open bound,
+ * same semantics as the inline row this replaced) over one "Export ADIF"
+ * action. Android offers a separate "Save" vs. "Share" button because its
+ * export goes through Android's file-provider/share-sheet machinery; desktop
+ * already has one working export path (a browser-style download, wired up
+ * when this was still an inline `.logbar` row), so one button covers both.
+ */
+function ExportLogSheet(props: {
+  rangeStart: string;
+  rangeEnd: string;
+  onRangeStart: (v: string) => void;
+  onRangeEnd: (v: string) => void;
+  onExport: () => void;
+  onClose: () => void;
+}) {
+  const { rangeStart, rangeEnd, onRangeStart, onRangeEnd, onExport, onClose } = props;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>Export QSOs</h3>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+        <div className="field">
+          <label>Date range (optional)</label>
+          <div className="row">
+            <input
+              className="date"
+              type="date"
+              value={rangeStart}
+              onChange={(e) => onRangeStart(e.target.value)}
+              aria-label="Export start date"
+            />
+            <span className="muted">→</span>
+            <input
+              className="date"
+              type="date"
+              value={rangeEnd}
+              onChange={(e) => onRangeEnd(e.target.value)}
+              aria-label="Export end date"
+            />
+          </div>
+        </div>
+        <div className="actions">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={onExport}>Export ADIF</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Android's Upload icon syncs the whole log to whichever third-party logging
+ * services (Cloudlog, QRZ, WRL) the operator has enabled
+ * (`ThirdPartyService.syncAllQSOs`). Desktop has no such integration yet --
+ * a separate, already-documented gap (see
+ * docs/desktop-decode-android-parity.md) -- so the icon is honest about that
+ * instead of silently doing nothing or faking a sync that never happened.
+ */
+function UploadSyncNoticeDialog(props: { onDone: () => void }) {
+  return (
+    <div className="modal-overlay" onClick={props.onDone}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>Sync to logging services</h3>
+        <p className="muted">
+          Uploading QSOs to Cloudlog, QRZ, or WRL isn't available on desktop yet -- this is
+          a planned feature, not configured here.
+        </p>
+        <div className="actions">
+          <button className="primary" onClick={props.onDone}>OK</button>
+        </div>
       </div>
     </div>
   );

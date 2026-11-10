@@ -192,6 +192,11 @@ select option {
   padding: 4px 6px; cursor: pointer; border-radius: var(--radius-sm);
 }
 .icon-button:hover { background: var(--panel-2); }
+.icon-button:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Logbook top bar's Upload/Download/Share icons (LogbookScreen.kt's TopBar
+   actions) -- muted until hovered, matching Android's TextMuted icon tint. */
+.topbar-icon { color: var(--muted); font-size: 17px; font-weight: 700; }
+.topbar-icon:hover { color: var(--text); }
 
 /* Decode-list sort button (TIME/CALL/SNR/DX), matching Android's
    SortModeLabel -- bold accent-colored mono text, not a generic icon glyph. */
