@@ -917,6 +917,76 @@ changes this round -- everything in both rounds was TS/CSS. Verified live
 both rounds, not just by reading the diff; memory stayed flat (~2.6GB
 available) through both rebuild-and-relaunch cycles.
 
+## Done this round, part 13: Logbook top bar, three-dot actions menu, and a real scroll bug
+
+**Top bar restructure.** The user's own screenshot comparison also showed
+Android's Logbook screen does *not* share Decode's full "Call CQ / Hunt /
+Tune / More" operate bar -- confirmed in `FT8AFApp.kt`: when
+`statusOnTop` (`isLandscape && controlsDrawerEnabled && !actionsOnDecodeTitle`)
+holds, `LogbookScreen.kt`'s own `TopBar` call uses a `titleContent` slot
+("Logbook" title + "{count} QSOs · All bands" subtitle in one row, `tight =
+true`) with just the RX/TX/radio-status chips in `actions` -- the full
+operate-bar buttons live in a separate collapsible drawer not shown on this
+screen at all. The user confirmed this live, running the real Android app on
+their phone: switching to Decode restores the full bar, confirming the
+behavior is scoped to Logbook only. Ported as a new `LogbookTopBar`
+component in `App.tsx` (fetches its own `count` via `api.logCount()` since
+it's a sibling of `LogScreen`, not a parent), reusing two pieces extracted
+out of the existing `TopBar`: `RxTxRadioChips` (the RX/TX dot + radio-link
+pill) and `SyncRow` (the clock-sync badge + cycle bar). Swapped in at the
+`tab === "log"` branch of the top-level render.
+
+**Three-dot actions menu.** Matching `QsoActionsMenu` in `LogbookScreen.kt`
+exactly: a "⋮" (MoreVert) button opening Edit/Delete, replacing the old lone
+"✕" delete button -- and critically, Android's `QsoTableRow`'s cells have
+**no** `onClick` at all (confirmed: every `QsoTableCell(...)` call omits it),
+so Edit is reachable *only* through this menu, never by clicking a row.
+Ported the same way: removed the per-cell/per-row click-to-edit, added
+`QsoActionsMenu` with Edit (Accent-colored) and Delete (red) items.
+
+The dropdown itself renders through a React portal into `document.body`
+(`createPortal`), positioned from the trigger button's
+`getBoundingClientRect()`, rather than as a normal absolutely-positioned
+child of the table cell -- the table's scroll container clips any
+descendant positioned relative to an ancestor inside it, so a plain
+absolute-positioned dropdown would get cut off for any row not right at the
+bottom of the visible area.
+
+**A real, pre-existing scroll bug, found verifying the above.** The user
+reported live: "the log display is not scrollable. I have a touch screen
+display and should be able to scroll down the list with either my mouse or
+using the touch screen." Root cause: `.decode-list` only gets
+`flex: 1; overflow: auto; min-height: 0` when nested inside `.decode-detail`
+(`styles.css`) -- that's Decode's split-pane wrapper. The Logbook screen's
+`.decode-list` div sits directly inside `.content.decode`
+(`overflow: hidden; display: flex; flex-direction: column`) with no
+`.decode-detail` wrapper around it, so it never grew to fill the remaining
+space or became its own scroll container -- the ancestor's `overflow: hidden`
+just clipped it outright, silently, with no scrollbar and nothing to scroll
+by any input method. Fixed with a second, direct rule (`.log-table-list`,
+added as an extra class alongside `.decode-list` on that div) giving it the
+same `flex: 1; overflow: auto; min-height: 0` independent of the
+`.decode-detail` nesting.
+
+Verifying that fix live (mouse-wheel scroll via `xdotool`) surfaced one more
+real issue: the native overlay scrollbar's hoverable hit zone is wider than
+its thin painted thumb, and it was sitting directly on top of the actions
+column's "⋮" trigger at the table's right edge -- clicking the trigger
+there was landing on the scrollbar instead (confirmed: it jumped the scroll
+position, and the screenshot taken immediately after briefly caught a
+mid-repaint blank frame, not an app crash). Fixed by reserving a
+`padding-right: 14px` gutter on `.log-table-list`, so the table's own
+content (and the "⋮" column) stops short of the real edge and the overlay
+scrollbar floats over blank space instead of over a clickable column.
+
+**Testing**: 177 vitest tests (unchanged count -- all three changes are
+layout/interaction, not logic covered by new pure-function tests). Verified
+live end to end after a real rebuild+relaunch: Logbook's top bar now shows
+the lean title/subtitle/status row (confirmed against the user's live
+Android phone session); mouse-wheel scroll moves the table through all
+45,622 rows; the "⋮" menu opens without hitting the scrollbar, Edit opens
+the real edit dialog pre-filled, Cancel and Delete both still work.
+
 ## Build note
 
 `npm run tauri -- build --no-bundle` is the only way to get a real,

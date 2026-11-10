@@ -126,6 +126,12 @@ select option {
 }
 .topbar-row { display: flex; align-items: center; gap: 10px; }
 .topbar-row .spacer { flex: 1; }
+
+/* LogbookTopBar's lean title row -- matches Android's Logbook TopBar
+   titleContent (title + subtitle in one row, 22sp/12sp) instead of the
+   full Decode-screen operate bar. */
+.logbook-title { font-size: 20px; font-weight: 700; color: var(--text); }
+.logbook-subtitle { font-size: 13px; }
 .topbar-clock { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
 
 /* Band/mode title + chevron -- clicking it (BandModePicker's own onClick,
@@ -262,6 +268,18 @@ select option {
 .decode-detail { width: 50%; min-width: 0; display: flex; flex-direction: column; }
 .decode-waterfall { width: 50%; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .decode-detail .decode-list { flex: 1; overflow: auto; min-height: 0; }
+/* Logbook's table list sits directly in .content.decode (no .decode-detail
+   wrapper around it, unlike the Decode screen's split layout), so it needs
+   the same flex-grow/scroll/min-height trio applied directly -- without it,
+   the ancestor's overflow:hidden just clips the table with no scrollbar,
+   confirmed unscrollable by mouse wheel and touch alike on a real log. */
+/* padding-right reserves a gutter for the native overlay scrollbar -- without
+   it, the scrollbar's hoverable hit zone (wider than its thin painted thumb)
+   sits directly on top of the actions column's "⋮" trigger, confirmed live:
+   clicking the trigger near the table's right edge was being swallowed by
+   the scrollbar (which jumps the scroll position) instead of opening the
+   menu. */
+.log-table-list { flex: 1; overflow: auto; min-height: 0; padding-right: 14px; }
 .waterfall-tab { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 .row { display: flex; align-items: center; gap: 10px; }
@@ -533,6 +551,31 @@ select option {
 .qso-table .call-cell { font-weight: 700; color: var(--accent); }
 /* Matches Android's QsoTableRow cell-color list exactly (Grid = Signal). */
 .qso-table .grid-cell { color: var(--signal); }
+/* Three-dot row actions menu, matching Android's QsoActionsMenu exactly
+   (a MoreVert icon button opening Edit/Delete) -- replaces the old lone
+   "✕" delete-only button. The dropdown itself is rendered through a React
+   portal into document.body (see QsoActionsMenu in App.tsx) rather than as
+   a normal absolutely-positioned child, so it isn't clipped by the table's
+   own scroll container -- position:fixed here, with top/left set inline
+   per-open from the trigger button's screen coordinates. */
+.qso-actions-menu-wrap { position: relative; display: flex; justify-content: center; }
+.qso-actions-trigger { font-size: 16px; line-height: 1; padding: 2px 8px; }
+.qso-actions-backdrop { position: fixed; inset: 0; z-index: 20; background: transparent; }
+.qso-actions-menu {
+  position: fixed; z-index: 21;
+  background: var(--panel-3); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  min-width: 120px; overflow: hidden;
+}
+.qso-actions-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 12px; font-size: 13px; color: var(--text);
+  background: transparent; text-align: left; white-space: nowrap;
+}
+.qso-actions-item:hover { background: var(--panel-2); }
+.qso-actions-item.delete { color: var(--tx); }
+.qso-actions-icon.edit { color: var(--accent); }
+.qso-actions-icon.delete { color: var(--tx); }
 .qso-table .status-cell, .qso-table .qsl-cell {
   white-space: nowrap; display: flex; align-items: center; gap: 4px;
 }

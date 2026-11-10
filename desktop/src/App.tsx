@@ -8,6 +8,7 @@ import {
   type PointerEvent,
   type WheelEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   api,
   onEngineEvent,
@@ -764,6 +765,16 @@ export default function App() {
       {fccSeedError && (
         <FccGridSeedErrorDialog message={fccSeedError} onDone={() => setFccSeedError(null)} />
       )}
+      {tab === "log" ? (
+        <LogbookTopBar
+          cycle={cycle}
+          operatingMode={operatingMode}
+          rig={rig}
+          rigLabel={rigLabel}
+          txState={txState}
+          clock={clock}
+        />
+      ) : (
       <TopBar
         cycle={cycle}
         bands={bands}
@@ -802,6 +813,7 @@ export default function App() {
         onClearDecodes={() => setMessages([])}
         onRefresh={() => api.refreshStatus()}
       />
+      )}
       <div
         className={
           "content" + (tab === "decode" || tab === "map" || tab === "log" || tab === "waterfall" ? " decode" : "")
@@ -1571,23 +1583,7 @@ function TopBar(props: {
           Hunt
         </button>
 
-        <span className="rx-tx-indicator">
-          <span className={"rx-tx-dot" + (transmitting ? " tx" : "")} />
-          <span className="rx-tx-main">
-            <span className="rx-tx-label">{transmitting ? "TX" : "RX"}</span>
-            {!transmitting && secondsLeft != null && (
-              <span className="rx-tx-sub">TX in {secondsLeft}s</span>
-            )}
-          </span>
-        </span>
-
-        <span
-          className={"pill pill-dark pill-static" + (rig?.connected ? "" : " pill-disconnected")}
-          title={rig?.connected ? `${rigLabel || rig.model}${rig.ptt ? " · PTT" : ""}` : "No rig connected"}
-        >
-          <span className={"status-dot" + (rig?.connected ? " ok" : "")} />
-          <span className="pill-label-2line">Radio<br />{rig?.connected ? "linked" : "offline"}</span>
-        </span>
+        <RxTxRadioChips transmitting={transmitting} secondsLeft={secondsLeft} rig={rig} rigLabel={rigLabel} />
 
         <button
           className={"pill pill-dark" + (tuning ? " pill-tune-active" : "")}
@@ -1647,13 +1643,7 @@ function TopBar(props: {
         <button className="icon-button" title="Clear the decode list" onClick={onClearDecodes}>🗑</button>
       </div>
 
-      <div className="topbar-row sync-row">
-        <ClockSyncBadge clock={clock} />
-        <div className="cycle-bar">
-          <div style={{ width: `${pct}%` }} />
-        </div>
-        <span className="seq muted">{secondsLeft != null ? `${secondsLeft}s` : "--"}</span>
-      </div>
+      <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} />
     </div>
     {cqOptionsOpen && (
       <CqOptionsModal
@@ -1687,6 +1677,110 @@ function TopBar(props: {
       />
     )}
     </>
+  );
+}
+
+/** RX/TX indicator + "Radio linked/offline" pill -- extracted out of
+ *  TopBar so LogbookTopBar (below) can show the same operating-status
+ *  chips Android embeds in its own Logbook title row, without duplicating
+ *  the markup. */
+function RxTxRadioChips({
+  transmitting, secondsLeft, rig, rigLabel,
+}: {
+  transmitting: boolean;
+  secondsLeft: number | null;
+  rig: RigStatusEvent | null;
+  rigLabel: string;
+}) {
+  return (
+    <>
+      <span className="rx-tx-indicator">
+        <span className={"rx-tx-dot" + (transmitting ? " tx" : "")} />
+        <span className="rx-tx-main">
+          <span className="rx-tx-label">{transmitting ? "TX" : "RX"}</span>
+          {!transmitting && secondsLeft != null && (
+            <span className="rx-tx-sub">TX in {secondsLeft}s</span>
+          )}
+        </span>
+      </span>
+
+      <span
+        className={"pill pill-dark pill-static" + (rig?.connected ? "" : " pill-disconnected")}
+        title={rig?.connected ? `${rigLabel || rig.model}${rig.ptt ? " · PTT" : ""}` : "No rig connected"}
+      >
+        <span className={"status-dot" + (rig?.connected ? " ok" : "")} />
+        <span className="pill-label-2line">Radio<br />{rig?.connected ? "linked" : "offline"}</span>
+      </span>
+    </>
+  );
+}
+
+/** The clock-sync badge + per-cycle countdown bar -- extracted out of
+ *  TopBar for the same reason as RxTxRadioChips above. */
+function SyncRow({
+  clock, pct, secondsLeft,
+}: {
+  clock: ClockSyncEvent | null;
+  pct: number;
+  secondsLeft: number | null;
+}) {
+  return (
+    <div className="topbar-row sync-row">
+      <ClockSyncBadge clock={clock} />
+      <div className="cycle-bar">
+        <div style={{ width: `${pct}%` }} />
+      </div>
+      <span className="seq muted">{secondsLeft != null ? `${secondsLeft}s` : "--"}</span>
+    </div>
+  );
+}
+
+/**
+ * Android's Logbook screen doesn't share the Decode screen's full operate
+ * bar (Call CQ/More/Hunt/Tune/Odd-Even) -- confirmed directly in
+ * `ComposeMainActivity.kt`/`FT8AFApp.kt`: those controls live in a
+ * separate, collapsible drawer that isn't shown while viewing the
+ * Logbook. What *is* shown there (`LogbookScreen.kt`'s own `TopBar` call,
+ * `headerStatus`/`titleContent`) is just the screen title, a QSO-count
+ * subtitle in the same row, and the same RX/TX/radio-link status chips --
+ * confirmed live against a real screenshot, this was the actual source of
+ * "the display looks nowhere like the android display" once the table
+ * itself was fixed. The user's call: hide the full operate bar on the
+ * Logbook tab only (not Map/Settings/POTA), matching this one screen.
+ */
+function LogbookTopBar({
+  cycle, operatingMode, rig, rigLabel, txState, clock,
+}: {
+  cycle: CycleTick | null;
+  operatingMode: OperatingMode;
+  rig: RigStatusEvent | null;
+  rigLabel: string;
+  txState: TxStateEvent | null;
+  clock: ClockSyncEvent | null;
+}) {
+  // Not lifted from LogScreen's own `count` state (a sibling, not a parent/
+  // child of this component) -- a second, independent fetch of the same
+  // cheap COUNT(*) query LogScreen already calls on its own refresh.
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    api.logCount().then(setCount);
+  }, []);
+
+  const cycleMs = MODE_CYCLE_MS[operatingMode];
+  const secondsLeft = cycle ? Math.max(0, Math.ceil((cycleMs - cycle.ms_into_cycle) / 1000)) : null;
+  const pct = cycle ? (cycle.ms_into_cycle / cycleMs) * 100 : 0;
+  const transmitting = txState?.transmitting ?? false;
+
+  return (
+    <div className="topbar-android">
+      <div className="topbar-row logbook-title-row">
+        <span className="logbook-title">Logbook</span>
+        <span className="logbook-subtitle muted">{count} QSOs &middot; All bands</span>
+        <div className="spacer" />
+        <RxTxRadioChips transmitting={transmitting} secondsLeft={secondsLeft} rig={rig} rigLabel={rigLabel} />
+      </div>
+      <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} />
+    </div>
   );
 }
 
@@ -2449,6 +2543,78 @@ function SpectrumWidthDialog({
 // Sum of QSO_TABLE_WEIGHTS, for turning each weight into a <col> percentage.
 const QSO_TABLE_WEIGHT_TOTAL = QSO_TABLE_WEIGHTS.reduce((a, b) => a + b, 0);
 
+/**
+ * Per-row "⋮" actions menu, matching Android's `QsoActionsMenu` exactly
+ * (`LogbookScreen.kt`): a three-dot button opening Edit/Delete, replacing
+ * the lone "✕" delete button that was here before -- Android has no
+ * standalone delete button at all, only this menu.
+ *
+ * The dropdown itself renders through a portal into document.body, positioned
+ * from the trigger button's screen coordinates, rather than as a normal
+ * absolutely-positioned child. The table's scroll container (.log-table-list)
+ * is a real overflow:auto box, and a child positioned absolute/relative to an
+ * ancestor inside it gets clipped at that box's edge -- a dropdown opened on
+ * any row not near the very bottom of the visible area would be cut off.
+ */
+function QsoActionsMenu({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+  function toggle(e: MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    const rect = triggerRef.current?.getBoundingClientRect();
+    const MENU_WIDTH = 120;
+    if (rect) setPos({ top: rect.bottom + 2, left: rect.right - MENU_WIDTH });
+    setOpen(true);
+  }
+
+  return (
+    <div className="qso-actions-menu-wrap">
+      <button
+        ref={triggerRef}
+        className="icon-button qso-actions-trigger"
+        onClick={toggle}
+        title="Actions"
+      >
+        ⋮
+      </button>
+      {open && pos && createPortal(
+        <>
+          {/* Backdrop: closes the menu on an outside click, matching
+              DropdownMenu's onDismissRequest. */}
+          <div className="qso-actions-backdrop" onClick={() => setOpen(false)} />
+          <div className="qso-actions-menu" style={{ top: pos.top, left: pos.left }}>
+            <button
+              className="qso-actions-item"
+              onClick={() => {
+                setOpen(false);
+                onEdit();
+              }}
+            >
+              <span className="qso-actions-icon edit">✎</span> Edit
+            </button>
+            <button
+              className="qso-actions-item delete"
+              onClick={() => {
+                setOpen(false);
+                onDelete();
+              }}
+            >
+              <span className="qso-actions-icon delete">🗑</span> Delete
+            </button>
+          </div>
+        </>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
 function LogScreen() {
   // Android's Logbook is three sub-tabs (Stats / Recent / Awards); desktop
   // only has Recent's equivalent (the QSO table) built. Stats and Awards
@@ -2656,7 +2822,7 @@ function LogScreen() {
         </button>
       </div>
       <div
-        className="decode-list"
+        className="decode-list log-table-list"
         ref={scrollRef}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
       >
@@ -2694,19 +2860,22 @@ function LogScreen() {
           {visibleRows.map((r) => {
             const status = qsoStatusLabel(r);
             return (
-              <tr key={r.id} className="clickable">
+              <tr key={r.id}>
                 {/* Confirmation shows via the Status pill and QSL marks only
-                    (matching Android) -- the row itself is never tinted. */}
-                <td onClick={() => setEditing(r)}>{adifToDateInput(r.qso_date)}</td>
-                <td onClick={() => setEditing(r)}>{formatHhmm(r.time_on)}</td>
-                <td onClick={() => setEditing(r)} className="call-cell">{r.call}</td>
-                <td onClick={() => setEditing(r)} className="grid-cell">{r.gridsquare}</td>
-                <td onClick={() => setEditing(r)} className="muted">{logbookPlace(r) ?? ""}</td>
-                <td onClick={() => setEditing(r)}>{r.freq}</td>
-                <td onClick={() => setEditing(r)}>{r.mode}</td>
-                <td onClick={() => setEditing(r)}>{displayReport(r.rst_sent)}</td>
-                <td onClick={() => setEditing(r)}>{displayReport(r.rst_rcvd)}</td>
-                <td onClick={() => setEditing(r)}>
+                    (matching Android) -- the row itself is never tinted.
+                    Matches Android's QsoTableRow exactly: no per-cell/whole-
+                    row click-to-edit -- Edit is only reachable through the
+                    three-dot menu (QsoActionsMenu) in the last column. */}
+                <td>{adifToDateInput(r.qso_date)}</td>
+                <td>{formatHhmm(r.time_on)}</td>
+                <td className="call-cell">{r.call}</td>
+                <td className="grid-cell">{r.gridsquare}</td>
+                <td className="muted">{logbookPlace(r) ?? ""}</td>
+                <td>{r.freq}</td>
+                <td>{r.mode}</td>
+                <td>{displayReport(r.rst_sent)}</td>
+                <td>{displayReport(r.rst_rcvd)}</td>
+                <td>
                   <div className="status-cell">
                     {status && <span className="status-pill conf">{status}</span>}
                     {qsoSyncLabels(r).map((label) => (
@@ -2714,7 +2883,7 @@ function LogScreen() {
                     ))}
                   </div>
                 </td>
-                <td onClick={() => setEditing(r)}>
+                <td>
                   <div className="qsl-cell">
                     {qslMarks(r).map(({ service, mark }) => (
                       <span
@@ -2728,8 +2897,8 @@ function LogScreen() {
                     ))}
                   </div>
                 </td>
-                <td>
-                  <button onClick={() => remove(r.id)}>✕</button>
+                <td className="qso-actions-cell">
+                  <QsoActionsMenu onEdit={() => setEditing(r)} onDelete={() => remove(r.id)} />
                 </td>
               </tr>
             );
