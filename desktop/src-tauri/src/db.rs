@@ -678,6 +678,11 @@ impl Db {
         self.import_adif_with_progress(text, |_, _| {})
     }
 
+    /// Records per committed transaction during a bulk import. See
+    /// [`Self::import_adif_with_progress`]'s doc comment for why this
+    /// exists (matches Android's `ImportSharedLogs.IMPORT_BATCH`).
+    const IMPORT_BATCH: i64 = 500;
+
     /// Import ADIF text into the log, mirroring the Android app's import rule
     /// (`DatabaseOpr.checkIsQSL`): a QSO already in the log is matched on call
     /// + date, case-insensitively, with `TIME_ON` compared only to the minute
@@ -698,21 +703,30 @@ impl Db {
     /// match an existing QSO, directly or via [`Self::find_lotw_twin_locked`],
     /// is inserted as new. Records with no usable `CALL` are skipped.
     ///
-    /// The whole import runs inside **one SQLite transaction**, held for the
-    /// duration (hence working through `_locked` helpers rather than the
-    /// public per-call methods, which would each re-lock the connection).
-    /// A real CQRLOG/QRZ.com export can be tens of thousands of QSOs; one
-    /// `INSERT` per row with no surrounding transaction means one disk fsync
-    /// per row under SQLite's default rollback-journal mode — confirmed on
-    /// real hardware to turn a ~50k-row import into many minutes with no
-    /// visible progress, which looked identical to a hang. Batched into one
-    /// transaction, a fresh ~50k-row import finishes in a fraction of a
-    /// second. A later import of a similarly large file *against* an
+    /// The import runs inside a series of SQLite transactions, committed
+    /// every [`Self::IMPORT_BATCH`] records (hence working through `_locked`
+    /// helpers rather than the public per-call methods, which would each
+    /// re-lock the connection) rather than either extreme: one `INSERT` per
+    /// row with no surrounding transaction means one disk fsync per row
+    /// under SQLite's default rollback-journal mode — confirmed on real
+    /// hardware to turn a ~50k-row import into many minutes with no visible
+    /// progress, which looked identical to a hang. A *single* transaction
+    /// for the entire file is the other extreme, and was this function's
+    /// first fix for that — but it then held one rollback journal open for
+    /// the whole run, and a kill before the one final `COMMIT` (confirmed
+    /// live on this board, importing a real file against an already-45k-row
+    /// log) rolled back *the entire import*, not just what was still in
+    /// flight. Periodic commits, matching Android's own
+    /// `DatabaseOpr.beginImportBatch`/`commitImportBatch`/`endImportBatch`
+    /// (`IMPORT_BATCH = 500`), bound both problems to one batch's worth
+    /// either way: a fresh ~50k-row import still finishes in about a
+    /// second, and a kill mid-import only loses the open batch — re-running
+    /// the same file afterward just re-matches everything already committed
+    /// as duplicates. A later import of a similarly large file *against* an
     /// already-populated log is slower — every record that misses the exact
     /// match falls through to [`Self::find_lotw_twin_locked`]'s fallback
     /// query — confirmed on the user's real files at ~97s for a ~54,500-
-    /// record QRZ.com file against an already-imported ~45,600-row log.
-    /// Still far better than the pre-batching multi-minute silent hang, and
+    /// record QRZ.com file against an already-imported ~45,600-row log;
     /// `on_progress` keeps the UI visibly moving throughout rather than
     /// looking frozen; a further speedup (caching prepared statements across
     /// the loop instead of re-preparing per record) is a possible follow-up,
@@ -733,42 +747,105 @@ impl Db {
         let conn = self.conn.lock();
         let _ = conn.execute_batch("BEGIN");
         for (idx, rec) in records.iter().enumerate() {
-            match crate::adif::adif_record_to_qso(&rec.fields) {
-                None => summary.skipped += 1,
-                Some(qso) => {
-                    // Backfill the callsign/grid cache for the Map screen --
-                    // never overwrites a live-heard grid (see
-                    // `upsert_callsign_qth_if_absent_locked`'s doc comment),
-                    // and rides this same already-open transaction.
-                    if !qso.gridsquare.is_empty() {
-                        Self::upsert_callsign_qth_if_absent_locked(&conn, &qso.call, &qso.gridsquare);
-                    }
-                    let existing = Self::find_duplicate_locked(
-                        &conn, &qso.call, &qso.qso_date, &qso.time_on,
-                    )
-                    .or_else(|| Self::find_lotw_twin_locked(&conn, &qso));
-                    match existing {
-                        Some(existing) => {
-                            if let Some(merged) = merge_matched_qso(&existing, &qso) {
-                                let _ =
-                                    Self::update_flags_locked(&conn, existing.id.unwrap(), &merged);
-                            }
-                            summary.duplicates += 1;
-                        }
-                        None => match Self::insert_qso_locked(&conn, &qso) {
-                            Ok(_) => summary.imported += 1,
-                            Err(_) => summary.skipped += 1,
-                        },
-                    }
-                }
-            }
+            Self::import_one_record_locked(&conn, rec, &mut summary);
             let processed = (idx + 1) as i64;
+            if processed % Self::IMPORT_BATCH == 0 && processed != total {
+                let _ = conn.execute_batch("COMMIT; BEGIN");
+            }
             if processed % 200 == 0 || processed == total {
                 on_progress(processed, total);
             }
         }
         let _ = conn.execute_batch("COMMIT");
         summary
+    }
+
+    /// Same import as [`Self::import_adif_with_progress`], but reads straight
+    /// from `path` via [`crate::adif::AdifStreamReader`] instead of taking
+    /// the whole file as a `String` -- see that reader's doc comment for why:
+    /// a buffer-the-whole-file approach needs several times the raw file
+    /// size in peak memory once the frontend's file read and the IPC
+    /// round-trip are counted too, which locked up this board twice on a
+    /// real ~80MB log. Streams the file **twice** (open, count, drop; open
+    /// again, parse + insert) rather than collecting a record list up front,
+    /// matching the fix already shipped on the Android side for the same
+    /// problem (`ImportSharedLogs.doImport`'s `StreamOpener`) -- neither pass
+    /// ever holds more than roughly one record's worth of text.
+    pub fn import_adif_file_with_progress(
+        &self,
+        path: &std::path::Path,
+        mut on_progress: impl FnMut(i64, i64),
+    ) -> std::io::Result<ImportSummary> {
+        let total = {
+            let file = std::fs::File::open(path)?;
+            let mut reader = crate::adif::AdifStreamReader::new(std::io::BufReader::new(file));
+            let mut count: i64 = 0;
+            while reader.next_record()?.is_some() {
+                count += 1;
+            }
+            count
+        };
+
+        let mut summary = ImportSummary::default();
+        let file = std::fs::File::open(path)?;
+        let mut reader = crate::adif::AdifStreamReader::new(std::io::BufReader::new(file));
+
+        let conn = self.conn.lock();
+        let _ = conn.execute_batch("BEGIN");
+        let mut processed: i64 = 0;
+        while let Some(rec) = reader.next_record()? {
+            processed += 1;
+            Self::import_one_record_locked(&conn, &rec, &mut summary);
+            if processed % Self::IMPORT_BATCH == 0 && processed != total {
+                let _ = conn.execute_batch("COMMIT; BEGIN");
+            }
+            if processed % 200 == 0 || processed == total {
+                on_progress(processed, total);
+            }
+        }
+        let _ = conn.execute_batch("COMMIT");
+        Ok(summary)
+    }
+
+    /// One ADIF record's worth of [`Self::import_adif_with_progress`]/
+    /// [`Self::import_adif_file_with_progress`]'s shared body -- the callsign/
+    /// grid backfill, the dedup lookup (direct, then the LoTW-twin
+    /// fallback), and either the merge-into-existing or fresh-insert path.
+    /// Factored out so the string and file-streaming entry points can never
+    /// drift apart on what importing a record actually does, only on how
+    /// the records got there.
+    fn import_one_record_locked(
+        conn: &Connection,
+        rec: &crate::adif::AdifRecord,
+        summary: &mut ImportSummary,
+    ) {
+        match crate::adif::adif_record_to_qso(&rec.fields) {
+            None => summary.skipped += 1,
+            Some(qso) => {
+                // Backfill the callsign/grid cache for the Map screen --
+                // never overwrites a live-heard grid (see
+                // `upsert_callsign_qth_if_absent_locked`'s doc comment),
+                // and rides this same already-open transaction.
+                if !qso.gridsquare.is_empty() {
+                    Self::upsert_callsign_qth_if_absent_locked(conn, &qso.call, &qso.gridsquare);
+                }
+                let existing =
+                    Self::find_duplicate_locked(conn, &qso.call, &qso.qso_date, &qso.time_on)
+                        .or_else(|| Self::find_lotw_twin_locked(conn, &qso));
+                match existing {
+                    Some(existing) => {
+                        if let Some(merged) = merge_matched_qso(&existing, &qso) {
+                            let _ = Self::update_flags_locked(conn, existing.id.unwrap(), &merged);
+                        }
+                        summary.duplicates += 1;
+                    }
+                    None => match Self::insert_qso_locked(conn, &qso) {
+                        Ok(_) => summary.imported += 1,
+                        Err(_) => summary.skipped += 1,
+                    },
+                }
+            }
+        }
     }
 
     /// Find an existing QSO matching the import dedup rule described on
@@ -969,8 +1046,13 @@ impl Db {
             .unwrap_or(0)
     }
 
-    /// The cached grid for a callsign, if any -- for the (not yet built) Map
-    /// screen.
+    /// The cached grid for a callsign, if any. Backs the Map screen's
+    /// per-message grid lookup: TX1 (CQ) and TX2 (grid reply) messages
+    /// already carry a grid in the decode itself, but TX3-5 (report/R+report/
+    /// RRR) and 73/R73 don't -- those are looked up here, one callsign at a
+    /// time as the Map screen needs them, never as a bulk fetch (a bulk
+    /// fetch of the full table, built for an earlier draft of the Map
+    /// screen, OOM'd this board under the real ~800k-row FCC-seeded table).
     pub fn qth_for_call(&self, call: &str) -> Option<String> {
         self.conn
             .lock()
@@ -2491,6 +2573,69 @@ mod tests {
     }
 
     #[test]
+    fn import_adif_commits_every_500_records_crossing_two_batch_boundaries() {
+        // 1,200 records crosses the IMPORT_BATCH=500 commit boundary twice
+        // (at 500 and 1000) plus a short final partial batch (200 more) --
+        // proves the COMMIT;BEGIN cycling doesn't drop, duplicate, or
+        // otherwise disturb records at or around a boundary.
+        let db = Db::open_in_memory().unwrap();
+        let mut adif = String::new();
+        for i in 0..1200 {
+            adif.push_str(&format!(
+                "<call:6>K0{i:04} <mode:3>FT8 <qso_date:8>20260604 <time_on:6>{:06} <eor>",
+                120000 + i,
+            ));
+        }
+        let summary = db.import_adif_with_progress(&adif, |_, _| {});
+        assert_eq!(summary.imported, 1200);
+        assert_eq!(summary.duplicates, 0);
+        assert_eq!(db.count(), 1200);
+
+        // Re-importing the exact same file must match every record as a
+        // duplicate, including the ones that landed right at a 500-record
+        // commit boundary -- proves they were actually written, not
+        // silently dropped by a commit landing mid-insert.
+        let summary2 = db.import_adif_with_progress(&adif, |_, _| {});
+        assert_eq!(summary2.imported, 0);
+        assert_eq!(
+            summary2.duplicates, 1200,
+            "every record, including ones at a batch boundary, must already be there"
+        );
+    }
+
+    #[test]
+    fn import_adif_file_with_progress_agrees_with_the_string_path() {
+        // Same 450-record fixture as the string-based test above, written to
+        // a real temp file and imported via the streaming path -- proves the
+        // two entry points (and the shared import_one_record_locked body)
+        // produce the same result, not just that each compiles.
+        let mut adif = String::new();
+        for i in 0..450 {
+            adif.push_str(&format!(
+                "<call:5>K0{i:03} <mode:3>FT8 <qso_date:8>20260604 <time_on:6>{:06} <eor>",
+                120000 + i,
+            ));
+        }
+        let dir = std::env::temp_dir().join(format!("ft8af-adif-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("import_agrees.adi");
+        std::fs::write(&path, &adif).unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let mut calls = Vec::new();
+        let summary = db
+            .import_adif_file_with_progress(&path, |processed, total| {
+                calls.push((processed, total));
+            })
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(summary.imported, 450);
+        assert_eq!(calls, vec![(200, 450), (400, 450), (450, 450)]);
+    }
+
+    #[test]
     fn import_adif_with_progress_backfills_callsign_qth_from_gridsquare() {
         let db = Db::open_in_memory().unwrap();
         let adif = "<call:5>K1ABC <mode:3>FT8 <qso_date:8>20260604 \
@@ -2606,6 +2751,12 @@ mod tests {
                 (1200, 1200, String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn qth_for_call_returns_none_for_an_unknown_callsign() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.qth_for_call("K1ABC"), None);
     }
 
     #[test]

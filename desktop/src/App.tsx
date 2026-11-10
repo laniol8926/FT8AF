@@ -1,4 +1,13 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type PointerEvent,
+  type WheelEvent,
+} from "react";
 import {
   api,
   onEngineEvent,
@@ -55,6 +64,7 @@ import { debounce } from "./debounce";
 import { audioDeviceLabel } from "./audioDevice";
 import {
   countRepliesTo,
+  gridToLatLon,
   huntPriorityFromConfig,
   isPotaCq,
   maidenheadDistanceKm,
@@ -67,6 +77,12 @@ import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
 import { wpxPrefixOf } from "./wpxPrefix";
 import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
 import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
+import { EquirectViewport } from "./mapViewport";
+import { buildGridTrackerSlot, currentSlotMessages, type SlotMessage } from "./gridTrackerSlot";
+import { nightPolygonLatLon, subsolarPoint } from "./terminator";
+import { forEachRingVertex, parseGeoJsonRings } from "./worldOutlines";
+import worldLandGeoJson from "./map-data/world_land.json";
+import worldCountriesGeoJson from "./map-data/world_countries.json";
 
 type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
 type Filter = "all" | "cq" | "pota" | "dxcc" | "zone" | "state" | "grid" | "prefix" | "needed" | "tome";
@@ -775,14 +791,16 @@ export default function App() {
       />
       <div
         className={
-          "content" + (tab === "decode" || tab === "log" || tab === "waterfall" ? " decode" : "")
+          "content" + (tab === "decode" || tab === "map" || tab === "log" || tab === "waterfall" ? " decode" : "")
         }
       >
-        {tab === "decode" && (
+        {(tab === "decode" || tab === "map") && (
           <DecodeScreen
+            rightPane={tab === "map" ? "map" : "waterfall"}
             messages={visible}
             sortMode={sortMode}
             myGrid={myGrid}
+            myCall={myCall}
             operatingMode={operatingMode}
             filter={filter}
             setFilter={setFilter}
@@ -871,14 +889,10 @@ export default function App() {
             gridSeedBusy={fccSeedProgress != null}
           />
         )}
-        {(tab === "map" || tab === "pota") && (
+        {tab === "pota" && (
           <ComingSoonScreen
-            title={tab === "map" ? "Map" : "POTA"}
-            detail={
-              tab === "map"
-                ? "A world map of decoded/worked stations, matching the Android app's map, is planned but not built yet."
-                : "Parks-on-the-Air park search, activation tracking, and self-spotting, matching the Android app's POTA tab, are planned but not built yet."
-            }
+            title="POTA"
+            detail="Parks-on-the-Air park search, activation tracking, and self-spotting, matching the Android app's POTA tab, are planned but not built yet."
           />
         )}
       </div>
@@ -906,8 +920,343 @@ export default function App() {
   );
 }
 
-// Honest placeholder for a tab whose real screen isn't built yet (Map, POTA)
-// -- says so plainly rather than showing fake content.
+// ---------------------------------------------------------------------------
+// Map screen -- ported from the fork's actual Android map: `ui/map/
+// GridTrackerPanel.kt` wrapping `com.k1af.ft8af.grid_tracker.GridOsmMapView`
+// (osmdroid), confirmed to be the default map in this fork ("the grid
+// tracker (the default, fork) rather than the original FT8AF map" -- its
+// own doc comment) -- **not** FT8AF upstream's own `ui/map/MapScreen.kt`.
+// See `gridTrackerSlot.ts` for the ported per-pass logic this screen is
+// built on, and docs/desktop-decode-android-parity.md for the full writeup
+// (including why an earlier draft that plotted the whole callsign_qth table
+// froze this board, and why "the current slot only" is a real Android
+// behavior, not a scope cut invented here). Rendering (land/country
+// outlines, the gray-line terminator, pan/zoom) is still the equirect
+// canvas approach from that same earlier draft -- see mapProjection.ts/
+// mapViewport.ts/terminator.ts/worldOutlines.ts, still correct and reused
+// as-is. The real tile basemap (an offline MBTiles-style archive, osmdroid-
+// specific) and the per-line direction-pulse animation are deferred, same
+// doc.
+// ---------------------------------------------------------------------------
+
+/** Mirrors Android's land fill (0x4094A3B8). */
+const MAP_LAND_FILL = "rgba(148, 163, 184, 0.25)";
+/** Mirrors Android's land outline (0x9094A3B8). */
+const MAP_LAND_STROKE = "rgba(148, 163, 184, 0.565)";
+/** Mirrors Android's CountryBorderColor (0x7B94A3B8). */
+const MAP_COUNTRY_STROKE = "rgba(148, 163, 184, 0.482)";
+/** Mirrors Android's GrayLineNightFill (0x4A0B1220). */
+const MAP_NIGHT_FILL = "rgba(11, 18, 32, 0.29)";
+/** Mirrors Android's GrayLineTerminator (0xB3F5B44A). */
+const MAP_TERMINATOR_STROKE = "rgba(245, 180, 74, 0.702)";
+/** Mirrors styles.css's --tx (red) -- close to Android's real
+ *  tracker_in_my_line_color (#FF1E27) for a QSO line involving my callsign,
+ *  reusing an existing desktop token with the same "this is mine" weight. */
+const MAP_LINE_MY_CALL = "#ef4444";
+/** Mirrors styles.css's --text -- Android's tracker_line_color is plain
+ *  white; this is desktop's own "default readable text" neutral instead. */
+const MAP_LINE_OTHER = "#e7ecf3";
+
+// Parsed once at module load (not per-mount) -- see the comment on
+// `landRings`/`countryRings` below for why this is a bundled import, not a
+// runtime fetch.
+const MAP_LAND_RINGS = parseGeoJsonRings(worldLandGeoJson);
+const MAP_COUNTRY_RINGS = parseGeoJsonRings(worldCountriesGeoJson);
+
+/** The decode-list fields `gridTrackerSlot.ts` needs, plus the raw text for
+ *  a clicked marker's label. */
+interface MapSlotMessage extends SlotMessage {
+  text: string;
+}
+
+function toSlotMessage(m: UiMessage): MapSlotMessage {
+  return {
+    callFrom: m.call_from, callTo: m.call_to, isCq: m.is_cq, grid: m.grid, utcMs: m.utc_ms, text: m.text,
+  };
+}
+
+function MapScreen({
+  messages,
+  operatingMode,
+  workedCalls,
+  workedCallsAnyBand,
+  myGrid,
+  myCall,
+}: {
+  messages: UiMessage[];
+  operatingMode: OperatingMode;
+  workedCalls: Set<string>;
+  workedCallsAnyBand: Set<string>;
+  myGrid: string;
+  myCall: string;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const [userScale, setUserScale] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [selected, setSelected] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // GridTrackerPanel.kt redraws only the current decode slot on every pass
+  // ("no grid shading: with a big log the worked/confirmed/known grids
+  // cover the map. Only the current slot's lines and CQs show") -- ported
+  // as-is, not just for parity but because it's also what keeps this
+  // screen's data volume tiny (one cycle's decodes, never the whole
+  // session or the whole callsign_qth cache -- see gridTrackerSlot.ts).
+  const cycleMs = MODE_CYCLE_MS[operatingMode];
+  const slotMessages = useMemo(
+    () => currentSlotMessages(messages.map(toSlotMessage), cycleMs),
+    [messages, cycleMs],
+  );
+
+  // Per-callsign grid backfill for this slot only: a CQ/grid-reply decode's
+  // own grid is used directly; anything else (and call_to, always -- the
+  // recipient's grid is never in the message itself) is looked up one
+  // callsign at a time (never a bulk fetch of the whole table: an earlier
+  // draft loaded all ~800k FCC-seeded rows at once and OOM'd this board).
+  // `null` means "looked up, not found" so a miss isn't re-queried.
+  const [gridLookup, setGridLookup] = useState<Map<string, string | null>>(new Map());
+  useEffect(() => {
+    const needed = new Set<string>();
+    for (const m of slotMessages) {
+      if (!m.callFrom) continue;
+      if (!m.grid && !gridLookup.has(m.callFrom)) needed.add(m.callFrom);
+      if (!m.isCq && m.callTo && !gridLookup.has(m.callTo)) needed.add(m.callTo);
+    }
+    if (needed.size === 0) return;
+    let cancelled = false;
+    Promise.all(Array.from(needed).map((call) => api.qthForCall(call).then((grid) => [call, grid] as const)))
+      .then((pairs) => {
+        if (cancelled) return;
+        setGridLookup((prev) => {
+          const next = new Map(prev);
+          for (const [call, grid] of pairs) next.set(call, grid);
+          return next;
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slotMessages, gridLookup]);
+
+  // The bundled Natural Earth land + admin-0 country outlines (parsed once
+  // at module load, above -- not fetched at runtime: Tauri's CSP only
+  // allow-lists `connect-src` for IPC, not same-origin static assets, so a
+  // `fetch()` of a bundled JSON file is silently blocked).
+  const landRings = MAP_LAND_RINGS;
+  const countryRings = MAP_COUNTRY_RINGS;
+
+  // The terminator moves; recompute its position once a minute (matches
+  // Android's cadence -- the math is cheap, no need for anything faster).
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setSize({ w: Math.round(width), h: Math.round(height) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const slot = useMemo(
+    () => buildGridTrackerSlot(slotMessages, myCall, (call) => gridLookup.get(call) ?? null),
+    [slotMessages, myCall, gridLookup],
+  );
+
+  const myPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
+
+  // Pointer drag-to-pan + wheel-to-zoom.
+  const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  function onPointerDown(e: PointerEvent<HTMLCanvasElement>) {
+    dragRef.current = { x: e.clientX, y: e.clientY, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onPointerMove(e: PointerEvent<HTMLCanvasElement>) {
+    const d = dragRef.current;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) d.moved = true;
+    d.x = e.clientX;
+    d.y = e.clientY;
+    const vp = new EquirectViewport(size.w, size.h, userScale, pan.x, pan.y);
+    setPan(vp.clampPan(pan.x + dx, pan.y + dy));
+  }
+  function onPointerUp(e: PointerEvent<HTMLCanvasElement>) {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (d && !d.moved) {
+      // A click (no drag): select the nearest CQ marker within 14px, if any.
+      const rect = e.currentTarget.getBoundingClientRect();
+      const vp = new EquirectViewport(size.w, size.h, userScale, pan.x, pan.y);
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      let best: { call: string; d2: number } | null = null;
+      for (const m of slot.markers) {
+        const pos = gridToLatLon(m.grid);
+        if (!pos) continue;
+        const p = vp.projectLatLon(pos.lat, pos.lon);
+        const d2 = (p.x - cx) ** 2 + (p.y - cy) ** 2;
+        if (d2 <= 14 * 14 && (!best || d2 < best.d2)) best = { call: m.callsign, d2 };
+      }
+      setSelected((prev) => (best ? best.call : prev === null ? null : null));
+    }
+  }
+  function onWheel(e: WheelEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    const next = Math.min(20, Math.max(1, userScale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    const vp = new EquirectViewport(size.w, size.h, next, pan.x, pan.y);
+    setUserScale(next);
+    setPan(vp.clampPan(pan.x, pan.y));
+  }
+  function recenter() {
+    if (!myPos) return;
+    setUserScale(1);
+    const vp = new EquirectViewport(size.w, size.h, 1);
+    setPan(vp.panToCenter(myPos.lat, myPos.lon));
+  }
+
+  // Draw. Re-runs whenever anything visible changes; the canvas itself is
+  // the only thing touched (no React children to diff), so an imperative
+  // redraw is simpler and cheaper than modeling the map as DOM/SVG nodes.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || size.w === 0 || size.h === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(size.w * dpr);
+    canvas.height = Math.round(size.h * dpr);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.w, size.h);
+    ctx.fillStyle = "#07090f";
+    ctx.fillRect(0, 0, size.w, size.h);
+
+    const vp = new EquirectViewport(size.w, size.h, userScale, pan.x, pan.y);
+
+    function strokeRings(rings: number[][], fill: string | null, stroke: string, width: number) {
+      ctx!.beginPath();
+      for (const ring of rings) {
+        forEachRingVertex(ring, fill ? 3 : 2, (lon, lat, first) => {
+          const p = vp.projectLatLon(lat, lon);
+          if (first) ctx!.moveTo(p.x, p.y);
+          else ctx!.lineTo(p.x, p.y);
+        });
+        ctx!.closePath();
+      }
+      if (fill) {
+        ctx!.fillStyle = fill;
+        ctx!.fill();
+      }
+      ctx!.strokeStyle = stroke;
+      ctx!.lineWidth = width;
+      ctx!.stroke();
+    }
+
+    strokeRings(landRings, MAP_LAND_FILL, MAP_LAND_STROKE, 0.75);
+    strokeRings(countryRings, null, MAP_COUNTRY_STROKE, 0.7);
+
+    // Gray-line terminator: translucent night fill + amber terminator stroke
+    // (Android's GridOsmMapView.initMap also calls setGrayLine()).
+    const night = nightPolygonLatLon(subsolarPoint(nowMs));
+    if (night.length >= 8) {
+      ctx.beginPath();
+      for (let i = 0; i + 1 < night.length; i += 2) {
+        const p = vp.projectLatLon(night[i + 1], night[i]);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = MAP_NIGHT_FILL;
+      ctx.fill();
+
+      ctx.beginPath();
+      const curveLen = night.length - 4;
+      for (let i = 0; i < curveLen; i += 2) {
+        const p = vp.projectLatLon(night[i + 1], night[i]);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.strokeStyle = MAP_TERMINATOR_STROKE;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // QSO lines: the two real stations in each directed exchange this
+    // slot, not "me" to them (see gridTrackerSlot.ts).
+    for (const line of slot.lines) {
+      const fromPos = gridToLatLon(line.fromGrid);
+      const toPos = gridToLatLon(line.toGrid);
+      if (!fromPos || !toPos) continue;
+      const from = vp.projectLatLon(fromPos.lat, fromPos.lon);
+      const to = vp.projectLatLon(toPos.lat, toPos.lon);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.strokeStyle = line.involvesMyCall ? MAP_LINE_MY_CALL : MAP_LINE_OTHER;
+      ctx.lineWidth = line.involvesMyCall ? 2 : 1.5;
+      ctx.stroke();
+    }
+
+    // CQ markers, tinted by worked status (same sets the Decode list uses).
+    for (const marker of slot.markers) {
+      const pos = gridToLatLon(marker.grid);
+      if (!pos) continue;
+      const p = vp.projectLatLon(pos.lat, pos.lon);
+      const worked = workedCalls.has(marker.callsign) || workedCallsAnyBand.has(marker.callsign);
+      const isSelected = marker.callsign === selected;
+      const fill = worked ? "#4ade80" : "#ffaf5e"; // --ok / --accent
+      const r = isSelected ? 9 : 6;
+      drawCqMarker(ctx, p.x, p.y, fill, r);
+      if (isSelected) {
+        ctx.font = "11px sans-serif";
+        ctx.fillStyle = "#e7ecf3";
+        ctx.fillText(`${marker.callsign} -- ${marker.message.text}`, p.x + r + 3, p.y + 3);
+      }
+    }
+  }, [size, userScale, pan, landRings, countryRings, slot, selected, nowMs, workedCalls, workedCallsAnyBand]);
+
+  return (
+    <div ref={containerRef} className="map-screen">
+      <canvas
+        ref={canvasRef}
+        style={{ width: "100%", height: "100%", display: "block", cursor: "grab", touchAction: "none" }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onWheel={onWheel}
+      />
+      <div className="map-overlay-top muted">
+        {slot.markers.length} CQ &middot; {slot.lines.length} QSO this cycle
+      </div>
+      <button type="button" className="map-recenter" onClick={recenter} disabled={!myPos} title="Center on my grid">
+        Me
+      </button>
+    </div>
+  );
+}
+
+/** The CQ marker shape -- a filled triangle, matching the old point-marker
+ *  draft's "calling CQ" shape (the only marker role this screen has now). */
+function drawCqMarker(ctx: CanvasRenderingContext2D, x: number, y: number, fill: string, r: number) {
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.lineTo(x + r, y + r);
+  ctx.lineTo(x - r, y + r);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Honest placeholder for a tab whose real screen isn't built yet (POTA) --
+// says so plainly rather than showing fake content.
 function ComingSoonScreen({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="coming-soon">
@@ -1759,9 +2108,14 @@ function EmptyState({ filter, operatingMode }: { filter: Filter; operatingMode: 
 }
 
 function DecodeScreen(props: {
+  // Which panel fills the right-hand pane: the waterfall (the default) or
+  // the Map, in place of it -- the two are mutually exclusive in that one
+  // pane (switching to the Map closes the waterfall, not just hides it).
+  rightPane: "waterfall" | "map";
   messages: UiMessage[];
   sortMode: DecodeSortMode;
   myGrid: string;
+  myCall: string;
   operatingMode: OperatingMode;
   filter: Filter;
   setFilter: (f: Filter) => void;
@@ -1785,7 +2139,8 @@ function DecodeScreen(props: {
   onToggleMessages: () => void;
 }) {
   const {
-    messages, sortMode, myGrid, operatingMode, filter, setFilter, workedCalls, workedCallsAnyBand, workedGrids,
+    rightPane, messages, sortMode, myGrid, myCall, operatingMode, filter, setFilter,
+    workedCalls, workedCallsAnyBand, workedGrids,
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
   } = props;
@@ -1923,18 +2278,31 @@ function DecodeScreen(props: {
           </div>
         </div>
         <div className="decode-waterfall">
-          <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} displayHz={displayHz} />
-          <WaterfallStatusStrip
-            txFreq={txFreq}
-            decoding={decoding}
-            audio={audio}
-            displayHz={displayHz}
-            onDisplayHz={onDisplayHz}
-            denoise={denoise}
-            onDenoise={onDenoise}
-            showMessages={showMessages}
-            onToggleMessages={onToggleMessages}
-          />
+          {rightPane === "map" ? (
+            <MapScreen
+              messages={messages}
+              operatingMode={operatingMode}
+              workedCalls={workedCalls}
+              workedCallsAnyBand={workedCallsAnyBand}
+              myGrid={myGrid}
+              myCall={myCall}
+            />
+          ) : (
+            <>
+              <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} displayHz={displayHz} />
+              <WaterfallStatusStrip
+                txFreq={txFreq}
+                decoding={decoding}
+                audio={audio}
+                displayHz={displayHz}
+                onDisplayHz={onDisplayHz}
+                denoise={denoise}
+                onDenoise={onDenoise}
+                showMessages={showMessages}
+                onToggleMessages={onToggleMessages}
+              />
+            </>
+          )}
         </div>
       </div>
     </>
@@ -2081,7 +2449,6 @@ function LogScreen() {
   const [importResult, setImportResult] = useState<ImportSummary | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null);
-  const importInputRef = useRef<HTMLInputElement | null>(null);
   // Table sort: newest-first (Date, descending) by default.
   const [sortColumn, setSortColumn] = useState<number>(QSO_COL_DATE);
   const [sortAscending, setSortAscending] = useState(false);
@@ -2155,18 +2522,23 @@ function LogScreen() {
     URL.revokeObjectURL(url);
   }
 
-  async function importAdifFile(file: File) {
+  async function startImportAdif() {
+    // The file never crosses IPC as content -- a native dialog returns just
+    // a path, and the Rust side opens and streams the file itself (see
+    // ipc.ts's importAdif doc comment: the previous file.text()-then-invoke
+    // approach could buffer a large real log several times over in memory
+    // and locked this board up twice on a real ~80MB file).
+    const path = await api.pickAdifFile();
+    if (!path) return; // Cancel
     // Set busy state synchronously, before the first await -- otherwise the
     // button and progress popup stay unchanged (looking like the click did
-    // nothing) for however long reading the file and the IPC round-trip
-    // take to even start.
+    // nothing) for however long the IPC round-trip takes to even start.
     setImportResult(null);
     setImportError(null);
     setImportProgress({ processed: 0, total: 0 });
-    const text = await file.text();
     const unlisten = await onImportProgress(setImportProgress);
     try {
-      setImportResult(await api.importAdif(text));
+      setImportResult(await api.importAdif(path));
     } catch (err) {
       setImportError(String(err));
     } finally {
@@ -2174,12 +2546,6 @@ function LogScreen() {
       setImportProgress(null);
     }
     refresh();
-  }
-
-  function onImportFileChosen(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-picking the same file next time
-    if (file) importAdifFile(file);
   }
 
   async function remove(id?: number | null) {
@@ -2233,14 +2599,7 @@ function LogScreen() {
         />
         <button className="primary" onClick={exportAdif}>Export ADIF</button>
         <span className="muted">·</span>
-        <input
-          ref={importInputRef}
-          type="file"
-          accept=".adi,.adif,.txt,text/plain"
-          style={{ display: "none" }}
-          onChange={onImportFileChosen}
-        />
-        <button onClick={() => importInputRef.current?.click()} disabled={!!importProgress}>
+        <button onClick={startImportAdif} disabled={!!importProgress}>
           Import ADIF…
         </button>
       </div>

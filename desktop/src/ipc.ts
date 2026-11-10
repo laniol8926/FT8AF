@@ -350,10 +350,19 @@ export const api = {
   exportAdif: (start?: string, end?: string) =>
     invoke<string>("export_adif", { start: start ?? null, end: end ?? null }),
   /** Import ADIF text (already read client-side from the chosen file). */
-  importAdif: (adif: string) => invoke<ImportSummary>("import_adif", { adif }),
+  /** Native "pick an ADIF file" dialog; null on Cancel. */
+  pickAdifFile: () => invoke<string | null>("pick_adif_file"),
+  /** Import the ADIF file at `path` -- the file is read on the Rust side,
+   *  never loaded into JS/sent over IPC (an earlier version did that and
+   *  could buffer a large real log several times over in memory). */
+  importAdif: (path: string) => invoke<ImportSummary>("import_adif", { path }),
 
   /** Rows in the callsign/grid cache -- 0 means the FCC/Census seed hasn't run yet. */
   callsignQthCount: () => invoke<number>("callsign_qth_count"),
+  /** The cached grid for one callsign, if any -- the Map screen's per-message
+   *  lookup for decodes that don't carry a grid themselves (TX3-5/73/R73).
+   *  Looked up one callsign at a time, never in bulk. */
+  qthForCall: (call: string) => invoke<string | null>("qth_for_call", { call }),
   /** Download + cross-reference the FCC/Census data, seeding the callsign/grid
    *  cache. Long-running (~200MB download + ~1.7M-record scan) -- pair with
    *  `onFccGridProgress` for a live counter. */

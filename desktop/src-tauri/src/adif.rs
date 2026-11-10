@@ -8,6 +8,7 @@
 //! case-insensitive and carry no length.
 
 use std::collections::HashMap;
+use std::io::{self, Cursor, Read};
 
 use crate::db::QsoRecord;
 
@@ -17,62 +18,163 @@ pub struct AdifRecord {
     pub fields: HashMap<String, String>,
 }
 
-/// Scan ADIF text into records. Tolerant of a missing/odd header, Windows line
-/// endings, and stray whitespace between fields — none of that is part of any
-/// tag's declared length, so it's skipped automatically by the scan.
+/// Scan ADIF text into records, all at once. A thin wrapper over
+/// [`AdifStreamReader`] driven against an in-memory cursor — kept so
+/// existing small-fixture tests/callers that already have a whole string in
+/// hand don't need to touch a file or a `Read`, but this is not a second
+/// implementation: there is exactly one tag/record scanner
+/// (`AdifStreamReader::next_record`), so the in-memory and streaming paths
+/// can never drift apart.
 pub fn parse_adif(text: &str) -> Vec<AdifRecord> {
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+    let mut reader = AdifStreamReader::new(Cursor::new(text.as_bytes()));
     let mut records = Vec::new();
-    let mut current = HashMap::new();
+    // A malformed `Cursor<&[u8]>` read can't actually fail (`Read` on a byte
+    // slice is infallible), so swallowing an error here just means "stop" --
+    // matching the old loop's `break`-on-truncation behavior.
+    while let Ok(Some(rec)) = reader.next_record() {
+        records.push(rec);
+    }
+    records
+}
 
-    while i < len {
-        let Some(off) = bytes[i..].iter().position(|&b| b == b'<') else { break };
-        i += off;
-        let tag_start = i + 1;
-        let Some(end_off) = bytes[tag_start..].iter().position(|&b| b == b'>') else { break };
-        let tag_end = tag_start + end_off;
-        // Tags are ASCII in practice; lossy-decode defensively (byte slices
-        // only, never `&text[..]`) so a stray byte here can't panic the parser.
-        let tag = String::from_utf8_lossy(&bytes[tag_start..tag_end]).into_owned();
-        i = tag_end + 1;
+/// Streams ADIF records out of a [`Read`] without ever buffering the whole
+/// source in memory. A whole-file-then-parse approach (read into one
+/// `String`, scan it, collect a `Vec<AdifRecord>`) needs several times the
+/// raw file size in peak memory once the frontend's file read and the IPC
+/// round-trip are counted too — confirmed on this board: an 82MB real ADIF
+/// log plus an already-imported ~45,600-row log locked up a 3.8GB machine
+/// under swap pressure. Ported from the same fix already shipped in the
+/// Android fork (`com.k1af.ft8af.log.AdifStreamReader`, "Rewrite
+/// ImportSharedLogs to stream ADIF records instead of buffering the whole
+/// file") — adapted, not transliterated: this parser is a byte-offset,
+/// declared-length scanner (not Android's delimiter/regex-split one), so
+/// instead of searching for a closing tag across chunk boundaries, each step
+/// just `ensure()`s however many more bytes it already knows it needs
+/// (either to find the next `<`/`>`, or a field's own declared length) and
+/// reads that far ahead. Peak memory is bounded by roughly one record's
+/// worth of text, not the whole file: consumed bytes are drained out of the
+/// buffer as soon as they're parsed.
+///
+/// Reuses the exact same tag loop `parse_adif` used to run inline (same
+/// `<eoh>`-clears-current, `<eor>`-flushes-current, bad/bare-field-tag-is-
+/// skipped-not-the-whole-record semantics) — there is nothing streaming-
+/// specific about *what* gets parsed, only *how much* of the source has to
+/// be in memory to parse it.
+pub struct AdifStreamReader<R: Read> {
+    reader: R,
+    buf: Vec<u8>,
+    eof: bool,
+    chunk_bytes: usize,
+}
 
-        let lower = tag.to_ascii_lowercase();
-        if lower == "eoh" {
-            // Discard header-only tags seen before this point (ADIF_VER, PROGRAMID, …).
-            current.clear();
-            continue;
-        }
-        if lower == "eor" {
-            if !current.is_empty() {
-                records.push(AdifRecord { fields: std::mem::take(&mut current) });
-            }
-            continue;
-        }
-
-        let mut parts = tag.split(':');
-        let Some(name) = parts.next() else { continue };
-        // A field with no `:length` (a bare boolean-style tag) carries no value
-        // we can extract positionally; skip it rather than guess.
-        let Some(len_str) = parts.next() else { continue };
-        let Ok(field_len) = len_str.trim().parse::<usize>() else { continue };
-        let end = (i + field_len).min(len);
-        // The declared length is a byte count. A real-world export (seen from
-        // CQRLOG/QRZ.com with accented names or comments) can disagree with
-        // UTF-8's own byte accounting, so `end` can land mid-character. A bare
-        // `&text[i..end]` slice panics in that case ("byte index N is not a
-        // char boundary") — and because this parser runs inside a Tauri
-        // command invoked from webkit2gtk's C callback, that panic can't
-        // unwind and aborts the whole running app instead of just failing the
-        // import. `from_utf8_lossy` on the raw bytes degrades gracefully
-        // (inserting U+FFFD) instead.
-        let value = String::from_utf8_lossy(&bytes[i..end]).into_owned();
-        i = end;
-        current.insert(name.to_ascii_uppercase(), value);
+impl<R: Read> AdifStreamReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self::with_chunk_bytes(reader, 8192)
     }
 
-    records
+    /// Visible for tests: a tiny chunk size exercises a tag (or a multi-byte
+    /// field value) split across several reads, not just the common case of
+    /// everything fitting in one.
+    fn with_chunk_bytes(reader: R, chunk_bytes: usize) -> Self {
+        Self { reader, buf: Vec::new(), eof: false, chunk_bytes: chunk_bytes.max(1) }
+    }
+
+    /// The next parsed record, or `None` at end of stream. Matches
+    /// `parse_adif`'s own leniency exactly (ported from the same loop, not
+    /// re-derived): a dangling record with no closing `<eor>` is dropped,
+    /// same as a truncated field whose declared length overruns what's left
+    /// degrades to whatever bytes are actually available rather than
+    /// erroring.
+    pub fn next_record(&mut self) -> io::Result<Option<AdifRecord>> {
+        let mut current: HashMap<String, String> = HashMap::new();
+        loop {
+            let Some(lt) = self.find(b'<', 0)? else {
+                return Ok(None);
+            };
+            let tag_start = lt + 1;
+            let Some(gt) = self.find(b'>', tag_start)? else {
+                self.drain_consumed(lt);
+                return Ok(None);
+            };
+            // Tags are ASCII in practice; lossy-decode defensively so a
+            // stray byte here can't panic the parser.
+            let tag = String::from_utf8_lossy(&self.buf[tag_start..gt]).into_owned();
+            let lower = tag.to_ascii_lowercase();
+            if lower == "eoh" {
+                current.clear();
+                self.drain_consumed(gt + 1);
+                continue;
+            }
+            if lower == "eor" {
+                self.drain_consumed(gt + 1);
+                if current.is_empty() {
+                    continue;
+                }
+                return Ok(Some(AdifRecord { fields: current }));
+            }
+
+            let mut parts = tag.split(':');
+            let name = parts.next();
+            // A field with no `:length` (a bare boolean-style tag) carries no
+            // value we can extract positionally; skip just this tag, same as
+            // `parse_adif` did, rather than dropping the whole record.
+            let field_len = parts.next().and_then(|s| s.trim().parse::<usize>().ok());
+            match (name, field_len) {
+                (Some(name), Some(field_len)) => {
+                    let value_start = gt + 1;
+                    let avail = self.ensure(value_start + field_len)?;
+                    let value_end = avail.min(value_start + field_len);
+                    // See `parse_adif`'s own comment: the declared length is a
+                    // byte count that can disagree with UTF-8's, so this can
+                    // land mid-character. Lossy-decode degrades gracefully.
+                    let value = String::from_utf8_lossy(&self.buf[value_start..value_end]).into_owned();
+                    current.insert(name.to_ascii_uppercase(), value);
+                    self.drain_consumed(value_end);
+                }
+                _ => self.drain_consumed(gt + 1),
+            }
+        }
+    }
+
+    /// Read more from the source in ~8KB chunks until `buf` holds at least
+    /// `want` bytes or EOF is hit; returns however many bytes are actually
+    /// available (`want`, unless EOF cut it short).
+    fn ensure(&mut self, want: usize) -> io::Result<usize> {
+        while self.buf.len() < want && !self.eof {
+            let mut chunk = vec![0u8; self.chunk_bytes];
+            let n = self.reader.read(&mut chunk)?;
+            if n == 0 {
+                self.eof = true;
+            } else {
+                self.buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+        Ok(self.buf.len().min(want))
+    }
+
+    /// The index of `needle` at or after `from`, growing the buffer as
+    /// needed; `None` once the source is exhausted with no match.
+    fn find(&mut self, needle: u8, from: usize) -> io::Result<Option<usize>> {
+        let mut scanned = from;
+        loop {
+            if let Some(off) = self.buf[scanned..].iter().position(|&b| b == needle) {
+                return Ok(Some(scanned + off));
+            }
+            // Nothing found in what's buffered -- don't re-scan it next time
+            // (quadratic on a record that spans many chunks).
+            scanned = self.buf.len();
+            if self.eof {
+                return Ok(None);
+            }
+            self.ensure(self.buf.len() + 1)?;
+        }
+    }
+
+    /// Drop fully-parsed bytes from the front of the buffer so it never
+    /// holds more than roughly one record's worth of text.
+    fn drain_consumed(&mut self, upto: usize) {
+        self.buf.drain(0..upto);
+    }
 }
 
 /// Map one parsed record to a [`QsoRecord`], or `None` if it has no `CALL`
@@ -148,6 +250,76 @@ pub fn adif_record_to_qso(fields: &HashMap<String, String>) -> Option<QsoRecord>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- AdifStreamReader: chunk-boundary / streaming-specific cases -----
+    // (the shared tag/record semantics -- header handling, case sensitivity,
+    // malformed fields, UTF-8 lossy decode -- are already covered by the
+    // `parse_adif` tests below, which exercise this same reader via the
+    // in-memory cursor path; these add only what's specific to reading in
+    // small pieces.)
+
+    fn read_all(mut r: AdifStreamReader<Cursor<&[u8]>>) -> Vec<AdifRecord> {
+        let mut out = Vec::new();
+        while let Some(rec) = r.next_record().unwrap() {
+            out.push(rec);
+        }
+        out
+    }
+
+    #[test]
+    fn tiny_chunks_still_find_a_tag_split_across_many_reads() {
+        let text = "<eoh><call:5>K1ABC<eor><call:5>K2DEF<eor>";
+        let reader = AdifStreamReader::with_chunk_bytes(Cursor::new(text.as_bytes()), 1);
+        let recs = read_all(reader);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].fields.get("CALL").unwrap(), "K1ABC");
+        assert_eq!(recs[1].fields.get("CALL").unwrap(), "K2DEF");
+    }
+
+    #[test]
+    fn tiny_chunks_still_decode_a_multibyte_value_split_across_reads() {
+        let text = "<eoh><call:4>W1AW<comment:5>café<eor>"; // café = 5 UTF-8 bytes
+        let reader = AdifStreamReader::with_chunk_bytes(Cursor::new(text.as_bytes()), 1);
+        let recs = read_all(reader);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].fields.get("COMMENT").unwrap(), "café");
+    }
+
+    #[test]
+    fn peak_buffer_stays_near_one_record_not_the_whole_source() {
+        // 50,000 small records (~900KB of text, over 100x the default 8KB
+        // read-chunk size) -- if next_record() failed to drain consumed
+        // bytes, buf would grow to roughly the whole source's size instead
+        // of staying near one chunk's worth.
+        let mut text = String::from("<eoh>");
+        for i in 0..50_000 {
+            text.push_str(&format!("<call:5>K{i:05}<eor>"));
+        }
+        let mut reader = AdifStreamReader::new(Cursor::new(text.as_bytes()));
+        let mut count = 0;
+        while reader.next_record().unwrap().is_some() {
+            count += 1;
+            // Generous bound: one read-ahead chunk (8KB) plus one record's
+            // worth of slack. The full source is ~900KB, so this only holds
+            // if draining is actually working, not just coincidentally small.
+            assert!(reader.buf.len() < 20_000, "buffer grew to {} bytes after {count} records", reader.buf.len());
+        }
+        assert_eq!(count, 50_000);
+    }
+
+    #[test]
+    fn records_split_across_separate_next_record_calls_match_parse_adif() {
+        // Cross-check: streaming one record at a time must agree exactly
+        // with parsing the same text all at once.
+        let text = "<eoh><call:5>K1ABC<gridsquare:4>FN42<eor><call:4>W1AW<eor>";
+        let mut reader = AdifStreamReader::new(Cursor::new(text.as_bytes()));
+        let mut streamed = Vec::new();
+        while let Some(rec) = reader.next_record().unwrap() {
+            streamed.push(rec.fields);
+        }
+        let whole: Vec<_> = parse_adif(text).into_iter().map(|r| r.fields).collect();
+        assert_eq!(streamed, whole);
+    }
 
     #[test]
     fn parses_header_and_two_records() {

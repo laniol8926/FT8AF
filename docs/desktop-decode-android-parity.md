@@ -549,20 +549,248 @@ correct than chasing an animation loop's edge cases. New `.decode-empty-*`
 CSS reuses the existing `--muted`/`--text-faint` tokens, which already
 mirror Android's `TextMuted`/`TextFaint` exactly.
 
-## Note for when Map work starts
+## Done this round, part 10: a real Map, inside the Decode screen's waterfall pane
 
-Not started this round -- just a pointer so the prerequisite isn't lost.
-Android's QSO-arrow/line rendering on the Map screen depends on a
-callsign-to-grid cache, `CallsignQTH(callsign, grid, updateTime)`
-(`database/DatabaseOpr.java`): populated on every decode
-(`MainViewModel.java` ~line 1447, `addCallsignQTH(msg.getCallsignFrom(),
-msg.maidenGrid)`), backfilled from the log at startup
-(`fillCallsignQTHFromLog`), and loaded into memory for fast lookup
-(`loadCallsignQTHToMemory`) -- because a station's grid only arrives on
-specific message types during a QSO, not every decode, so the Map needs this
-cache to know where *any* previously-heard station is, not just ones
-mid-QSO right now. Desktop has no equivalent table yet; building the Map
-screen needs this (or an equivalent) first.
+The Map tab's `ComingSoonScreen` stub is replaced by a working `MapScreen`
+in `App.tsx`, built on top of the `callsign_qth` cache from the previous
+round (see `desktop-callsign-grid-table.md`) -- the prerequisite the old
+"Note for when Map work starts" above used to flag. This went through two
+rounds of direct correction before landing; both are recorded below because
+the reasoning (not just the final shape) is what keeps the next person from
+repeating either mistake.
+
+**Placement**: the Map is not a separate full-width tab screen.
+`DecodeScreen` gained a `rightPane: "waterfall" | "map"` prop; the "Map"
+bottom tab now renders the *same* `DecodeScreen` the "Decode" tab does
+(same message list on the left), with `rightPane="map"` swapping
+`MapScreen` in for `WaterfallView` in the right-hand `.decode-waterfall`
+pane -- the waterfall actually unmounts (closes) rather than just hiding,
+since the two are mutually exclusive in that one pane. "Decode" keeps
+`rightPane="waterfall"` as the default.
+
+**Round 1 correction -- wrong Android source entirely.** The first build
+ported `ui/map/MapScreen.kt`, FT8AF upstream's own canvas-drawn,
+point-marker map (and its support modules `MapViewport.kt`/
+`MarkerStyle.kt`/`ConnectionLines.kt`). Directly corrected: this fork
+(`origin` = `github.com/laniol8926/FT8AF`) does not use that map. It uses a
+different, older module instead -- `com.k1af.ft8af.grid_tracker.
+GridOsmMapView` (Java, osmdroid), wrapped by `ui/map/GridTrackerPanel.kt`.
+Confirmed directly in that file's own doc comment: "the grid tracker (**the
+default, fork**) rather than the original FT8AF map," and
+`loadTrackerMap`'s own default is `true`. The commit history
+(`git log --oneline -- '*grid_tracker*' '*GridTrackerPanel*'`) is
+extensive, active fork-specific work ("Map: the grid tracker is the
+default map," "Map tracker panel: no grid shading, only this cycle's lines
+and CQs," etc.) -- not legacy dead code that happened to still compile.
+
+**Round 1 correction -- wrong data volume, caused a real crash.** That
+first build also bulk-loaded the *entire* `callsign_qth` table (a short-
+lived `all_callsign_qth` query/command, since removed) to plot every
+previously-heard station as a point. Tested live on this board, it froze
+the whole machine -- `mmap failed ... Cannot allocate memory` -- trying to
+hold and render ~800k rows (the real FCC-seeded table) at once on a 3.8GB
+SBC. Reading the real GridTracker source (see below) showed this was never
+how the feature was supposed to work in the first place: the real one
+redraws only the current decode slot, every pass, which is inherently tiny
+(one FT8/FT4/FT2 cycle's worth of decodes) -- fixing the Android-parity
+question and the crash turned out to be the same fix.
+
+**What GridTracker actually does**, read in full
+(`GridOsmMapView.java`, 1018 lines; `GridTrackerPanel.kt`, 113 lines;
+`Ft8Message.java`'s `getMaidenheadGrid`/`getToMaidenheadGrid`/`inMyCall`):
+- **Current slot only.** The message observer groups the live list by slot
+  (`utcTime / slotMillis`), keeps only the newest slot, and on every pass
+  clears and redraws from scratch -- "no grid shading: with a big log the
+  worked/confirmed/known grids cover the map. Only the current slot's
+  lines and CQs show" (the fork's own commit message). Deduped by
+  `callsignFrom|callsignTo` pair, first occurrence per pass wins.
+- **A CQ message** gets a marker at the caller's position -- no line
+  (there's no second party yet).
+- **Any directed exchange** (grid-reply, report, R+report, RRR, 73, R73)
+  gets a **line between the two real stations** -- call_from's position to
+  call_to's, not "me" to them. This is a live "who's working whom on this
+  frequency right now" view, not a "where have I heard people" view.
+- **Grid resolution**, confirmed against the real source rather than taken
+  on description alone: call_from's position uses the message's own grid
+  when the decode has one (TX1 CQ, TX2 grid-reply -- exactly desktop's
+  existing non-empty `UiMessage.grid` case), else a cache lookup. **call_to's
+  position is always a cache lookup** (`GeneralVariables.getGridByCallsign`,
+  Android's equivalent of `qth_for_call`) -- the recipient's grid is never
+  transmitted in any FT8 message type, so this isn't just a fallback for
+  the grid-less TX3-5/73/R73 steps the way call_from's is; it's
+  unconditional. `getToMaidenheadGrid` short-circuits to `""` for a CQ
+  message, which is why CQ messages never draw a line.
+- **Line color**: red (`#FF1E27` in Android) if `msg.inMyCall()` (either
+  end is the operator's own callsign), else neutral for an overheard
+  third-party QSO.
+
+**Ported** (`desktop/src/gridTrackerSlot.ts` + `gridTrackerSlot.test.ts`,
+15 tests covering slot isolation, pair dedup/first-wins, CQ-gets-marker-
+no-line, directed-gets-line, call_to always via the resolver, call_from
+only via the resolver when the message's own grid is empty,
+`involvesMyCall` both ends): `currentSlotMessages` (slot filtering) and
+`buildGridTrackerSlot` (the marker/line decision above) as plain,
+decoupled TS functions -- same `hunt.ts` pattern of not depending on
+`ipc.ts`'s `UiMessage` directly. No matching Kotlin test file exists for
+this exact logic (it's fork-only code, not something upstream Android unit-
+tests), so these tests assert the behavior directly from the real source
+read above instead of porting existing cases.
+
+**`qth_for_call` (not a bulk fetch)**: the one piece of backend plumbing
+this needed (`db.rs`/`main.rs`/`ipc.ts`) is a single-callsign lookup,
+called for both ends of a directed message (call_to always, call_from only
+when its own grid is empty), lazily and cached per session in `MapScreen`
+(a miss caches as `null` so it isn't re-queried every render) -- scoped to
+only the current slot's distinct callsigns, which is inherently small.
+
+**Not ported, by design** (flagging up front this time, not discovered
+mid-build): the real offline raster tile basemap
+(`ft8af/app/src/main/assets/nightUSGS4Layer.sqlite`, 4.5MB, an MBTiles-
+style archive read via osmdroid's `OfflineTileProvider` -- osmdroid-
+specific plumbing with no direct web equivalent); the bundled land/country
+GeoJSON outline background from the first build's equirect canvas work
+(`mapProjection.ts`/`mapViewport.ts`/`worldOutlines.ts`, still correct and
+reused) stands in for it instead, which is a reasonable substitute, not a
+faithful port of tile rendering. Also deferred: the moving "direction
+pulse" animation along each line (`DirectionLineAnimator`, pure visual
+flourish); tap-and-hold-to-call / tap-to-navigate marker interactions
+(`gotoCqGrid`, the fork's own "press and hold a CQ box to call" commits);
+the richer per-marker/per-line info-window content (frequency/band/RST/
+comment, country/ITU/CQ-zone flags) -- v1 shows the message text on click,
+matching the fork's own "one-line pop-up boxes (the message only)"
+simplification for this panel view (the full-screen tracker activity is
+richer; this panel deliberately isn't).
+
+**Gray-line terminator**: kept from the first build
+(`terminator.ts`, NOAA low-precision sub-solar point, unchanged) -- this
+one genuinely is shared with the real fork behavior, since
+`GridOsmMapView.initMap` also calls `setGrayLine()`.
+
+**Color mapping is desktop's own, not Android's literal hex**: the "my
+call" QSO line reuses `--tx` (red, close to Android's real
+`#FF1E27`) instead of introducing a new token; the "overheard third-party
+QSO" line uses `--text` (neutral) in place of Android's plain white, which
+reads the same on this dark theme. CQ markers are tinted by
+`workedCalls`/`workedCallsAnyBand` (`--ok` green if already worked,
+`--accent` amber otherwise) rather than Android's black/blue QSL-status
+icon tints, which were tuned for Android's own icon system and wouldn't
+read on this theme (black would be invisible). The `--status-new` token
+added for the first build's "plain decode" marker role is removed --
+that role doesn't exist in the GridTracker model.
+
+**Bundled GeoJSON, fixed after a real failure (round 1, still correct)**:
+`world_land.json`/`world_countries.json`, copied verbatim from
+`ft8af/app/src/main/res/raw/`. First served from `desktop/public/map/` and
+`fetch()`ed at runtime -- silently never loaded, because Tauri's CSP
+(`tauri.conf.json`) only allow-lists `connect-src` for `ipc:`, not
+same-origin static assets. Fixed by moving both files to
+`desktop/src/map-data/` and importing them directly (`resolveJsonModule`,
+already on in `tsconfig.json`) -- Vite inlines them into the JS bundle at
+build time, no runtime fetch, no CSP interaction.
+
+**Testing**: `gridTrackerSlot.test.ts` (15 tests, see above),
+`mapProjection.test.ts`, `mapViewport.test.ts`, `terminator.test.ts`,
+`worldOutlines.test.ts` (kept from the first build, still correct). 276
+Rust tests, 172 vitest tests.
+
+## Done this round, part 11: ADIF import stopped locking up the board
+
+Starting a real ADIF import test (the user's own ~45,600-row log, then a
+second ~54,500-record file on top of it) crashed this 3.8GB board twice.
+Traced and fixed three separate, real bugs -- not one -- each confirmed via
+a live re-test, not just "it compiles":
+
+**1. The whole file was buffered in memory, 3-4 times over.** The Logbook's
+"Import ADIF..." used a plain `<input type="file">`, read the whole file
+into a JS string via `file.text()`, sent that string through
+`invoke("import_adif", { adif: text })` (one JSON IPC payload), and
+`adif.rs`'s `parse_adif` parsed it into one fully-materialized
+`Vec<AdifRecord>` before any DB work started. Fixed by porting the same
+fix already shipped on the Android side for the identical problem
+(`com.k1af.ft8af.log.AdifStreamReader`, "Rewrite ImportSharedLogs to
+stream ADIF records instead of buffering the whole file," prompted by
+"an 87MB real ADIF log" -- almost exactly tonight's 82MB file). Desktop's
+version adapts rather than transliterates: `parse_adif` was already a
+byte-offset, declared-length scanner (not Android's delimiter/regex-split
+one), so the new `AdifStreamReader` in `adif.rs` just makes that same scan
+pull-based over a `Read`, draining consumed bytes as it goes -- peak memory
+is ~one record's text, not the file. `parse_adif(text: &str)` is now a
+thin wrapper over the same reader (a `Cursor`), so the two paths can't
+drift apart. The frontend now gets a file **path** via a native picker
+(`pick_adif_file`, `tauri-plugin-dialog`) instead of file contents --
+content never crosses IPC at all. New tests: `adif.rs` gained
+`AdifStreamReader`-specific cases (tiny-chunk tag/multibyte-value
+splitting, a 50,000-record peak-buffer-stays-bounded check,
+streamed-vs-whole-string agreement); `db.rs` gained a real-temp-file
+streaming-import test.
+
+**2. The file picker (and the import itself) deadlocked the main thread.**
+`pick_adif_file` was a plain `fn`, which Tauri dispatches on the main
+thread by default -- and `blocking_pick_file()`'s own doc comment is
+explicit that it "should *NOT* be used when running on the main thread"
+(its own example is `async fn`). Confirmed live: no dialog ever appeared,
+no error, just a permanent hang. Fixed by making both `pick_adif_file` and
+`import_adif` `async fn` (matching the plugin's documented pattern) --
+also fixes a second, related problem: a large import would otherwise have
+frozen the whole window for however long it took, with no way for the
+progress dialog to repaint.
+
+**3. One transaction for the whole file meant a kill lost everything.**
+The import ran inside a single `BEGIN`/`COMMIT` spanning the entire file --
+built two rounds ago specifically to avoid a fsync-per-row's own multi-
+minute hang, but it meant a kill before the one final `COMMIT` (which is
+exactly what happened live, twice, trying to recover from the other two
+bugs before they were diagnosed) rolled back *the entire import*, 45,588
+rows included. The user: "I think in Android we limited it to 200" --
+checked the real mechanism (`DatabaseOpr.beginImportBatch`/
+`commitImportBatch`/`endImportBatch`, `ImportSharedLogs.IMPORT_BATCH`):
+Android actually commits every **500** records, not 200 (close
+recollection, not the exact fork constant), "so a crash or kill loses at
+most the open batch; re-importing skips what's already in." Ported
+exactly: both `import_adif_with_progress` and
+`import_adif_file_with_progress` now commit-and-reopen every
+`Db::IMPORT_BATCH` (500) records instead of wrapping the whole file in one
+transaction. New test: a 1,200-record fixture crossing two batch
+boundaries, confirming nothing is dropped or double-counted at a boundary.
+
+**Checked but not changed**: the dedup/duplicate-matching logic
+(`find_duplicate_locked`/`find_lotw_twin_locked`) was independently
+verified against the *current* `DatabaseOpr.checkIsQSL`/`matchLotwTwin`
+(not a historical commit) at the user's request and found to already be an
+exact, up-to-date port -- minute-level `TIME_ON` match, band/mode
+excluded, 15-minute LoTW-twin window, nearest-wins tiebreak, and the
+LoTW-twin RST_SENT-never-clobbers fix are all already there. No gap.
+
+**Still open, not fixed tonight**: with all three of the above fixed and
+re-verified (the Rust process's own RSS stayed in the tens-to-low-hundreds
+of MB through a real import), the board still neared a full lockup twice
+more -- confirmed via `ps aux --sort=-rss` to be `WebKitWebProcess`
+ballooning to 2-2.7GB RSS, **not** the Rust backend, and on the second
+occurrence with **no import running at all** -- just the Logbook screen
+holding 45,588 rows plus normal interaction. This is the same
+previously-documented WebKitGTK repaint-freeze bug on this board, now
+confirmed to also leak memory under load, not just freeze visually, when a
+large row count is involved. The user's recollection -- "we had to limit
+the number of logbook rows that were displaying because Android tried to
+load the entire logbook" -- is a credible lead (a row-count cap somewhere
+in Android's logbook loading path) but **wasn't located before this round
+ended**; `LogbookScreen.kt`'s main table path was confirmed to load the
+full, unlimited `records` list and only moved its filter/sort off the main
+thread (`319829f7`, a different ANR fix, not a row cap) -- the actual
+limiting mechanism, if one still exists in the current fork, is most
+likely in the separate "Recent" tab/view
+(`RecentDecodesScreen.kt`/`593720c8`) rather than the main spreadsheet
+table, but this needs the next session to actually read that file and
+confirm, not guess from the name. **Next step**: find and read
+`RecentDecodesScreen.kt`'s data-loading path for a real row cap, decide
+whether desktop's Logbook should adopt the same cap (vs. e.g. true
+pagination/lazy-loading from SQLite instead of loading the whole table
+into frontend state), and re-verify live with the same two real files
+(`ai5ii.99793.20261110030942.adi`, 82MB; `ai5iicqrlog.adi`, 32MB) that
+crashed this board tonight.
+
+**Testing**: 282 Rust tests (`adif.rs` +4, `db.rs` +2 net vs. part 10's
+count), 172 vitest tests.
 
 ## Build note
 
@@ -571,3 +799,29 @@ launchable binary (plain `cargo build` skips `beforeBuildCommand`, producing
 a dev-mode binary missing the `custom-protocol` feature). A full release
 build on this board took ~36 minutes on the first build after this round's
 dependency churn; expect faster incremental builds after that.
+
+## Open: the real GridTracker tile basemap (planned, not started)
+
+The GridTracker map (part 10 above) still renders its background as the
+bundled land/country GeoJSON vector outlines carried over from the first
+(wrong) map build -- the user confirmed this reads as "the ft8af map, not
+the ft8tw map": GridTracker's real look on Android is actual offline
+satellite tile imagery
+(`ft8af/app/src/main/assets/nightUSGS4Layer.sqlite`, 4.5MB, osmdroid's own
+simple SQLite tile-archive format, **not** MBTiles), not a flat vector
+map. A full plan for this was researched, written, and approved this
+round (key-format reverse-engineered and verified against the real file
+via the vendored `osmdroid-android-6.1.14-sources.jar`:
+`index = (((z << z) + x) << z) + y`, confirmed 341 tiles, zoom 0-4, full
+coverage, standard Web Mercator XYZ numbering) -- **but implementation was
+interrupted by the ADIF-import crash investigation (part 11) and never
+started.** The plan is still on disk at
+`~/.claude/plans/precious-scribbling-lark.md` and is the right starting
+point for the next round: switch the map's projection from equirectangular
+to Web Mercator (`mercatorProjection.ts`/`mercatorViewport.ts`, new),
+bundle the sqlite file as a Rust resource and serve tiles over IPC (never
+a `fetch()` -- Tauri's CSP blocks that, confirmed in part 10) via a new
+`map_tiles.rs` + `map_tile(z,x,y)` command returning a data URL, and a
+frontend tile cache in `MapScreen`. The sqlite file itself is already
+copied into place (`desktop/src-tauri/resources/nightUSGS4Layer.sqlite`,
+committed this round) but nothing yet reads it.

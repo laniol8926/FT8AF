@@ -324,34 +324,75 @@ fn export_adif(
         .export_adif_range(start.as_deref(), end.as_deref())
 }
 
-/// Import ADIF text (read client-side from the chosen file) into the log.
-/// See `Db::import_adif_with_progress` for the duplicate-matching rule and the
-/// batched-transaction performance note. Emits `"import-progress"` events
-/// (payload: [`ImportProgress`]) so the UI can show a live counter instead of
-/// a silent wait on a large file.
+/// Native "pick an ADIF file" dialog -- returns the chosen path, or `None`
+/// on Cancel. A native dialog (not an `<input type="file">`) for two
+/// reasons: it's immune to the WebKitGTK repaint-freeze bug on this board
+/// (confirmed in the grid-seed-popup round, same plugin), and it's what lets
+/// `import_adif` take a path instead of file *contents* -- see that
+/// command's doc comment for why the content never crossing IPC is the
+/// whole point of this change.
+///
+/// `async fn`, not a plain `fn`: Tauri dispatches a non-async command on the
+/// main thread, and `blocking_pick_file()`'s own doc comment is explicit
+/// that it "should *NOT* be used when running on the main thread" (its
+/// example is `async fn`) -- a plain `fn` here hung forever with no dialog
+/// ever appearing, confirmed live.
+#[tauri::command]
+async fn pick_adif_file(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .file()
+        .add_filter("ADIF log", &["adi", "adif", "ADI", "ADIF"])
+        .blocking_pick_file()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Import an ADIF file, given its path, into the log. See
+/// `Db::import_adif_file_with_progress` for the duplicate-matching rule and
+/// the streaming design. Emits `"import-progress"` events (payload:
+/// [`ImportProgress`]) so the UI can show a live counter instead of a
+/// silent wait on a large file.
+///
+/// Takes a **path**, not file contents: an earlier version took the whole
+/// file as a `String` argument (read client-side via `file.text()`, sent
+/// over IPC as one JSON payload) -- that buffered a file at least 3-4 times
+/// over (the JS string, the IPC payload, the Rust `String`, the fully
+/// parsed record list) before a single row was written, and locked up this
+/// 3.8GB board twice on a real ~80MB log. Opening the file directly here
+/// means the content never crosses IPC at all.
 ///
 /// Wrapped in `catch_unwind`: this is the one command that parses arbitrary
 /// external file content, and on Linux a Tauri command runs inside
 /// webkit2gtk's C callback, where an unwinding panic can't cross back out —
 /// it aborts the entire running app instead of just failing this call. The
-/// parser itself (`adif::parse_adif`) is written to never panic, but this is
-/// cheap insurance against anything we missed.
+/// parser itself (`adif::AdifStreamReader`) is written to never panic, but
+/// this is cheap insurance against anything we missed.
+///
+/// `async fn`, not a plain `fn`, for the same reason as `pick_adif_file`:
+/// a non-async command runs on the main thread, which would otherwise
+/// freeze the whole window for as long as a large import takes (the
+/// progress events still have somewhere to be delivered, but the UI
+/// couldn't repaint to show them).
 #[tauri::command]
-fn import_adif(
-    state: State<AppState>,
+async fn import_adif(
+    state: State<'_, AppState>,
     app: tauri::AppHandle,
-    adif: String,
+    path: String,
 ) -> Result<ImportSummary, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.db.import_adif_with_progress(&adif, |processed, total| {
-            let _ = app.emit("import-progress", ImportProgress { processed, total });
-        })
+        state
+            .db
+            .import_adif_file_with_progress(std::path::Path::new(&path), |processed, total| {
+                let _ = app.emit("import-progress", ImportProgress { processed, total });
+            })
     }))
     .map_err(|_| {
         "ADIF import hit an unexpected error partway through and stopped; QSOs already \
          imported before that point are kept, nothing after it was touched."
             .to_string()
-    })
+    })?
+    .map_err(|e| format!("Couldn't read that file: {e}"))
 }
 
 /// Total rows in `callsign_qth` -- the frontend's first-run check: an empty
@@ -360,6 +401,15 @@ fn import_adif(
 #[tauri::command]
 fn callsign_qth_count(state: State<AppState>) -> i64 {
     state.db.callsign_qth_count()
+}
+
+/// The cached grid for one callsign, if any -- the Map screen's per-message
+/// lookup for TX3-5/73/R73 decodes, which don't carry a grid themselves
+/// (see `db.rs::qth_for_call`'s doc comment). Looked up one callsign at a
+/// time as the Map screen needs them, never in bulk.
+#[tauri::command]
+fn qth_for_call(state: State<AppState>, call: String) -> Option<String> {
+    state.db.qth_for_call(&call)
 }
 
 /// Download the FCC amateur-license database, cross-reference it against the
@@ -785,8 +835,10 @@ fn main() {
             delete_qso,
             save_qso,
             export_adif,
+            pick_adif_file,
             import_adif,
             callsign_qth_count,
+            qth_for_call,
             import_fcc_grid_seed,
             get_config,
             set_config,
