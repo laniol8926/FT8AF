@@ -149,6 +149,31 @@ export function onImportProgress(cb: (p: ImportProgress) => void): Promise<Unlis
   return listen<ImportProgress>("import-progress", (ev) => cb(ev.payload));
 }
 
+/** The furthest logged station and its great-circle distance from the
+ *  operator -- see Rust `db.rs`'s `BestDx`/`Db::best_dx`. */
+export interface BestDx {
+  callsign: string;
+  grid: string;
+  distance_km: number;
+}
+
+/** Aggregate Logbook stats for the Stats/Awards tabs, matching Android's
+ *  `LogbookStats` data class field-for-field -- see Rust `db.rs`'s
+ *  `LogStats`/`Db::log_stats`. `band_counts` serializes as an array of
+ *  [band, count] pairs (Rust's `Vec<(String, i64)>`), most-worked first. */
+export interface LogStats {
+  total_qsos: number;
+  dxcc_entities: number;
+  cq_zones: number;
+  itu_zones: number;
+  grid_squares: number;
+  band_counts: [string, number][];
+  continent_codes: string[];
+  states_worked: string[];
+  worked_grid_fields: string[];
+  best_dx: BestDx | null;
+}
+
 /** First-run FCC/Census grid-table seed: see Rust `fcc_grid.rs`'s module doc
  *  comment. "downloading" is the ~200MB FCC amateur-license zip (`total` is
  *  bytes, from Content-Length); "processing" is the per-record FCC→Gazetteer
@@ -344,6 +369,9 @@ export const api = {
   workedCqZones: () => invoke<number[]>("worked_cq_zones"),
   /** US states already worked on the currently-tuned band/mode, for the New State filter chip. */
   workedStates: (mode: string) => invoke<string[]>("worked_states", { mode }),
+  /** Aggregate Logbook stats for the Stats/Awards tabs; myGrid drives the Best
+   *  DX card (an empty/unparseable grid just means no card, not an error). */
+  logStats: (myGrid: string) => invoke<LogStats>("log_stats", { myGrid }),
   deleteQso: (id: number) => invoke("delete_qso", { id }),
   saveQso: (record: QsoRecord) => invoke<number>("save_qso", { record }),
   /** Export ADIF, optionally restricted to an inclusive YYYYMMDD date range. */

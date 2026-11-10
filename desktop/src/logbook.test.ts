@@ -1,16 +1,23 @@
 import { describe, it, expect } from "vitest";
 import {
   adifToDateInput,
+  bandColor,
   buildExportArgs,
+  buildGridHeatmapCells,
   buildQsoRecord,
   computeVirtualWindow,
   dateInputToAdif,
   displayReport,
   filterQsos,
+  formatDistanceMi,
   formatHhmm,
   formFromQso,
+  GRID_HEATMAP_COLS,
+  GRID_HEATMAP_ROWS,
   isLogFiltered,
   logbookPlace,
+  neededStates,
+  neededStatesPreview,
   qslMarks,
   qsoCountLabel,
   qsoStatusLabel,
@@ -24,6 +31,8 @@ import {
   QSO_COL_STATE,
   QSO_COL_STATUS,
   sortQsoTable,
+  WAS_STATES,
+  workedAllContinents,
   type QsoEditForm,
 } from "./logbook";
 import type { QsoRecord } from "./ipc";
@@ -415,5 +424,93 @@ describe("computeVirtualWindow", () => {
     const lastVisibleRow = Math.floor((5000 + 400) / 26);
     expect(w.startIndex).toBeLessThanOrEqual(firstVisibleRow);
     expect(w.endIndex).toBeGreaterThanOrEqual(lastVisibleRow);
+  });
+});
+
+describe("workedAllContinents", () => {
+  it("reduces raw codes to the six WAC continents in canonical order", () => {
+    const wac = workedAllContinents(["NA", "eu", " AS ", "NA", null, "-", "AN"]);
+    expect(wac.chips.map((c) => c.code)).toEqual(["NA", "SA", "EU", "AF", "AS", "OC"]);
+    expect(wac.chips.filter((c) => c.worked).map((c) => c.code)).toEqual(["NA", "EU", "AS"]);
+    expect(wac.workedCount).toBe(3);
+    expect(wac.total).toBe(6);
+    expect(wac.isComplete).toBe(false);
+  });
+
+  it("is complete once all six are present", () => {
+    const wac = workedAllContinents(["NA", "SA", "EU", "AF", "AS", "OC"]);
+    expect(wac.isComplete).toBe(true);
+    expect(wac.workedCount).toBe(6);
+  });
+
+  it("ignores junk/blank/non-WAC codes entirely", () => {
+    expect(workedAllContinents(["", "AN", "ZZ"]).workedCount).toBe(0);
+  });
+});
+
+describe("neededStates / neededStatesPreview", () => {
+  it("lists every WAS state not in the worked set, in canonical order", () => {
+    const needed = neededStates(["ca", "TX"]);
+    expect(needed[0]).toBe("AL"); // canonical order starts at AL
+    expect(needed).not.toContain("CA");
+    expect(needed).not.toContain("TX");
+    expect(needed.length).toBe(WAS_STATES.length - 2);
+  });
+
+  it("ignores a worked entry that isn't a WAS state (e.g. DC)", () => {
+    expect(neededStates(["DC"]).length).toBe(WAS_STATES.length);
+  });
+
+  it("previews at most max states, collapsing the rest into an overflow count", () => {
+    const remaining = WAS_STATES.slice(0, 20) as unknown as string[];
+    const { shown, overflow } = neededStatesPreview(remaining, 12);
+    expect(shown.length).toBe(12);
+    expect(overflow).toBe(8);
+  });
+
+  it("max <= 0 shows nothing and reports the whole list as overflow", () => {
+    const { shown, overflow } = neededStatesPreview(["AL", "AK"], 0);
+    expect(shown).toEqual([]);
+    expect(overflow).toBe(2);
+  });
+
+  it("no overflow when everything fits", () => {
+    const { shown, overflow } = neededStatesPreview(["AL", "AK"], 12);
+    expect(shown).toEqual(["AL", "AK"]);
+    expect(overflow).toBe(0);
+  });
+});
+
+describe("bandColor", () => {
+  it("returns the assigned color for a known band, case/whitespace-insensitive", () => {
+    expect(bandColor("20m")).toBe("#5CD6E8");
+    expect(bandColor(" 17M ")).toBe("#FACC15");
+  });
+
+  it("falls back to the muted color for an unassigned band", () => {
+    expect(bandColor("80m")).toBe("#8A96B1");
+  });
+});
+
+describe("buildGridHeatmapCells", () => {
+  it("builds the full 18x18 field grid with only worked fields flagged", () => {
+    const cells = buildGridHeatmapCells(new Set(["FN", "JO"]));
+    expect(cells.length).toBe(GRID_HEATMAP_ROWS);
+    expect(cells[0].length).toBe(GRID_HEATMAP_COLS);
+    const worked = cells.flat().filter((c) => c.isWorked).map((c) => c.field);
+    expect(worked.sort()).toEqual(["FN", "JO"]);
+  });
+
+  it("field designators span the full A..R range on both axes", () => {
+    const cells = buildGridHeatmapCells(new Set());
+    expect(cells[0][0].field).toBe("AA");
+    expect(cells[17][17].field).toBe("RR");
+  });
+});
+
+describe("formatDistanceMi", () => {
+  it("rounds to a whole number with a mi suffix", () => {
+    expect(formatDistanceMi(1000 / 0.621371)).toBe("1000 mi");
+    expect(formatDistanceMi(0)).toBe("0 mi");
   });
 });

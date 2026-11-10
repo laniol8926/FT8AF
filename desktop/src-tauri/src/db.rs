@@ -113,6 +113,38 @@ pub struct ImportSummary {
     pub skipped: i64,
 }
 
+/// The furthest logged station and its great-circle distance from the
+/// operator -- Android's `BestDx` (`LogbookScreen.kt`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BestDx {
+    pub callsign: String,
+    pub grid: String,
+    pub distance_km: f64,
+}
+
+/// Aggregate Logbook stats for the Stats/Awards tabs, matching Android's
+/// `LogbookStats` data class (`LogbookScreen.kt`) field-for-field. See
+/// [`Db::log_stats`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LogStats {
+    pub total_qsos: i64,
+    pub dxcc_entities: i64,
+    pub cq_zones: i64,
+    pub itu_zones: i64,
+    pub grid_squares: i64,
+    /// (band, count), most-worked first.
+    pub band_counts: Vec<(String, i64)>,
+    /// Raw continent codes worked (e.g. "NA", "EU"); the frontend's
+    /// `workedAllContinents` reduces this to the WAC award, same split as
+    /// Android's `CountDbOpr` query vs. its `workedAllContinents` reducer.
+    pub continent_codes: Vec<String>,
+    /// Distinct WAS states worked, across all bands/modes.
+    pub states_worked: Vec<String>,
+    /// Two-letter Maidenhead fields worked, for the grid-coverage heatmap.
+    pub worked_grid_fields: Vec<String>,
+    pub best_dx: Option<BestDx>,
+}
+
 /// Live progress for an in-flight [`Db::import_adif_with_progress`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportProgress {
@@ -617,6 +649,180 @@ impl Db {
         stmt.query_map([], |row| row.get::<_, String>(0))
             .map(|it| it.filter_map(Result::ok).collect())
             .unwrap_or_default()
+    }
+
+    /// Distinct ITU zones already logged, any band/mode -- mirrors
+    /// [Self::worked_cq_zones] but for ITU zone, backing the Logbook Stats
+    /// tab's ITU-zone count (Android's `LogbookStats.ituZones`, resolved the
+    /// same way via `CountDbOpr.getItuCount`).
+    pub fn worked_itu_zones(&self) -> Vec<i64> {
+        let mut zones: Vec<i64> = self
+            .distinct_calls()
+            .iter()
+            .filter_map(|c| crate::dxcc::lookup(c))
+            .map(|m| m.itu_zone)
+            .collect();
+        zones.sort_unstable();
+        zones.dedup();
+        zones
+    }
+
+    /// Distinct continent codes already logged, any band/mode -- backs the
+    /// Logbook Stats/Awards tabs' Worked All Continents (WAC) award
+    /// (Android's `CountDbOpr.getContinentCount`, reduced by
+    /// `workedAllContinents` in `WorkedAllContinents.kt`). Raw codes (e.g.
+    /// "NA", "EU", or a stray unmatched entry) are returned as-is; filtering
+    /// to the six WAC continents happens in the frontend's
+    /// `workedAllContinents`, mirroring Android's split between this query
+    /// and that pure reducer.
+    pub fn worked_continents(&self) -> Vec<String> {
+        let mut continents: Vec<String> = self
+            .distinct_calls()
+            .iter()
+            .filter_map(|c| crate::dxcc::lookup(c))
+            .map(|m| m.continent)
+            .collect();
+        continents.sort_unstable();
+        continents.dedup();
+        continents
+    }
+
+    /// Distinct US states worked across the *whole* log (all bands and modes
+    /// combined) -- unlike [Self::worked_states], which is scoped to one band
+    /// and mode for the Decode list's New-State filter. Backs the Logbook
+    /// Stats/Awards tabs' Worked All States (WAS) award, which Android
+    /// computes the same way: `LogbookScreen.kt`'s stats loader resolves
+    /// every logged QSO's grid via `UsStateLookup`, not just the ones on the
+    /// currently-tuned band.
+    pub fn worked_states_all(&self) -> Vec<String> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT call, gridsquare, state FROM qso_log") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        drop(stmt);
+        drop(conn);
+
+        let mut states: Vec<String> = rows
+            .iter()
+            .filter_map(|(call, grid, state)| {
+                let logged = if state.trim().is_empty() { None } else { Some(state.as_str()) };
+                let grid = if grid.is_empty() { None } else { Some(grid.as_str()) };
+                let call = if call.is_empty() { None } else { Some(call.as_str()) };
+                crate::us_states::worked_state_for(logged, grid, call)
+            })
+            .collect();
+        states.sort_unstable();
+        states.dedup();
+        states
+    }
+
+    /// Distinct 4-char grid squares worked, deduped after truncation -- the
+    /// VUCC metric (Android's `gridSquaresWorked` in `LogbookScreen.kt`).
+    /// Differs from [Self::worked_grids] (used by the Decode list's New-Grid
+    /// filter), which dedupes on the *full* logged grid string: two QSOs
+    /// logged as "FN31ab" and "FN31xy" are two distinct New-Grid targets
+    /// there, but the same VUCC square here.
+    pub fn grid_squares_worked(&self) -> i64 {
+        let mut squares: Vec<String> =
+            self.worked_grids().iter().map(|g| crate::util::grid4(g)).collect();
+        squares.sort_unstable();
+        squares.dedup();
+        squares.len() as i64
+    }
+
+    /// Distinct two-letter Maidenhead *fields* worked (e.g. "FN", "JO") --
+    /// backs the Logbook Stats tab's grid-coverage heatmap (Android's
+    /// `workedGridFields` in `LogbookScreen.kt`), a coarser view than
+    /// [Self::grid_squares_worked]'s 4-char VUCC count.
+    pub fn worked_grid_fields(&self) -> Vec<String> {
+        let mut fields: Vec<String> = self
+            .worked_grids()
+            .iter()
+            .filter(|g| g.len() >= 2)
+            .map(|g| g.chars().take(2).collect())
+            .collect();
+        fields.sort_unstable();
+        fields.dedup();
+        fields
+    }
+
+    /// QSO count per band, most-worked first -- backs the Logbook Stats tab's
+    /// band donut chart (Android's `CountDbOpr.getBandCount`).
+    pub fn band_counts(&self) -> Vec<(String, i64)> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT band, COUNT(*) as n FROM qso_log GROUP BY UPPER(band) ORDER BY n DESC, UPPER(band) ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Total logged QSOs.
+    pub fn total_qsos(&self) -> i64 {
+        self.conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM qso_log", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+
+    /// The furthest-worked station, measured great-circle from `my_grid` --
+    /// Android's "Best DX" card (`computeBestDx` in `LogbookScreen.kt`).
+    /// Returns `None` when `my_grid` doesn't parse or no logged QSO has a
+    /// usable call + grid at a positive, finite distance (mirrors
+    /// `computeBestDx`'s own skip rules: a non-positive/NaN distance, such as
+    /// two stations sharing a grid, is a distance floor, never a "best DX").
+    pub fn best_dx(&self, my_grid: &str) -> Option<BestDx> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT call, gridsquare FROM qso_log").ok()?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        drop(stmt);
+        drop(conn);
+
+        rows.into_iter()
+            .filter_map(|(call, grid)| {
+                let call = call.trim().to_string();
+                let grid = grid.trim().to_string();
+                if call.is_empty() || grid.is_empty() {
+                    return None;
+                }
+                let dist = crate::util::maidenhead_distance_km(my_grid, &grid)?;
+                if !dist.is_finite() || dist <= 0.0 {
+                    return None;
+                }
+                Some(BestDx { callsign: call, grid, distance_km: dist })
+            })
+            .max_by(|a, b| a.distance_km.partial_cmp(&b.distance_km).unwrap())
+    }
+
+    /// Aggregate Logbook Stats, matching Android's `LogbookStats` data class
+    /// (`LogbookScreen.kt`) field-for-field. One IPC round trip rather than
+    /// nine (total/dxcc/cq/itu/grid/bands/continents/states/best-dx), each an
+    /// independent, already-tested query above.
+    pub fn log_stats(&self, my_grid: &str) -> LogStats {
+        LogStats {
+            total_qsos: self.total_qsos(),
+            dxcc_entities: self.worked_dxcc_prefixes().len() as i64,
+            cq_zones: self.worked_cq_zones().len() as i64,
+            itu_zones: self.worked_itu_zones().len() as i64,
+            grid_squares: self.grid_squares_worked(),
+            band_counts: self.band_counts(),
+            continent_codes: self.worked_continents(),
+            states_worked: self.worked_states_all(),
+            worked_grid_fields: self.worked_grid_fields(),
+            best_dx: self.best_dx(my_grid),
+        }
     }
 
     /// Flag a QSO as synced to an online service so re-runs are idempotent.
@@ -1817,6 +2023,308 @@ mod tests {
         assert_eq!(states, vec!["CT".to_string(), "MA".to_string()]);
 
         assert!(db.worked_states("30m", "FT8").is_empty());
+    }
+
+    #[test]
+    fn worked_itu_zones_derives_and_dedupes_across_bands() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), // United States -- ITU zone 8
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(), // also ITU zone 8 -- dedupes with W1AW
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "JA1ABC".into(), // Japan -- ITU zone 45
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(db.worked_itu_zones(), vec![8, 45]);
+    }
+
+    #[test]
+    fn worked_continents_derives_and_dedupes_across_bands() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), // United States -- NA
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(), // also NA -- dedupes with W1AW
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "JA1ABC".into(), // Japan -- AS
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(db.worked_continents(), vec!["AS".to_string(), "NA".to_string()]);
+    }
+
+    #[test]
+    fn worked_states_all_combines_every_band_and_mode_unlike_worked_states() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            gridsquare: "FN42".into(), // resolves to MA
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(),
+            state: "ct".into(), // different band AND mode from the row above
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT4".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // The per-band/mode query only sees the first row -- CT's QSO was
+        // logged on a different band and mode entirely.
+        assert_eq!(db.worked_states("20m", "FT8"), vec!["MA".to_string()]);
+
+        // worked_states_all ignores band/mode and sees both.
+        let mut all = db.worked_states_all();
+        all.sort();
+        assert_eq!(all, vec!["CT".to_string(), "MA".to_string()]);
+    }
+
+    #[test]
+    fn grid_squares_worked_dedupes_by_4_char_square_unlike_worked_grids() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            gridsquare: "FN31ab".into(),
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(),
+            gridsquare: "FN31xy".into(), // same 4-char square, different subsquare
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(),
+            gridsquare: "AB".into(), // too short (< 4 chars) -- excluded entirely
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // worked_grids dedupes on the full string -- two distinct New-Grid targets.
+        assert_eq!(db.worked_grids().len(), 2);
+        // grid_squares_worked truncates to the 4-char square first -- one VUCC square.
+        assert_eq!(db.grid_squares_worked(), 1);
+    }
+
+    #[test]
+    fn worked_grid_fields_dedupes_to_two_char_fields() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            gridsquare: "FN31ab".into(),
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1XYZ".into(),
+            gridsquare: "FN42".into(), // same field ("FN") as above -- dedupes
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W9ABC".into(),
+            gridsquare: "EN52".into(), // different field
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(db.worked_grid_fields(), vec!["EN".to_string(), "FN".to_string()]);
+    }
+
+    #[test]
+    fn band_counts_groups_by_band_most_worked_first() {
+        let db = Db::open_in_memory().unwrap();
+        for (call, time) in [("K1ABC", "120000"), ("K1XYZ", "121000")] {
+            db.insert_qso(&QsoRecord {
+                call: call.into(),
+                qso_date: "20260604".into(),
+                time_on: time.into(),
+                band: "20m".into(),
+                mode: "FT8".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(),
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            db.band_counts(),
+            vec![("20m".to_string(), 2), ("40m".to_string(), 1)],
+        );
+    }
+
+    #[test]
+    fn total_qsos_counts_all_logged_rows() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.total_qsos(), 0);
+        db.insert_qso(&rec("K1ABC", "20260604", "120000", false)).unwrap();
+        db.insert_qso(&rec("W1AW", "20260604", "121000", false)).unwrap();
+        assert_eq!(db.total_qsos(), 2);
+    }
+
+    #[test]
+    fn best_dx_picks_the_farthest_call_and_skips_same_grid_or_blank_rows() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "NEARBY".into(),
+            gridsquare: "FN42".into(), // same grid as "my_grid" below -- 0 km, excluded
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "FARAWAY".into(),
+            gridsquare: "JN58".into(), // Munich -- genuinely far from FN42 (New England)
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "NOGRID".into(),
+            gridsquare: "".into(), // blank grid -- unmeasurable, excluded
+            qso_date: "20260604".into(),
+            time_on: "122000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let best = db.best_dx("FN42").expect("a measurable QSO exists");
+        assert_eq!(best.callsign, "FARAWAY");
+        assert_eq!(best.grid, "JN58");
+        assert!(best.distance_km > 1000.0);
+    }
+
+    #[test]
+    fn best_dx_is_none_for_an_empty_log() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.best_dx("FN42"), None);
+    }
+
+    #[test]
+    fn log_stats_aggregates_every_field() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), // US, NA, ITU 8, CQ 5
+            gridsquare: "FN42".into(), // MA
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "JA1ABC".into(), // Japan, AS, ITU 45, CQ 25
+            gridsquare: "JN58".into(),
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "40m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let stats = db.log_stats("FN42");
+        assert_eq!(stats.total_qsos, 2);
+        assert_eq!(stats.dxcc_entities, 2);
+        assert_eq!(stats.cq_zones, 2);
+        assert_eq!(stats.itu_zones, 2);
+        assert_eq!(stats.grid_squares, 2);
+        assert_eq!(stats.band_counts, vec![("20m".to_string(), 1), ("40m".to_string(), 1)]);
+        assert_eq!(stats.continent_codes, vec!["AS".to_string(), "NA".to_string()]);
+        assert_eq!(stats.states_worked, vec!["MA".to_string()]);
+        assert_eq!(stats.worked_grid_fields, vec!["FN".to_string(), "JN".to_string()]);
+        let best = stats.best_dx.expect("JA1ABC is measurably far from FN42");
+        assert_eq!(best.callsign, "JA1ABC");
     }
 
     #[test]

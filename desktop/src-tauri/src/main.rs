@@ -9,7 +9,7 @@ use tauri::{Emitter, State};
 
 use ft8af::audio::{self, AudioDevice};
 use ft8af::bands::{self, BandEntry, CustomBand};
-use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, QsoRecord};
+use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, LogStats, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
 use ft8af::fcc_grid::{self, FccSeedSummary};
 use ft8af::os_location::{self, OsLocation};
@@ -299,6 +299,15 @@ fn worked_states(state: State<AppState>, mode: String) -> Vec<String> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(bands::default_band().dial_hz);
     state.db.worked_states(bands::band_for_freq_hz(dial_hz), &mode)
+}
+
+/// Aggregate Logbook stats for the Stats/Awards tabs (totals, DXCC/CQ/ITU
+/// zone and grid-square counts, band distribution, WAC/WAS progress, Best
+/// DX) -- see `Db::log_stats`. `my_grid` drives the Best DX distance; an
+/// empty or unparseable grid just means no Best DX card, not an error.
+#[tauri::command]
+fn log_stats(state: State<AppState>, my_grid: String) -> LogStats {
+    state.db.log_stats(&my_grid)
 }
 
 #[tauri::command]
@@ -832,6 +841,7 @@ fn main() {
             worked_dxcc_prefixes,
             worked_cq_zones,
             worked_states,
+            log_stats,
             delete_qso,
             save_qso,
             export_adif,

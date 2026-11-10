@@ -440,3 +440,154 @@ export function computeVirtualWindow(
     bottomSpacerPx: (totalRows - endIndex) * rowHeightPx,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Worked All Continents (WAC) -- ported from Android's
+// WorkedAllContinents.kt. Antarctica ("AN") is an optional endorsement, not
+// one of the six required continents, so it never counts toward the total.
+// ---------------------------------------------------------------------------
+
+/** The six WAC continents, in a conventional display order. */
+export const WAC_CONTINENTS = ["NA", "SA", "EU", "AF", "AS", "OC"] as const;
+
+export interface ContinentChip {
+  code: (typeof WAC_CONTINENTS)[number];
+  worked: boolean;
+}
+
+export interface WacProgress {
+  chips: ContinentChip[];
+  workedCount: number;
+  total: number;
+  isComplete: boolean;
+}
+
+/** Reduce raw continent codes (as `db.rs`'s `worked_continents` returns them,
+ *  e.g. "NA", "EU", or a stray unmatched entry) into WAC award progress.
+ *  Codes are trimmed/upper-cased before matching, duplicates collapse, and
+ *  anything outside the six standard continents is ignored so it can never
+ *  inflate the total. The chip list is always the six WAC_CONTINENTS in
+ *  canonical order, so the UI renders a stable row regardless of input order. */
+export function workedAllContinents(rawCodes: (string | null | undefined)[]): WacProgress {
+  const worked = new Set(
+    rawCodes
+      .filter((c): c is string => !!c)
+      .map((c) => c.trim().toUpperCase())
+      .filter((c): c is (typeof WAC_CONTINENTS)[number] => (WAC_CONTINENTS as readonly string[]).includes(c)),
+  );
+  const chips = WAC_CONTINENTS.map((code) => ({ code, worked: worked.has(code) }));
+  return {
+    chips,
+    workedCount: worked.size,
+    total: WAC_CONTINENTS.length,
+    isComplete: worked.size >= WAC_CONTINENTS.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Worked All States (WAS) -- ported from Android's WorkedAllStates.kt.
+// Washington DC is intentionally excluded: it is not one of the 50 WAS
+// states, even though a grid can resolve to "DC".
+// ---------------------------------------------------------------------------
+
+/** The 50 US states (two-letter USPS abbreviations), the ARRL WAS award basis. */
+export const WAS_STATES = [
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+  "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+  "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+  "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+  "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+] as const;
+
+/** The WAS states still needed, in WAS_STATES' canonical order, given the set
+ *  already worked (`db.rs`'s `worked_states_all`, already resolved/
+ *  upper-cased server-side). Anything in `worked` that isn't a WAS state
+ *  (e.g. "DC") is ignored. */
+export function neededStates(worked: string[]): string[] {
+  const have = new Set(worked.map((s) => s.trim().toUpperCase()));
+  return WAS_STATES.filter((s) => !have.has(s));
+}
+
+/** Split a remaining-states list into the chips to show (at most `max`) and
+ *  the count hidden behind a trailing "+N" overflow chip, so a WAS card can
+ *  preview what's left without ever rendering all 50. `max` <= 0 shows
+ *  nothing and reports the whole list as overflow. */
+export function neededStatesPreview(remaining: string[], max: number): { shown: string[]; overflow: number } {
+  if (max <= 0) return { shown: [], overflow: remaining.length };
+  if (remaining.length <= max) return { shown: remaining, overflow: 0 };
+  return { shown: remaining.slice(0, max), overflow: remaining.length - max };
+}
+
+/** How many states the WAS award preview shows before collapsing the rest
+ *  into a "+N" chip -- matches Android's NEEDED_STATES_PREVIEW_MAX. */
+export const NEEDED_STATES_PREVIEW_MAX = 12;
+
+// ---------------------------------------------------------------------------
+// Band color mapping -- ported from Android's LogbookScreen.kt bandColor(),
+// used by the Stats tab's band donut chart and legend.
+// ---------------------------------------------------------------------------
+
+const BAND_COLOR_MAP: Record<string, string> = {
+  "20M": "#5CD6E8",
+  "15M": "#4ADE80",
+  "40M": "#FFAF5E",
+  "10M": "#C084FC",
+  "30M": "#F472B6",
+  "17M": "#FACC15",
+  "12M": "#FB7185",
+};
+
+/** The donut/legend color for a band name, or Android's TextMuted fallback
+ *  for a band with no assigned color. */
+export function bandColor(band: string): string {
+  return BAND_COLOR_MAP[band.trim().toUpperCase()] ?? "#8A96B1";
+}
+
+// ---------------------------------------------------------------------------
+// Grid square coverage heatmap (18x18 field grid: AA..RR at Maidenhead field
+// level) -- ported from Android's LogbookScreen.kt. BOTH axes span the full
+// A..R range (the latitude field is a letter, not a digit), so the coverage
+// grid is 18x18 (324 cells); iterating fewer latitude rows would silently
+// drop every field north of +10 degrees latitude -- essentially all of North
+// America, Europe, and Japan.
+// ---------------------------------------------------------------------------
+
+export const GRID_HEATMAP_COLS = 18;
+export const GRID_HEATMAP_ROWS = 18;
+
+export interface GridHeatmapCell {
+  field: string;
+  isWorked: boolean;
+}
+
+/** The full 18x18 coverage grid, row-major (row = latitude field A..R, col =
+ *  longitude field A..R), each cell flagged worked against `workedFields`
+ *  (`db.rs`'s `worked_grid_fields`, already-uppercased two-letter fields). */
+export function buildGridHeatmapCells(workedFields: Set<string>): GridHeatmapCell[][] {
+  const rows: GridHeatmapCell[][] = [];
+  for (let row = 0; row < GRID_HEATMAP_ROWS; row++) {
+    const cols: GridHeatmapCell[] = [];
+    for (let col = 0; col < GRID_HEATMAP_COLS; col++) {
+      const field = String.fromCharCode(65 + col) + String.fromCharCode(65 + row);
+      cols.push({ field, isWorked: workedFields.has(field) });
+    }
+    rows.push(cols);
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Distance formatting for the Best DX card.
+// ---------------------------------------------------------------------------
+
+const KM_TO_MILES = 0.621371;
+
+/** Whole-number distance with a "mi" unit, matching Android's
+ *  `MaidenheadGrid.formatDist` ("%.0f %s"). Android lets the operator choose
+ *  mi/km (`GeneralVariables.distanceInMiles`); desktop has no such setting
+ *  yet, so this always shows miles -- a documented gap, not a guess: every
+ *  real sample seen so far (an imported Android QSO's own "Distance: 788 mi"
+ *  comment) was already in miles. */
+export function formatDistanceMi(km: number): string {
+  return `${Math.round(km * KM_TO_MILES)} mi`;
+}

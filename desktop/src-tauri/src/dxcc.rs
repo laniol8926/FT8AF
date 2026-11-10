@@ -6,10 +6,13 @@
 //! filters.
 //!
 //! cty.dat format: records separated by `;`, each
-//! `Name:CQ:ITU:Continent:Lat:Long:GMT:DXCCPrefix:alias1,alias2,...`. Only
-//! the country name, CQ zone, and the DXCC-identifying prefix (the entity
-//! key Android's `dxccMap` is keyed by) are kept -- ITU zone, continent,
-//! lat/long and GMT offset aren't used by anything ported here.
+//! `Name:CQ:ITU:Continent:Lat:Long:GMT:DXCCPrefix:alias1,alias2,...`. The
+//! country name, CQ zone, ITU zone, continent, and the DXCC-identifying
+//! prefix (the entity key Android's `dxccMap` is keyed by) are kept -- lat/
+//! long and GMT offset aren't used by anything ported here. ITU zone and
+//! continent back the Logbook Stats tab's ITU-zone count and Worked All
+//! Continents (WAC) award (`db.rs`'s `worked_itu_zones`/`worked_continents`),
+//! added after this module's original New-DXCC/New-Zone-only design.
 //!
 //! Alias matching: longest-prefix match against the call (an alias is a
 //! *prefix* of the call), with a `=FULLCALL` alias matching only that exact
@@ -30,15 +33,20 @@ const CTY_DAT: &str = include_str!("../resources/cty.dat");
 struct DxccEntry {
     country_name: String,
     cq_zone: i64,
+    itu_zone: i64,
+    continent: String,
     dxcc_prefix: String,
 }
 
 /// A resolved callsign location: just the fields the New DXCC / New Zone
-/// filters and their worked-set aggregation need.
+/// filters, the Logbook Stats tab's ITU-zone/WAC aggregation, and their
+/// worked-set aggregation need.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DxccMatch {
     pub country_name: String,
     pub cq_zone: i64,
+    pub itu_zone: i64,
+    pub continent: String,
     pub dxcc_prefix: String,
 }
 
@@ -68,6 +76,12 @@ fn parse_cty(data: &str) -> CtyTable {
             Ok(v) => v,
             Err(_) => continue,
         };
+        // A malformed/unparseable ITU zone falls back to 0 rather than
+        // skipping the whole entry -- CQ zone and the DXCC prefix (used by
+        // far more features) are still valid and useful even if ITU zone
+        // isn't, and 0 can never collide with a real ITU zone (1-90).
+        let itu_zone: i64 = fields[2].replace('\n', "").replace(' ', "").parse().unwrap_or(0);
+        let continent = fields[3].replace('\n', "").trim().to_uppercase();
         let dxcc_prefix = fields[7].replace('\n', "").replace(' ', "");
         let alias_field = fields[8].replace('\n', "").replace(' ', "");
         if country_name.is_empty() || dxcc_prefix.is_empty() {
@@ -75,7 +89,7 @@ fn parse_cty(data: &str) -> CtyTable {
         }
 
         let idx = entries.len();
-        entries.push(DxccEntry { country_name, cq_zone, dxcc_prefix });
+        entries.push(DxccEntry { country_name, cq_zone, itu_zone, continent, dxcc_prefix });
 
         for raw in alias_field.split(',') {
             // Truncate at the first CQ-zone-override "(" or, failing that,
@@ -132,6 +146,8 @@ fn to_match(e: &DxccEntry) -> DxccMatch {
     DxccMatch {
         country_name: e.country_name.clone(),
         cq_zone: e.cq_zone,
+        itu_zone: e.itu_zone,
+        continent: e.continent.clone(),
         dxcc_prefix: e.dxcc_prefix.clone(),
     }
 }
@@ -146,6 +162,8 @@ mod tests {
         assert_eq!(m.dxcc_prefix, "K");
         assert_eq!(m.country_name, "United States");
         assert_eq!(m.cq_zone, 5);
+        assert_eq!(m.itu_zone, 8);
+        assert_eq!(m.continent, "NA");
 
         let m = lookup("ve3abc").expect("case-insensitive"); // lower-case input
         assert_eq!(m.dxcc_prefix, "VE");
