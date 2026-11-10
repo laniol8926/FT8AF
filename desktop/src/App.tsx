@@ -88,11 +88,22 @@ type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
 type Filter = "all" | "cq" | "pota" | "dxcc" | "zone" | "state" | "grid" | "prefix" | "needed" | "tome";
 const MAX_MESSAGES = 800;
 
-// "No limit" for the Logbook fetch: Number.MAX_SAFE_INTEGER round-trips
-// cleanly to Rust's i64 and SQLite treats a LIMIT this large as unbounded.
-// The table sorts client-side over the full fetched set, so a smaller cap
-// here would silently make sorting wrong on a log bigger than the cap.
-const LOG_FETCH_ALL = Number.MAX_SAFE_INTEGER;
+// Logbook fetch cap. A previous round removed this entirely ("No limit":
+// Number.MAX_SAFE_INTEGER, SQLite treats a LIMIT that large as unbounded)
+// because a capped page only ever sorted that arbitrary window instead of
+// the whole matching log. That traded a real, worse bug for it: confirmed
+// live, fetching and holding an entire ~45,600-row (then larger) log
+// unconditionally on every refresh/keystroke ballooned WebKitWebProcess to
+// 2-2.7GB RSS and nearly locked up this 3.8GB board twice, with no import
+// or anything else running. The backend's `ORDER BY id DESC` (newest
+// first, the table's own default sort) already matches this cap correctly
+// for the common case (just opened the tab, no search, default sort);
+// sorting the capped page by a different column is still only correct
+// within those LOG_FETCH_LIMIT rows, not the whole log -- the count label
+// shows "shown of total" (`qsoCountLabel`) whenever the fetch was
+// truncated, same as it already does for an active search/filter, so this
+// is visible, not a silent wrong answer.
+const LOG_FETCH_LIMIT = 300;
 
 // Quiet period a gain slider must see before its value is sent to the
 // backend. Long enough to collapse a drag gesture, short enough that a
@@ -2500,11 +2511,10 @@ function LogScreen() {
   const visibleRows = sortedRows.slice(virtualWindow.startIndex, virtualWindow.endIndex);
 
   function refresh() {
-    // No cap: the table sorts client-side over whatever's fetched, so a
-    // capped page only ever sorted that arbitrary window (insertion order,
-    // not chronological) instead of the whole matching log -- confirmed by
-    // the user on a multi-thousand-row CQRLOG import.
-    api.searchLog(search, filter, LOG_FETCH_ALL, 0).then(setRows);
+    // See LOG_FETCH_LIMIT's own comment for why this is capped, not
+    // unconditional, and why that's still correct-enough for the common
+    // case rather than silently wrong.
+    api.searchLog(search, filter, LOG_FETCH_LIMIT, 0).then(setRows);
     api.logCount().then(setCount);
   }
   // Re-query whenever the live search box or the confirmation filter changes.
@@ -2563,7 +2573,9 @@ function LogScreen() {
   return (
     <>
       <div className="logbar">
-        <strong>{qsoCountLabel(count, rows.length, isLogFiltered(search, filter))}</strong>{" "}
+        <strong>
+          {qsoCountLabel(count, rows.length, isLogFiltered(search, filter) || rows.length < count)}
+        </strong>{" "}
         <span className="muted">QSOs</span>
         <input
           className="search"

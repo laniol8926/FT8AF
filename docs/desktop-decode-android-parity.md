@@ -761,36 +761,52 @@ exact, up-to-date port -- minute-level `TIME_ON` match, band/mode
 excluded, 15-minute LoTW-twin window, nearest-wins tiebreak, and the
 LoTW-twin RST_SENT-never-clobbers fix are all already there. No gap.
 
-**Still open, not fixed tonight**: with all three of the above fixed and
-re-verified (the Rust process's own RSS stayed in the tens-to-low-hundreds
-of MB through a real import), the board still neared a full lockup twice
-more -- confirmed via `ps aux --sort=-rss` to be `WebKitWebProcess`
-ballooning to 2-2.7GB RSS, **not** the Rust backend, and on the second
-occurrence with **no import running at all** -- just the Logbook screen
-holding 45,588 rows plus normal interaction. This is the same
-previously-documented WebKitGTK repaint-freeze bug on this board, now
-confirmed to also leak memory under load, not just freeze visually, when a
-large row count is involved. The user's recollection -- "we had to limit
-the number of logbook rows that were displaying because Android tried to
-load the entire logbook" -- is a credible lead (a row-count cap somewhere
-in Android's logbook loading path) but **wasn't located before this round
-ended**; `LogbookScreen.kt`'s main table path was confirmed to load the
-full, unlimited `records` list and only moved its filter/sort off the main
-thread (`319829f7`, a different ANR fix, not a row cap) -- the actual
-limiting mechanism, if one still exists in the current fork, is most
-likely in the separate "Recent" tab/view
-(`RecentDecodesScreen.kt`/`593720c8`) rather than the main spreadsheet
-table, but this needs the next session to actually read that file and
-confirm, not guess from the name. **Next step**: find and read
-`RecentDecodesScreen.kt`'s data-loading path for a real row cap, decide
-whether desktop's Logbook should adopt the same cap (vs. e.g. true
-pagination/lazy-loading from SQLite instead of loading the whole table
-into frontend state), and re-verify live with the same two real files
-(`ai5ii.99793.20261110030942.adi`, 82MB; `ai5iicqrlog.adi`, 32MB) that
-crashed this board tonight.
+**A fourth bug, found after the first three were fixed and re-verified**:
+with all three import fixes above confirmed correct (the Rust process's
+own RSS stayed in the tens-to-low-hundreds of MB through a real import),
+the board still neared a full lockup twice more -- confirmed via
+`ps aux --sort=-rss` to be `WebKitWebProcess` ballooning to 2-2.7GB RSS,
+**not** the Rust backend, and on one occurrence with **no import running
+at all** -- just the Logbook screen holding 45,588 rows plus normal
+interaction. Root cause, found by reading `LogScreen`'s own `refresh()`
+in `App.tsx`: it fetched **every** matching row on every refresh --
+`api.searchLog(search, filter, LOG_FETCH_ALL, 0)` with
+`LOG_FETCH_ALL = Number.MAX_SAFE_INTEGER`, the table's own comment
+explaining this was a *deliberate* earlier fix (a capped page only sorted
+that arbitrary window, not the whole matching log, when the user picked a
+non-default sort column). The user's recollection -- "we had to limit the
+number of logbook rows that were displaying because Android tried to load
+the entire logbook" -- pointed at the right class of problem; the exact
+fix landed on desktop's own existing (and already-tested) infrastructure
+instead of porting an Android mechanism: `search_qsos` (`db.rs`) already
+takes `limit`/`offset` and already does `ORDER BY id DESC LIMIT ?2 OFFSET
+?3` in SQL (newest-first, the table's own default sort) -- only the
+*caller* was passing an unbounded limit. Fixed by capping the fetch
+(`LOG_FETCH_LIMIT`, 300 -- the user's own call after confirming the fix
+worked, down from an initial 2000) and showing "N of 45,588" via the
+existing `qsoCountLabel` (already used for an active search/filter,
+extended to also cover a truncated fetch) rather than silently hiding the
+rest. Sorting by a non-default column still only sorts within the fetched
+page, same known, visible (via the same count label) limitation as
+before -- true whole-log server-side sorting for every column (including
+the derived Status/QSL/State columns, which would need their scoring
+logic replicated in SQL) is a possible follow-up, not done here.
+
+**Verified live, not just unit-tested**: re-ran the exact scenario that
+crashed the board twice -- importing `ai5iicqrlog.adi` (32MB) against the
+already-45,588-row log from the 82MB file -- with the capped Logbook view
+active. `WebKitWebProcess` stayed at 230-280MB RSS throughout (vs. the
+2-2.7GB it reached before this fix), available memory held at ~2.6-2.7GB
+for the full ~4-minute import, and the row count ticked up incrementally
+during the run (proof the part-11 batch-commit fix above is also visibly
+working, not just correct in principle) to 45,624+ with zero memory
+pressure.
 
 **Testing**: 282 Rust tests (`adif.rs` +4, `db.rs` +2 net vs. part 10's
-count), 172 vitest tests.
+count), 172 vitest tests (no new test for the fetch cap itself -- it's a
+one-line change to an existing, already-tested `api.searchLog` call; the
+underlying `search_qsos` pagination was already covered by
+`search_qsos_matches_predicate_and_paginates`).
 
 ## Build note
 
