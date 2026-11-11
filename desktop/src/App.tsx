@@ -276,12 +276,16 @@ export default function App() {
   const [displayHz, setDisplayHzState] = useState(WF_DEFAULT_DISPLAY_HZ);
   const [denoise, setDenoiseState] = useState(false);
   const [showMessages, setShowMessages] = useState(true);
-  // Calls already worked on the current band (upper-cased), for the Decode
-  // list's worked-station strikethrough. Desktop only ever logs "FT8" today
-  // (see qso.rs), so that's the only mode checked for now.
+  // Calls already worked on the current band and operating mode (upper-
+  // cased), for the Decode list's worked-station strikethrough -- "worked"
+  // is station+band+mode (db.rs's Db::worked_calls), not station alone, so
+  // a call worked only in a different mode on this band doesn't count here.
+  // qso.rs's QsoEngine.mode is set live from the real operating mode (same
+  // mechanism as band/freq_mhz), so this is never just "FT8" in practice.
   const [workedCalls, setWorkedCalls] = useState<Set<string>>(new Set());
-  // Calls already worked on FT8, any band, for the decode-row status pill's
-  // New Band tier (worked elsewhere, but not the currently-tuned band).
+  // Calls already worked in the current operating mode, any band, for the
+  // decode-row status pill's New Band tier (worked elsewhere, but not the
+  // currently-tuned band).
   const [workedCallsAnyBand, setWorkedCallsAnyBand] = useState<Set<string>>(new Set());
   // Grid squares already worked (any band/mode), for the New Grid filter chip
   // and Hunt's new_grid_first priority.
@@ -319,16 +323,20 @@ export default function App() {
   const [huntMinSnr, setHuntMinSnr] = useState<number | null>(null);
 
   function refreshWorkedCalls() {
-    api.workedCalls("FT8").then((calls) => setWorkedCalls(new Set(calls)));
+    api.workedCalls(operatingMode).then((calls) => setWorkedCalls(new Set(calls)));
   }
-  // Re-fetch whenever the tuned band changes -- "worked" is always
-  // relative to the band currently being operated.
-  useEffect(refreshWorkedCalls, [dialHz]);
+  // Re-fetch whenever the tuned band or operating mode changes -- "worked"
+  // is station+band+mode (db.rs's Db::worked_calls), not station alone, so
+  // a call worked only in a different mode on this same band must not count
+  // here. (Previously hardcoded the literal string "FT8" regardless of
+  // operatingMode and never re-fetched on a mode switch -- confirmed a real
+  // bug: operating in FT4 still queried/highlighted as if on FT8.)
+  useEffect(refreshWorkedCalls, [dialHz, operatingMode]);
 
   function refreshWorkedCallsAnyBand() {
-    api.workedCallsAnyBand("FT8").then((calls) => setWorkedCallsAnyBand(new Set(calls)));
+    api.workedCallsAnyBand(operatingMode).then((calls) => setWorkedCallsAnyBand(new Set(calls)));
   }
-  useEffect(refreshWorkedCallsAnyBand, []);
+  useEffect(refreshWorkedCallsAnyBand, [operatingMode]);
 
   function refreshWorkedGrids() {
     api.workedGrids().then((grids) => setWorkedGrids(new Set(grids)));
@@ -351,11 +359,11 @@ export default function App() {
   useEffect(refreshWorkedCqZones, []);
 
   function refreshWorkedStates() {
-    api.workedStates("FT8").then((states) => setWorkedStates(new Set(states)));
+    api.workedStates(operatingMode).then((states) => setWorkedStates(new Set(states)));
   }
-  // Re-fetch whenever the tuned band changes -- WAS is per band/mode, same
-  // reason refreshWorkedCalls re-fetches on dialHz.
-  useEffect(refreshWorkedStates, [dialHz]);
+  // Re-fetch whenever the tuned band or operating mode changes -- WAS is per
+  // station+band+mode, same reason refreshWorkedCalls re-fetches on both now.
+  useEffect(refreshWorkedStates, [dialHz, operatingMode]);
 
   // Callsign/grid table seed (Map screen prerequisite, fcc_grid.rs). The
   // first-run seed is triggered from the *backend* now (main.rs's setup(),
