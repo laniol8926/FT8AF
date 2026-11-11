@@ -493,14 +493,36 @@ impl Db {
     /// caller holding the lock for a multi-row transaction (see
     /// `import_adif_with_progress`) doesn't re-lock the non-reentrant mutex.
     fn insert_qso_locked(conn: &Connection, r: &QsoRecord) -> anyhow::Result<i64> {
-        conn.execute(
+        // prepare_cached, not prepare: this (and every other hot-path
+        // statement the ADIF import loop runs once per record) used to
+        // recompile its SQL from scratch on every single call -- rusqlite's
+        // Connection has no implicit statement cache the way Android's
+        // SQLiteDatabase does, so the same query text was being re-parsed
+        // and re-planned tens of thousands of times on a large import.
+        // Confirmed as a real, user-reported gap after the user asked to
+        // check for the same "import too slow" bug class Android had (see
+        // Db::import_adif_with_progress's own doc comment) -- the cache key
+        // is the SQL text itself, so this is a drop-in change, not a
+        // behavior change.
+        // synced_cloudlog/synced_qrz were missing from this column list
+        // entirely -- adif_record_to_qso correctly parses them off an
+        // imported record (see that function's doc comment) and
+        // merge_matched_qso correctly carries them into a merged record,
+        // but a *fresh* insert (this function) silently dropped both before
+        // they ever reached a bound parameter. Confirmed live: synced_qrz
+        // stayed at 0 after importing a real QRZ.com export with 54,554
+        // QRZCOM_QSO_UPLOAD_STATUS=Y records, no matter how long the import
+        // ran -- a correctness bug, not the performance one investigated
+        // alongside it.
+        conn.prepare_cached(
             "INSERT INTO qso_log
                 (call, gridsquare, mode, rst_sent, rst_rcvd, qso_date, time_on,
                  qso_date_off, time_off, band, freq, station_callsign,
                  my_gridsquare, comment, qsl_rcvd, qsl_sent, lotw_sent, lotw_rcvd,
-                 eqsl_sent, eqsl_rcvd, qrz_qsl, state, country, created_at)
+                 eqsl_sent, eqsl_rcvd, qrz_qsl, state, country,
+                 synced_cloudlog, synced_qrz, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                     ?19,?20,?21,?22,?23,?24)
+                     ?19,?20,?21,?22,?23,?24,?25,?26)
              ON CONFLICT(call, qso_date, time_on, mode) DO UPDATE SET
                 gridsquare=excluded.gridsquare, rst_sent=excluded.rst_sent,
                 rst_rcvd=excluded.rst_rcvd, qso_date_off=excluded.qso_date_off,
@@ -510,17 +532,18 @@ impl Db {
                 qsl_rcvd=excluded.qsl_rcvd, qsl_sent=excluded.qsl_sent,
                 lotw_sent=excluded.lotw_sent, lotw_rcvd=excluded.lotw_rcvd,
                 eqsl_sent=excluded.eqsl_sent, eqsl_rcvd=excluded.eqsl_rcvd,
-                qrz_qsl=excluded.qrz_qsl, state=excluded.state, country=excluded.country",
-            params![
-                r.call, r.gridsquare, r.mode, r.rst_sent, r.rst_rcvd, r.qso_date,
-                r.time_on, r.qso_date_off, r.time_off, r.band, r.freq,
-                r.station_callsign, r.my_gridsquare, r.comment, r.confirmed as i64,
-                r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
-                r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64,
-                r.state, r.country,
-                crate::util::now_unix_ms(),
-            ],
-        )?;
+                qrz_qsl=excluded.qrz_qsl, state=excluded.state, country=excluded.country,
+                synced_cloudlog=excluded.synced_cloudlog, synced_qrz=excluded.synced_qrz",
+        )?
+        .execute(params![
+            r.call, r.gridsquare, r.mode, r.rst_sent, r.rst_rcvd, r.qso_date,
+            r.time_on, r.qso_date_off, r.time_off, r.band, r.freq,
+            r.station_callsign, r.my_gridsquare, r.comment, r.confirmed as i64,
+            r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
+            r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64,
+            r.state, r.country, r.synced_cloudlog as i64, r.synced_qrz as i64,
+            crate::util::now_unix_ms(),
+        ])?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -1194,22 +1217,24 @@ impl Db {
     /// (schema v3) to stay fast at large log sizes — an unindexed `UPPER(call)`
     /// comparison is a full table scan per call, which multiplies out badly
     /// against a many-thousand-row import of a many-thousand-row existing log.
+    /// `prepare_cached`, not `query_row`/`prepare`: this runs once per
+    /// imported record, so recompiling the same query text from scratch
+    /// tens of thousands of times was real, measurable overhead the index
+    /// alone didn't fix -- see the caching note on `insert_qso_locked`.
     fn find_duplicate_locked(
         conn: &Connection,
         call: &str,
         qso_date: &str,
         time_on: &str,
     ) -> Option<QsoRecord> {
-        conn.query_row(
-            &format!(
-                "SELECT {QSO_SELECT_COLUMNS} FROM qso_log
-                 WHERE UPPER(call) = UPPER(?1) AND qso_date = ?2
-                   AND substr(time_on || '000000', 1, 4) = substr(?3 || '000000', 1, 4)
-                 LIMIT 1",
-            ),
-            params![call, qso_date, time_on],
-            row_to_qso,
-        )
+        conn.prepare_cached(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log
+             WHERE UPPER(call) = UPPER(?1) AND qso_date = ?2
+               AND substr(time_on || '000000', 1, 4) = substr(?3 || '000000', 1, 4)
+             LIMIT 1",
+        ))
+        .ok()?
+        .query_row(params![call, qso_date, time_on], row_to_qso)
         .ok()
     }
 
@@ -1240,7 +1265,11 @@ impl Db {
                AND {side} {LOTW_ROW_SQL}
              ORDER BY id ASC",
         );
-        let mut stmt = conn.prepare(&sql).ok()?;
+        // prepare_cached: this runs on every record that misses the exact
+        // duplicate match (see find_duplicate_locked's caching note) -- the
+        // cache key is the SQL text, and `side` only ever takes two values
+        // ("NOT" or ""), so this stays a 2-entry cache hit, not unbounded.
+        let mut stmt = conn.prepare_cached(&sql).ok()?;
         let rows = stmt
             .query_map(
                 params![imported.call, imported.qso_date, imported.band, imported.mode],
@@ -1260,21 +1289,30 @@ impl Db {
         best.map(|(_, r)| r)
     }
 
-    /// Write back an import duplicate's merged QSL/upload flags, STATE/
+    /// Write back an import duplicate's merged QSL/upload-sync flags, STATE/
     /// COUNTRY, and (for a LoTW-twin fill) time/report/frequency/grid --
     /// see [`merge_matched_qso`]. Never touches any other column.
+    ///
+    /// synced_cloudlog/synced_qrz were missing from this SET clause entirely
+    /// -- merge_matched_qso correctly computed them into `r`, but this write-
+    /// back silently dropped both before they ever reached the database, so
+    /// an already-logged QSO's sync flags could never be backfilled by a
+    /// re-import no matter how correct the rest of the pipeline was.
+    /// Confirmed live the same way as the sibling bug in insert_qso_locked.
     fn update_flags_locked(conn: &Connection, id: i64, r: &QsoRecord) -> anyhow::Result<()> {
-        conn.execute(
+        conn.prepare_cached(
             "UPDATE qso_log SET qsl_rcvd=?1, qsl_sent=?2, lotw_sent=?3, lotw_rcvd=?4,
                 eqsl_sent=?5, eqsl_rcvd=?6, qrz_qsl=?7, state=?8, country=?9, time_on=?10,
-                mode=?11, time_off=?12, rst_sent=?13, rst_rcvd=?14, freq=?15, gridsquare=?16
-             WHERE id=?17",
-            params![
-                r.confirmed as i64, r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
-                r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64, r.state, r.country,
-                r.time_on, r.mode, r.time_off, r.rst_sent, r.rst_rcvd, r.freq, r.gridsquare, id,
-            ],
-        )?;
+                mode=?11, time_off=?12, rst_sent=?13, rst_rcvd=?14, freq=?15, gridsquare=?16,
+                synced_cloudlog=?17, synced_qrz=?18
+             WHERE id=?19",
+        )?
+        .execute(params![
+            r.confirmed as i64, r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
+            r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64, r.state, r.country,
+            r.time_on, r.mode, r.time_off, r.rst_sent, r.rst_rcvd, r.freq, r.gridsquare,
+            r.synced_cloudlog as i64, r.synced_qrz as i64, id,
+        ])?;
         Ok(())
     }
 
@@ -1331,10 +1369,14 @@ impl Db {
     /// or an already-present callsign, matching `INSERT OR IGNORE`).
     fn upsert_callsign_qth_if_absent_locked(conn: &Connection, call: &str, grid: &str) -> bool {
         let Some(grid4) = normalize_grid4(grid) else { return false };
-        conn.execute(
+        // prepare_cached: called on every imported record with a usable
+        // grid, same hot-path reasoning as insert_qso_locked's doc comment.
+        conn.prepare_cached(
             "INSERT OR IGNORE INTO callsign_qth (callsign, grid, updated_at) VALUES (?1, ?2, ?3)",
-            params![call.trim().to_ascii_uppercase(), grid4, crate::util::now_unix_ms()],
         )
+        .and_then(|mut stmt| {
+            stmt.execute(params![call.trim().to_ascii_uppercase(), grid4, crate::util::now_unix_ms()])
+        })
         .map(|n| n > 0)
         .unwrap_or(false)
     }
@@ -2967,6 +3009,57 @@ mod tests {
         assert_eq!(row.call, "K1ABC");
         assert_eq!(row.gridsquare, "FN42");
         assert_eq!(row.band, "20m");
+    }
+
+    /// End-to-end: a fresh insert from an ADIF record carrying
+    /// QRZCOM_QSO_UPLOAD_STATUS=Y must actually persist synced_qrz=true to
+    /// the database, not just parse it correctly in memory. This is the
+    /// exact gap that let a real bug through: adif_record_to_qso parsed the
+    /// field correctly and merge_matched_qso's own unit test proved the
+    /// *merge* logic was right, but insert_qso_locked's INSERT statement
+    /// never listed the synced_cloudlog/synced_qrz columns at all, so the
+    /// parsed value was silently dropped before it ever reached SQLite --
+    /// confirmed live, synced_qrz stayed at 0 after importing a real
+    /// 54,554-record QRZ.com export no matter how long the import ran.
+    #[test]
+    fn import_adif_persists_synced_qrz_on_a_fresh_insert() {
+        let db = Db::open_in_memory().unwrap();
+        let adif = "FT8AF ADIF Export<eoh>\n\
+            <call:5>K1ABC <qso_date:8>20260604 <time_on:6>123045 <band:3>20m \
+            <mode:3>FT8 <qrzcom_qso_upload_status:1>Y <eor>\n";
+        let summary = db.import_adif(adif);
+        assert_eq!(summary.imported, 1);
+        let row = &db.list_qsos(10, 0)[0];
+        assert!(row.synced_qrz, "synced_qrz must survive a fresh insert, not just parsing");
+    }
+
+    /// Same gap, the other write path: update_flags_locked's UPDATE
+    /// statement never listed synced_cloudlog/synced_qrz either, so
+    /// re-importing a file against an *already-logged* QSO (the duplicate-
+    /// match path, not a fresh insert) could never backfill the flag no
+    /// matter how correct merge_matched_qso's own computation was.
+    #[test]
+    fn import_adif_backfills_synced_qrz_onto_an_already_logged_qso() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            qso_date: "20260604".into(),
+            time_on: "123045".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            synced_qrz: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let adif = "FT8AF ADIF Export<eoh>\n\
+            <call:5>K1ABC <qso_date:8>20260604 <time_on:6>123045 <band:3>20m \
+            <mode:3>FT8 <qrzcom_qso_upload_status:1>Y <eor>\n";
+        let summary = db.import_adif(adif);
+        assert_eq!(summary.duplicates, 1, "must match the already-logged QSO, not insert a second one");
+        assert_eq!(db.count(), 1);
+        let row = &db.list_qsos(10, 0)[0];
+        assert!(row.synced_qrz, "synced_qrz must be backfilled onto the existing row");
     }
 
     #[test]
