@@ -1107,7 +1107,7 @@ free fix: the header is now its own small `<table>` (sharing the same
 container -- the same pattern `.decode-row-header` used before this
 round's Decode-row cleanup removed that element.
 
-**Testing**: 195 vitest tests, 308 cargo tests. Verified live end to end
+**Testing**: 195 vitest tests, 309 cargo tests. Verified live end to end
 after real rebuild+relaunch cycles throughout -- the Stats/Awards tabs,
 the sticky header (confirmed clean with a zoomed-in pixel crop after each
 attempt), the full-log sort, the Decode row fixes (compared pixel-by-pixel
@@ -1115,11 +1115,30 @@ against both a desktop screenshot and a real Android screenshot the user
 sent), and the panel-width fix. The QRZ/Cloudlog sync-flag fix's end-to-end
 verification (re-importing a real ~54,500-record QRZ.com export into the
 live 45,622-row log, to confirm `synced_qrz` gets backfilled via
-`merge_matched_qso` and the "QRZ" chip appears) was still running against
-the real log when this was written -- a dedup-heavy import against an
-already-large log takes real time; follow up by checking
-`SELECT COUNT(*) FROM qso_log WHERE synced_qrz=1` and the Logbook's Status
-column once it finishes.
+`merge_matched_qso` and the "QRZ" chip appears) ran for several minutes
+against the real log -- prompted by that, the user asked to check the
+dedupe logic itself for the same "taking too long" class of bug Android
+had and fixed (`ImportSharedLogs.java` commit `319829f7`, an ANR on a real
+~53,000-QSO log, fixed by `DatabaseOpr#yieldImportBatch` calling SQLite's
+`yieldIfContendedSafely()` after nearly every record). That turned up a
+real, separate bug: the indexes needed for fast duplicate matching were
+already ported and confirmed present (`qso_log_import_dedup_idx`,
+`qso_log_lotw_twin_idx`, schema v7) -- but `self.conn`'s Mutex was locked
+once before the import loop and held for the *entire* import, including
+across every `COMMIT;BEGIN` batch boundary, so every other backend command
+needing the same connection (`log_count`, `search_qsos`, `worked_calls`,
+...) blocked for the whole import, not one batch -- confirmed live, the
+Logbook screen showed a stuck/stale QSO count throughout. Fixed by
+dropping and re-acquiring the lock after every record (cheap for
+`parking_lot`'s `Mutex` when uncontended; its eventual-fairness guarantee
+hands the lock directly to a genuinely waiting thread, the closest
+equivalent available to `yieldIfContendedSafely()`), proven with a real
+concurrency test racing a background thread's `total_qsos()` against an
+in-flight import. The large real-file import's own total wall-clock time
+wasn't a regression needing a fix beyond that -- the indexes already make
+each record's lookup fast; 54,554 records against an already-45,000-row
+table on this specific low-power SBC, concurrently with the FT8 decode
+engine competing for CPU, legitimately takes real minutes.
 
 ## Build note
 
