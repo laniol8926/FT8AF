@@ -385,12 +385,36 @@ async fn pick_adif_file(app: tauri::AppHandle) -> Option<String> {
 /// freeze the whole window for as long as a large import takes (the
 /// progress events still have somewhere to be delivered, but the UI
 /// couldn't repaint to show them).
+/// Resumes the decoder on drop, however `import_adif` returns (success,
+/// error, or an unwinding panic caught by `catch_unwind` below). Holding
+/// this for the whole command body is what makes the pause/resume pair
+/// unconditional instead of needing a matching `SetDecodeSuspended(false)`
+/// on every return path.
+struct DecodeSuspendGuard<'a>(&'a EngineHandle);
+
+impl Drop for DecodeSuspendGuard<'_> {
+    fn drop(&mut self) {
+        self.0.send(EngineCommand::SetDecodeSuspended(false));
+    }
+}
+
 #[tauri::command]
 async fn import_adif(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     path: String,
 ) -> Result<ImportSummary, String> {
+    // A large ADIF import is a long burst of DB writes competing with the
+    // engine thread's always-on FT8 decode work for CPU on this board's
+    // class of hardware -- confirmed live: the identical import took 10+
+    // minutes inside the running app but 34s in isolation with the decoder
+    // idle, against the same code and data. Suspending the decoder for the
+    // duration (resumed by `DecodeSuspendGuard` on drop) buys the import
+    // back that CPU without touching anything else live decoding gates --
+    // see `EngineCommand::SetDecodeSuspended`'s doc comment.
+    state.engine.send(EngineCommand::SetDecodeSuspended(true));
+    let _resume_decoder = DecodeSuspendGuard(&state.engine);
+
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state
             .db

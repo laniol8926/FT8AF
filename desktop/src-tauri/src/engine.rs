@@ -163,6 +163,26 @@ fn waterfall_row_due(decoding: bool, ptt: bool) -> bool {
 /// auto-keying the rig every eligible slot with the receiver off — the radio would
 /// transmit unattended, since `pending_decodes` drops to 0 on `StopDecode` so the
 /// awaiting gate no longer holds it back.
+/// Whether the run loop should hand this tick's slot audio off to the
+/// decoder thread. Separate from `decoding` itself: `suspended` is the
+/// narrower, temporary gate set by `EngineCommand::SetDecodeSuspended`
+/// (currently only during a bulk ADIF import) that stops feeding the
+/// CPU-heavy decode step without touching capture, the waterfall, or
+/// anything else `decoding` gates -- see that command's doc comment.
+fn decode_dispatch_due(
+    decoding: bool,
+    suspended: bool,
+    rx_slot_id: i64,
+    last_decoded_slot: i64,
+    into_rx_cycle_ms: i64,
+    decode_at_ms: i64,
+) -> bool {
+    decoding
+        && !suspended
+        && rx_slot_id != last_decoded_slot
+        && into_rx_cycle_ms >= decode_at_ms
+}
+
 fn boundary_tx_ready(
     decoding: bool,
     active: bool,
@@ -312,6 +332,19 @@ pub struct AnswerArgs {
 pub enum EngineCommand {
     StartDecode,
     StopDecode,
+    /// Lightweight, UI-invisible pause on handing slots to the decoder
+    /// thread -- *not* the same as `StopDecode`. Used only to free up CPU
+    /// for a bulk ADIF import on CPU-constrained hardware (confirmed live:
+    /// a 54,554-record QRZ export took 10+ minutes inside the running app
+    /// but 34s in isolation with the decoder idle, on the same code/data).
+    /// Unlike `StopDecode`, this does not drop `self.input` (audio capture
+    /// keeps running), does not clear the UDP replay cache or notify
+    /// companion apps, and does not touch `self.decoding` -- the waterfall
+    /// keeps scrolling and the RX meter keeps reading, only the actual
+    /// per-slot decode dispatch (`decode_dispatch_due`) is skipped. Sent by
+    /// `import_adif` (true before the import, false after, via a guard that
+    /// resumes even on error).
+    SetDecodeSuspended(bool),
     SetStation { call: String, grid: String },
     SetBand(u64),
     SetBaseFreq(i32),
@@ -624,6 +657,10 @@ struct Engine {
     input_device: Option<String>,
     output_device: Option<String>,
     decoding: bool,
+    /// Set via `EngineCommand::SetDecodeSuspended` -- a narrower, temporary
+    /// pause than `decoding` itself. See that command's doc comment for why
+    /// it exists and exactly what it does and doesn't touch.
+    decode_suspended: bool,
     dial_hz: u64,
     tx_audio_hz: i32,
     /// TX output level (0.0–1.0) applied to the waveform before playback.
@@ -817,6 +854,7 @@ impl Engine {
             input_device,
             output_device,
             decoding: false,
+            decode_suspended: false,
             dial_hz,
             tx_audio_hz,
             tx_gain,
@@ -968,10 +1006,14 @@ impl Engine {
             // earlier and the operator can reply on the next cycle (not skip one).
             let rx_slot_id = now.div_euclid(self.mode.cycle_ms());
             let into_rx_cycle = now.rem_euclid(self.mode.cycle_ms());
-            if self.decoding
-                && rx_slot_id != self.last_decoded_slot
-                && into_rx_cycle >= self.mode.decode_at_ms()
-            {
+            if decode_dispatch_due(
+                self.decoding,
+                self.decode_suspended,
+                rx_slot_id,
+                self.last_decoded_slot,
+                into_rx_cycle,
+                self.mode.decode_at_ms(),
+            ) {
                 self.last_decoded_slot = rx_slot_id;
                 // The slot's audio so far = the most recent `into_rx_cycle` of it,
                 // front-aligned (signal at sample 0) with the tail zero-padded.
@@ -1718,6 +1760,9 @@ impl Engine {
                 self.broadcast_status();
                 self.emit(EngineEvent::Info("decode stopped".into()));
             }
+            EngineCommand::SetDecodeSuspended(suspended) => {
+                self.decode_suspended = suspended;
+            }
             EngineCommand::SetStation { call, grid } => {
                 self.qso.my_call = call.to_uppercase();
                 self.qso.my_grid = util::grid4(&grid).to_uppercase();
@@ -2332,6 +2377,51 @@ mod tests {
         // Not decoding at all: never due, PTT state is irrelevant.
         assert!(!waterfall_row_due(false, false));
         assert!(!waterfall_row_due(false, true));
+    }
+
+    #[test]
+    fn decode_dispatch_due_fires_once_per_slot_past_the_decode_point() {
+        use super::decode_dispatch_due;
+        let decode_at_ms = Mode::Ft8.decode_at_ms();
+        // Fresh slot, past the decode point, not suspended: due.
+        assert!(decode_dispatch_due(true, false, 4, -1, decode_at_ms, decode_at_ms));
+        // Same slot already dispatched (rx_slot_id == last_decoded_slot): not due again.
+        assert!(!decode_dispatch_due(true, false, 4, 4, decode_at_ms, decode_at_ms));
+        // Not yet at the decode point this cycle: not due.
+        assert!(!decode_dispatch_due(true, false, 4, -1, decode_at_ms - 1, decode_at_ms));
+        // Not decoding at all: never due regardless of the rest.
+        assert!(!decode_dispatch_due(false, false, 4, -1, decode_at_ms, decode_at_ms));
+    }
+
+    #[test]
+    fn decode_dispatch_due_is_suppressed_while_suspended_for_import() {
+        use super::decode_dispatch_due;
+        let decode_at_ms = Mode::Ft8.decode_at_ms();
+        // Otherwise-due in every respect, but suspended: must not dispatch.
+        assert!(!decode_dispatch_due(true, true, 4, -1, decode_at_ms, decode_at_ms));
+        // Un-suspending the identical slot state makes it due again.
+        assert!(decode_dispatch_due(true, false, 4, -1, decode_at_ms, decode_at_ms));
+    }
+
+    #[test]
+    fn set_decode_suspended_does_not_touch_decoding_or_capture() {
+        // Confirms this is the narrower pause documented on
+        // `EngineCommand::SetDecodeSuspended`: unlike StopDecode, it leaves
+        // `decoding` (and therefore the waterfall/RX-meter/input capture it
+        // gates) alone -- only `decode_suspended` moves.
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+        engine.decoding = true;
+
+        engine.handle(EngineCommand::SetDecodeSuspended(true));
+        assert!(engine.decode_suspended);
+        assert!(engine.decoding);
+
+        engine.handle(EngineCommand::SetDecodeSuspended(false));
+        assert!(!engine.decode_suspended);
+        assert!(engine.decoding);
     }
 
     #[test]
