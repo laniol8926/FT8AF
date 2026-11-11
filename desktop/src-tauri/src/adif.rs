@@ -197,6 +197,16 @@ impl<R: Read> AdifStreamReader<R> {
 /// non-US subdivision, and reshaping either risks mismatching what
 /// [`Db::import_adif_with_progress`]'s "fill only when blank" merge expects
 /// to compare against a user's own typed value later).
+///
+/// `synced_qrz`/`synced_cloudlog` (upload-sync, not confirmation) are a
+/// separate pair of flags this parser previously always left `false`, so a
+/// real log exported from Android -- which marks a QSO already uploaded to
+/// QRZ.com with the standard `QRZCOM_QSO_UPLOAD_STATUS=Y` field (or a QRZ.com
+/// logbook export's own `APP_QRZLOG_LOGID`), and to Cloudlog/Wavelog/Nextlog
+/// with its own `APP_FT8AF_SYNCED_CLOUDLOG=Y` extension field -- silently
+/// lost that information on import, so the Logbook's "QRZ"/"CL" sync chips
+/// (`qsoSyncLabels` in `logbook.ts`) could never show for any imported row.
+/// Ported from Android's `QSLRecord.java` (`uploadedQrz`/`uploadedCloudlog`).
 pub fn adif_record_to_qso(fields: &HashMap<String, String>) -> Option<QsoRecord> {
     let call = fields.get("CALL")?.trim();
     if call.is_empty() {
@@ -242,8 +252,9 @@ pub fn adif_record_to_qso(fields: &HashMap<String, String>) -> Option<QsoRecord>
             || fields.get("APP_QRZLOG_STATUS").is_some_and(|v| v.trim().eq_ignore_ascii_case("C")),
         state: get("STATE"),
         country: get("COUNTRY"),
-        synced_cloudlog: false,
-        synced_qrz: false,
+        synced_cloudlog: flag("APP_FT8AF_SYNCED_CLOUDLOG"),
+        synced_qrz: flag("QRZCOM_QSO_UPLOAD_STATUS")
+            || fields.get("APP_QRZLOG_LOGID").is_some_and(|v| !v.trim().is_empty()),
     })
 }
 
