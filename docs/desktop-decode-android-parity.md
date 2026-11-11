@@ -987,6 +987,140 @@ Android phone session); mouse-wheel scroll moves the table through all
 45,622 rows; the "⋮" menu opens without hitting the scrollbar, Edit opens
 the real edit dialog pre-filled, Cancel and Delete both still work.
 
+## Done this round, part 14: real Stats/Awards, a correct column sort, QRZ sync flags, and three real Decode-row bugs found by live screenshot comparison
+
+**Logbook Stats/Awards tabs are real now**, replacing the honest
+`ComingSoonScreen` placeholders: big stat cards (Total QSOs/DXCC/CQ
+zones/ITU zones), a Best DX card, Worked All Continents, a band donut
+chart, award progress bars, a grid-coverage heatmap, and a signal-trend
+sparkline (synthesized on both platforms -- Android's own `SignalSparkline`
+doc comment says the same; ported faithfully, not something desktop is
+faking that Android has real), plus six award cards on Awards (DXCC
+Mixed/WAS/WAZ/WAC/VUCC/IOTA). Backend: `dxcc.rs` now keeps ITU zone and
+continent from `cty.dat` (previously discarded); `util.rs` gained
+`maidenhead_to_latlon`/`haversine_km` (ported from the frontend's own
+`hunt.ts` math) so Best DX can be computed entirely in Rust over the whole
+log, never shipping tens of thousands of rows to the frontend to reduce
+(the same mistake `LOG_FETCH_LIMIT` exists to prevent); `db.rs` gained
+`worked_itu_zones`/`worked_continents`/`worked_states_all`/
+`grid_squares_worked`/`worked_grid_fields`/`band_counts`/`total_qsos`/
+`best_dx`, aggregated by a new `Db::log_stats`. Verified live against the
+real 45,622-row log -- which caught a real bug: `worked_states_all`
+resolves via `us_states::worked_state_for`, which also recognizes "DC", so
+the WAS award showed "54 / 50" worked states. Added `wasStatesWorked`
+(`logbook.ts`) to filter to the real 50 WAS states before counting,
+matching Android's own `workedStates` reducer's filtering step, which this
+port had initially missed.
+
+**A column sort now runs in SQL before `LIMIT` truncates the result**
+(`db.rs`'s new `qso_sort_order_by`/`Db::search_qsos`), instead of the
+frontend re-sorting whatever page had already been fetched. Confirmed as a
+real bug, user-reported: with `LOG_FETCH_LIMIT` capping the fetch to 300
+rows, sorting by any column could only ever reorder the newest 300 QSOs --
+a callsign that was alphabetically first across the whole 45,622-row log
+but logged years before the most recent 300 could never surface. Sorting
+in SQLite (bounded Rust-side memory, never loaded into the frontend)
+before `LIMIT` applies fixes this without reintroducing the
+WebKitWebProcess memory blowup `LOG_FETCH_LIMIT` exists to prevent.
+`logbook.ts`'s old `sortQsoTable` (a pure client-side sort of one page) is
+removed along with its now-superseded tests; equivalent coverage now
+lives in `db.rs`.
+
+**ADIF import actually reads QRZ/Cloudlog upload-sync status now.**
+`adif_record_to_qso` hardcoded `synced_cloudlog`/`synced_qrz` to `false`
+on every imported record regardless of what the file said -- a real log
+exported from Android (which writes the standard
+`QRZCOM_QSO_UPLOAD_STATUS=Y`, or carries a QRZ.com logbook export's own
+`APP_QRZLOG_LOGID`, and its own `APP_FT8AF_SYNCED_CLOUDLOG=Y` extension
+field for Cloudlog/Wavelog/Nextlog) silently lost that information on
+import, so the Logbook's "QRZ"/"CL" sync chips (`qsoSyncLabels`) could
+never appear for any imported row. Ported the exact field-reading logic
+from Android's `QSLRecord.java`. Also fixed `merge_matched_qso` (the
+duplicate-match path a re-import takes) to backfill these two flags onto
+an already-logged QSO the same way it already did for
+confirmed/qsl_sent/lotw/eqsl/qrz_qsl -- without this, a QSO logged before
+this fix existed would stay stuck at `false` forever, even after
+re-importing a file that now parses the field correctly.
+
+**Worked-before now uses the live operating mode.** `db.rs`'s
+`worked_calls`/`worked_states` already scope "worked" to
+station+band+mode correctly, but the frontend
+(`refreshWorkedCalls`/`refreshWorkedCallsAnyBand`/`refreshWorkedStates`)
+passed the literal string `"FT8"` regardless of `operatingMode`, and never
+re-fetched on a mode change -- so operating in FT4 or FT2 still queried
+(and highlighted) as if on FT8. The stale comment blaming this on "desktop
+only ever logs FT8" no longer matched `qso.rs`: `QsoEngine.mode` is set
+live from the real operating mode (same mechanism as `band`/`freq_mhz`),
+not hardcoded. Fixed to pass `operatingMode` and added it to each effect's
+dependency array.
+
+**Three real bugs in the Decode row, found by a close live screenshot
+comparison the user asked for, then confirmed against a real Android
+screenshot they sent:**
+
+- **Freq wasn't zero-padded and DT could render a signed zero.** Android's
+  `getFreq_hz()` always zero-pads to 4 digits (`"%04.0f"` -> "0523", not
+  "523") so the Freq column's digits line up regardless of how many digits
+  the offset has; desktop showed the bare rounded number. `formatDecodeDt`
+  explicitly renders a value that rounds to zero unsigned ("0.0", never
+  "+0.0"/"-0.0" -- a signed zero is noise when scanning a column for real
+  outliers); desktop's inline `sign >= 0 ? "+" : ""` always added a sign.
+  Ported both into a new `decodeRow.ts` (from Android's `DecodeDt.kt` and
+  `Ft8Message.java`'s `getFreq_hz`), with tests -- including one documenting
+  that Java's and JS's `Math.round` both round a negative `.5` tie toward
+  +Infinity, not away from zero, so `-0.05` renders unsigned "0.0" on both
+  platforms; that's Android's real behavior, not an edge case to "fix".
+- **A column-header row Android never had.** Desktop showed a persistent
+  "MESSAGE / SNR / FREQ / ΔT" label row above the Decode list -- a previous
+  round added it without verifying against a real screenshot. Confirmed
+  against a real Android screenshot the user sent, and against
+  `DecodeScreen.kt`/`DecodeRow.kt`'s actual source (no such composable
+  exists there): Android's compact list goes straight from the filter
+  chips to the per-cycle time divider, with no persistent header above it.
+  Removed.
+- **A real flexbox alignment bug**, found investigating the header issue:
+  `.decode-row-snr`/`.decode-row-freq`/`.decode-row-dt` never had
+  `flex: none`/`min-width: 0`, so their fixed `width`/`text-align: right`
+  could be silently overridden by flexbox's default item sizing --
+  confirmed live, values drifted left of where they should right-align
+  relative to the (also-just-fixed) header labels. `.decode-row-msg` had
+  already needed the identical fix earlier this round for its own
+  `width: 30ch` (a long message was pushing every column after it out of
+  alignment, since each row's message is a different length) -- same root
+  cause, same fix, applied to all four cells consistently now.
+
+**The Decode screen's message panel was widened** (`.decode-detail`/
+`.decode-waterfall`, 50/50 -> 55/45): at an even split the message panel's
+own row content (30ch message + SNR/FREQ/ΔT + a status pill like "NEW
+BAND") is wider than the panel, clipping the pill's last letter --
+confirmed live ("cuts off the D from New Band").
+
+**The Logbook table's sticky header needed two attempts.**
+`position: sticky` on a `<th>` turned out to be unreliable in WebKitGTK
+regardless of `border-collapse` mode -- confirmed live, twice, with two
+different fixes attempted (first just adding sticky positioning, then
+switching `border-collapse: collapse` to `separate`): the header text and
+the row scrolling underneath it painted on top of each other instead of
+the header cleanly covering it. Replaced with the standard, browser-quirk-
+free fix: the header is now its own small `<table>` (sharing the same
+`<colgroup>` so columns still line up) rendered outside the scrolling
+container -- the same pattern `.decode-row-header` used before this
+round's Decode-row cleanup removed that element.
+
+**Testing**: 195 vitest tests, 308 cargo tests. Verified live end to end
+after real rebuild+relaunch cycles throughout -- the Stats/Awards tabs,
+the sticky header (confirmed clean with a zoomed-in pixel crop after each
+attempt), the full-log sort, the Decode row fixes (compared pixel-by-pixel
+against both a desktop screenshot and a real Android screenshot the user
+sent), and the panel-width fix. The QRZ/Cloudlog sync-flag fix's end-to-end
+verification (re-importing a real ~54,500-record QRZ.com export into the
+live 45,622-row log, to confirm `synced_qrz` gets backfilled via
+`merge_matched_qso` and the "QRZ" chip appears) was still running against
+the real log when this was written -- a dedup-heavy import against an
+already-large log takes real time; follow up by checking
+`SELECT COUNT(*) FROM qso_log WHERE synced_qrz=1` and the Logbook's Status
+column once it finishes.
+
 ## Build note
 
 `npm run tauri -- build --no-bundle` is the only way to get a real,
