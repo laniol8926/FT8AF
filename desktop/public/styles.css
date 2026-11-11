@@ -312,25 +312,27 @@ select option {
 .decode-row.tome { background: var(--signal-soft); }
 .decode-row.clickable { cursor: pointer; }
 .decode-row.clickable:hover { background: var(--panel-2); }
-/* Column header row, same widths/gap as a data row so everything lines up.
-   A sibling of .decode-list (the scrolling element), not a child, so it
-   naturally stays put above the list without needing its own scroll
-   handling. */
-.decode-row-header {
-  display: flex; align-items: center; gap: 12px; padding: 2px 10px 4px 8px;
-  border-left: 3px solid transparent; font-family: "Geist Mono", "Cascadia Code", monospace;
-  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px;
+/* min-width:0 is required, not decorative: a flex item's default min-width
+   is "auto", which for white-space:nowrap content resolves to the text's
+   full unwrapped width -- silently overriding "width: 30ch" and letting a
+   long message push every column after it out of alignment, since each
+   row's message is a different length. Confirmed live: the Freq/SNR/DT
+   columns didn't line up row to row until this was added. */
+.decode-row-msg {
+  width: 30ch; min-width: 0; flex: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text);
 }
-.decode-row-msg { width: 30ch; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 /* Already-worked station (this band + mode): struck through in red, matching
    the Android app's worked-station highlighting. */
 .decode-row-msg.worked { text-decoration: line-through; color: var(--tx); opacity: 0.7; }
-.decode-row-snr, .decode-row-freq { width: 42px; text-align: right; color: var(--muted); }
-.decode-row-dt { width: 48px; text-align: right; color: var(--muted); }
+/* flex:none + min-width:0 on all three, same reason as .decode-row-msg just
+   above: without them a flex item's default sizing can disagree with its
+   own "width" (shrinking, or being measured by content rather than the box). */
+.decode-row-snr, .decode-row-freq {
+  width: 42px; min-width: 0; flex: none; text-align: right; color: var(--muted);
+}
+.decode-row-dt { width: 48px; min-width: 0; flex: none; text-align: right; color: var(--muted); }
 .decode-row-dt.warn { color: var(--yellow); font-weight: 700; }
-.decode-row-header .decode-row-snr,
-.decode-row-header .decode-row-freq,
-.decode-row-header .decode-row-dt { color: var(--muted); }
 /* Status pill (see qsoStatus.ts), matching Android's compact StatusPill.kt:
    colored background/border (set inline per status) + a small dot + label. */
 .status-pill-row {
@@ -598,7 +600,15 @@ select option {
    .mono stack), a real border around every cell (not just row separators),
    and the same per-column text colors, not just a `.call-cell` exception. */
 .qso-table {
-  border-collapse: collapse;
+  /* separate, not collapse: WebKitGTK has a well-known rendering bug where a
+     sticky <th> in a border-collapse:collapse table doesn't paint over the
+     scrolled-under row opaquely -- confirmed live, the header text and the
+     row beneath it rendered on top of each other instead of the header
+     cleanly covering it. border-spacing:0 keeps cells touching (no visible
+     gap), at the cost of each adjacent pair of cells showing both their
+     borders (a hair thicker grid line) instead of one shared 1px line. */
+  border-collapse: separate;
+  border-spacing: 0;
   table-layout: fixed;
   width: 100%;
   font-family: "Geist Mono", "Cascadia Code", "SF Mono", Consolas, monospace;

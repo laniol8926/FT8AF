@@ -2406,13 +2406,13 @@ function DecodeScreen(props: {
               same as Android's compact row -- there's no separate Call
               column there, and no per-row Time column either (the
               time-group header above each block is Android's only "time"
-              per decode period, in both layouts). */}
-          <div className="decode-row-header muted">
-            <span className="decode-row-msg">Message</span>
-            <span className="decode-row-snr">SNR</span>
-            <span className="decode-row-freq">Freq</span>
-            <span className="decode-row-dt">Δt</span>
-          </div>
+              per decode period, in both layouts).
+              No persistent "MESSAGE/SNR/FREQ/ΔT" column-label row either --
+              confirmed against a real Android screenshot (the time-group
+              divider sits directly under the filter chips, nothing above
+              it) and against DecodeRow.kt/DecodeScreen.kt's source, which
+              has no such composable. A previous round added one here that
+              Android never actually had; removed. */}
           <div className="decode-list">
             {displayMessages.map((m, i) => {
               // Time-group dividers only make sense in "time" mode, where rows
@@ -3250,12 +3250,16 @@ function LogScreen({ refreshKey, myGrid }: { refreshKey: number; myGrid: string 
         <button onClick={() => setEditing(null)}>+ Add QSO</button>
         <button onClick={refresh}>Refresh</button>
       </div>
-      <div
-        className="decode-list log-table-list"
-        ref={scrollRef}
-        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-      >
-      <table className="qso-table">
+      {/* The header lives in its own table, outside the scrolling container
+          below, rather than a sticky <thead> inside one shared table --
+          position:sticky on a <th> inside a real <table> is unreliable in
+          WebKitGTK (confirmed live, twice: the header text and the row
+          scrolled underneath it painted on top of each other instead of the
+          header cleanly covering it, regardless of border-collapse). Two
+          tables sharing the same <colgroup> is the standard, browser-quirk-
+          free way to keep a header's columns aligned with a scrolling
+          body's. */}
+      <table className="qso-table qso-table-header">
         <colgroup>
           {QSO_TABLE_WEIGHTS.map((w, i) => (
             <col key={i} style={{ width: `${(w / QSO_TABLE_WEIGHT_TOTAL) * 100}%` }} />
@@ -3280,6 +3284,19 @@ function LogScreen({ refreshKey, myGrid }: { refreshKey: number; myGrid: string 
             <th></th>
           </tr>
         </thead>
+      </table>
+      <div
+        className="decode-list log-table-list"
+        ref={scrollRef}
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      >
+      <table className="qso-table">
+        <colgroup>
+          {QSO_TABLE_WEIGHTS.map((w, i) => (
+            <col key={i} style={{ width: `${(w / QSO_TABLE_WEIGHT_TOTAL) * 100}%` }} />
+          ))}
+          <col style={{ width: "36px" }} />
+        </colgroup>
         <tbody>
           {virtualWindow.topSpacerPx > 0 && (
             <tr aria-hidden style={{ height: virtualWindow.topSpacerPx }}>
