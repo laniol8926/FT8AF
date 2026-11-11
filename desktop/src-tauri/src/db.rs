@@ -102,6 +102,89 @@ const QSO_SELECT_COLUMNS: &str = "id, call, gridsquare, mode, rst_sent, rst_rcvd
     qsl_rcvd, qsl_sent, lotw_sent, lotw_rcvd, eqsl_sent, eqsl_rcvd, qrz_qsl, state, country, \
     synced_cloudlog, synced_qrz";
 
+/// The `logbookPlace` (State/place column) value as a SQL expression: country
+/// when it's non-US, else the logged state (falling back to the country
+/// string itself when state is blank) -- mirrors `logbook.ts`'s
+/// `logbookPlace` exactly (its is-US check is the same fixed set of
+/// spellings, not a general pattern).
+const PLACE_EXPR: &str = "(CASE \
+    WHEN country = '' OR UPPER(country) IN ('UNITED STATES', 'UNITED STATES OF AMERICA', 'USA') \
+    THEN (CASE WHEN state != '' THEN UPPER(state) ELSE UPPER(country) END) \
+    ELSE UPPER(country) END)";
+
+/// Build the `ORDER BY` clause body (no `ORDER BY` keyword) for
+/// [`Db::search_qsos`], matching `logbook.ts`'s `sortQsoTable` column for
+/// column. `column` is one of that file's `QSO_COL_*` indices; an
+/// unrecognized index falls back to the same `id DESC` every caller used
+/// before per-column sort existed.
+///
+/// Every branch but Date/Time ends in `(qso_date || time_on) DESC, id DESC`
+/// as a fixed (not `ascending`-dependent) tiebreaker -- `sortQsoTable` sorts
+/// a `newestFirst`-ordered array with JS's *stable* `Array.sort`, so ties in
+/// any other column keep their newest-first relative order regardless of
+/// that column's own sort direction; reusing `{dir}` for the tiebreaker
+/// would wrongly reverse tied rows when sorting ascending.
+fn qso_sort_order_by(column: i64, ascending: bool) -> String {
+    let dir = if ascending { "ASC" } else { "DESC" };
+    // column indices mirror logbook.ts's QSO_COL_* constants exactly.
+    match column {
+        // Date / Time: sort together by the actual QSO date+time (not
+        // insertion order -- an imported historical log isn't in id order).
+        0 | 1 => format!("(qso_date || time_on) {dir}, id {dir}"),
+        // Call
+        2 => format!(
+            "(CASE WHEN call = '' THEN 1 ELSE 0 END) ASC, UPPER(call) {dir}, \
+             (qso_date || time_on) DESC, id DESC"
+        ),
+        // Grid
+        3 => format!(
+            "(CASE WHEN gridsquare = '' THEN 1 ELSE 0 END) ASC, UPPER(gridsquare) {dir}, \
+             (qso_date || time_on) DESC, id DESC"
+        ),
+        // State / place
+        4 => format!(
+            "(CASE WHEN {PLACE_EXPR} = '' THEN 1 ELSE 0 END) ASC, {PLACE_EXPR} {dir}, \
+             (qso_date || time_on) DESC, id DESC"
+        ),
+        // Freq (numeric, blanks last)
+        5 => format!(
+            "(CASE WHEN freq = '' THEN 1 ELSE 0 END) ASC, CAST(freq AS REAL) {dir}, \
+             (qso_date || time_on) DESC, id DESC"
+        ),
+        // Mode
+        6 => format!(
+            "(CASE WHEN mode = '' THEN 1 ELSE 0 END) ASC, UPPER(mode) {dir}, \
+             (qso_date || time_on) DESC, id DESC"
+        ),
+        // RST sent / rcvd (numeric, "no report" sentinels -- see
+        // logbook.ts's isNoReport -- sort last alongside real blanks)
+        7 => format!(
+            "(CASE WHEN rst_sent IN ('', '-120', '-100') THEN 1 ELSE 0 END) ASC, \
+             CAST(rst_sent AS REAL) {dir}, (qso_date || time_on) DESC, id DESC"
+        ),
+        8 => format!(
+            "(CASE WHEN rst_rcvd IN ('', '-120', '-100') THEN 1 ELSE 0 END) ASC, \
+             CAST(rst_rcvd AS REAL) {dir}, (qso_date || time_on) DESC, id DESC"
+        ),
+        // Status: qsoStatusScore -- CONF (lotw_rcvd or qrz_qsl) before not.
+        9 => format!(
+            "(CASE WHEN lotw_rcvd = 1 OR qrz_qsl = 1 THEN 1 ELSE 0 END) {dir}, \
+             (qso_date || time_on) DESC, id DESC"
+        ),
+        // QSL: qslScore -- received counts double, sent-only counts single,
+        // matching logbook.ts's qslMarks/qslScore exactly (QRZ has no "sent"
+        // side, only qrz_qsl's "received" contribution).
+        10 => format!(
+            "(2 * (lotw_rcvd + eqsl_rcvd + qsl_rcvd + qrz_qsl) \
+              + (CASE WHEN lotw_rcvd = 0 AND lotw_sent = 1 THEN 1 ELSE 0 END) \
+              + (CASE WHEN eqsl_rcvd = 0 AND eqsl_sent = 1 THEN 1 ELSE 0 END) \
+              + (CASE WHEN qsl_rcvd = 0 AND qsl_sent = 1 THEN 1 ELSE 0 END)) {dir}, \
+             (qso_date || time_on) DESC, id DESC"
+        ),
+        _ => "id DESC".to_string(),
+    }
+}
+
 /// Result of an [`Db::import_adif`] call, for the UI to report back to the user.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportSummary {
@@ -457,16 +540,37 @@ impl Db {
     /// Server-side search/filter mirroring the Android Logbook tab: substring
     /// match on callsign plus the QSL confirmation filter, most-recent-first.
     ///
-    /// Filters and paginates at the DB layer (real `LIMIT`/`OFFSET`) instead of
-    /// loading the whole log and filtering in memory, so it stays fast as the log
-    /// grows. The callsign match is a case-insensitive (ASCII) `LIKE` substring
-    /// with the query's `LIKE` wildcards escaped so it behaves as a literal
-    /// substring — i.e. the same result set as the pure [`qso_matches`] predicate
+    /// Filters, sorts, and paginates at the DB layer (real `ORDER
+    /// BY`/`LIMIT`/`OFFSET`) instead of loading the whole log and sorting in
+    /// memory, so it stays fast and bounded-memory as the log grows. The
+    /// callsign match is a case-insensitive (ASCII) `LIKE` substring with the
+    /// query's `LIKE` wildcards escaped so it behaves as a literal substring
+    /// — i.e. the same result set as the pure [`qso_matches`] predicate
     /// (guarded by `search_qsos_matches_predicate` in the tests).
+    ///
+    /// `sort_column`/`sort_ascending` select the `ORDER BY`, built by
+    /// [`qso_sort_order_by`] -- one of the `QSO_COL_*` indices `logbook.ts`
+    /// defines (0=Date/Time, 2=Call, 3=Grid, 4=State, 5=Freq, 6=Mode,
+    /// 7=RST sent, 8=RST rcvd, 9=Status, 10=QSL), matching that file's own
+    /// `sortQsoTable` column-by-column. Sorting at this layer (not the
+    /// frontend re-sorting whatever page happened to be fetched) matters
+    /// once the log exceeds `limit`: the frontend only ever sees `limit`
+    /// rows, so a client-side sort of that window can never surface a QSO
+    /// that didn't already happen to be in the most-recent-`limit` slice --
+    /// confirmed as a real bug (sorted by Callsign showed only the newest
+    /// 300 QSOs' callsigns reordered, never the alphabetically-first
+    /// callsign in a 45,000-row log logged years ago). Sorting in SQL before
+    /// `LIMIT` applies fixes that without ever loading the whole table into
+    /// the frontend (the exact memory blowup `LOG_FETCH_LIMIT` exists to
+    /// avoid) -- SQLite does the full-table sort natively, bounded memory on
+    /// the Rust side already (no JS heap, no IPC payload) even before the
+    /// `LIMIT` trims the result to what's actually sent to the frontend.
     pub fn search_qsos(
         &self,
         callsign_query: &str,
         filter: ConfirmedFilter,
+        sort_column: i64,
+        sort_ascending: bool,
         limit: i64,
         offset: i64,
     ) -> Vec<QsoRecord> {
@@ -480,11 +584,12 @@ impl Db {
             ConfirmedFilter::Confirmed => " AND qsl_rcvd = 1",
             ConfirmedFilter::Unconfirmed => " AND qsl_rcvd = 0",
         };
+        let order_by = qso_sort_order_by(sort_column, sort_ascending);
         let sql = format!(
             "SELECT {QSO_SELECT_COLUMNS}
              FROM qso_log
              WHERE call LIKE ?1 ESCAPE '\\'{confirm_clause}
-             ORDER BY id DESC LIMIT ?2 OFFSET ?3"
+             ORDER BY {order_by} LIMIT ?2 OFFSET ?3"
         );
         let conn = self.conn.lock();
         let mut stmt = match conn.prepare(&sql) {
@@ -1653,19 +1758,19 @@ mod tests {
         db.insert_qso(&rec("W1AW", "20260604", "140000", true)).unwrap();
 
         // Substring match, case-insensitive.
-        let k1 = db.search_qsos("k1", ConfirmedFilter::All, 100, 0);
+        let k1 = db.search_qsos("k1", ConfirmedFilter::All, 0, false, 100, 0);
         assert_eq!(k1.len(), 2);
         assert!(k1.iter().all(|r| r.call.contains("K1")));
 
         // Confirmation filter.
-        let confirmed = db.search_qsos("", ConfirmedFilter::Confirmed, 100, 0);
+        let confirmed = db.search_qsos("", ConfirmedFilter::Confirmed, 0, false, 100, 0);
         assert_eq!(confirmed.len(), 2);
-        let unconfirmed = db.search_qsos("", ConfirmedFilter::Unconfirmed, 100, 0);
+        let unconfirmed = db.search_qsos("", ConfirmedFilter::Unconfirmed, 0, false, 100, 0);
         assert_eq!(unconfirmed.len(), 1);
         assert_eq!(unconfirmed[0].call, "K1XYZ");
 
         // Combined.
-        let combined = db.search_qsos("k1", ConfirmedFilter::Confirmed, 100, 0);
+        let combined = db.search_qsos("k1", ConfirmedFilter::Confirmed, 0, false, 100, 0);
         assert_eq!(combined.len(), 1);
         assert_eq!(combined[0].call, "K1ABC");
     }
@@ -1693,7 +1798,7 @@ mod tests {
             ("zzz", ConfirmedFilter::All),
         ] {
             let got: std::collections::BTreeSet<String> = db
-                .search_qsos(q, f, i64::MAX, 0)
+                .search_qsos(q, f, 0, false, i64::MAX, 0)
                 .into_iter()
                 .map(|r| r.call)
                 .collect();
@@ -1707,12 +1812,210 @@ mod tests {
         }
 
         // LIMIT/OFFSET paginate at the DB layer, newest-first, with no overlap.
-        let page1 = db.search_qsos("", ConfirmedFilter::All, 2, 0);
-        let page2 = db.search_qsos("", ConfirmedFilter::All, 2, 2);
+        let page1 = db.search_qsos("", ConfirmedFilter::All, 0, false, 2, 0);
+        let page2 = db.search_qsos("", ConfirmedFilter::All, 0, false, 2, 2);
         assert_eq!(page1.len(), 2);
         assert_eq!(page2.len(), 2);
         assert_eq!(page1[0].call, "K1ABC/P"); // last inserted -> highest id
         assert!(page1.iter().all(|a| page2.iter().all(|b| a.call != b.call)));
+    }
+
+    /// The actual bug this sort exists to fix: with more logged QSOs than
+    /// `limit`, a column sort has to run *before* `LIMIT` truncates the
+    /// result, or a row outside the capped window (here, the alphabetically-
+    /// first callsign, logged long before the cap's worth of newer QSOs)
+    /// could never surface no matter which column the UI sorts by.
+    #[test]
+    fn search_qsos_sorts_the_whole_table_before_the_limit_not_just_the_capped_page() {
+        let db = Db::open_in_memory().unwrap();
+        // "AA1AAA" is logged first (oldest/lowest id) and is alphabetically
+        // first -- a client-side sort of only the most-recent `limit` rows
+        // (the old behavior) would never see it once enough newer rows exist.
+        db.insert_qso(&rec("AA1AAA", "20200101", "120000", false)).unwrap();
+        for i in 0..5 {
+            db.insert_qso(&rec(&format!("ZZ{i}ZZZ"), "20260604", "120000", false)).unwrap();
+        }
+
+        let limit = 3; // smaller than the 6 total rows
+        const QSO_COL_CALL: i64 = 2;
+        let ascending = db.search_qsos("", ConfirmedFilter::All, QSO_COL_CALL, true, limit, 0);
+        assert_eq!(ascending.len(), limit as usize);
+        assert_eq!(ascending[0].call, "AA1AAA", "the true alphabetically-first call must win");
+
+        let descending = db.search_qsos("", ConfirmedFilter::All, QSO_COL_CALL, false, limit, 0);
+        assert_eq!(descending.len(), limit as usize);
+        assert!(descending.iter().all(|r| r.call != "AA1AAA"), "AA1AAA sorts last descending, past the cap");
+    }
+
+    #[test]
+    fn qso_sort_order_by_blanks_sort_last_regardless_of_direction() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "HASGRID".into(),
+            gridsquare: "FN42".into(),
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "NOGRID".into(),
+            gridsquare: "".into(),
+            qso_date: "20260604".into(),
+            time_on: "121000".into(),
+            band: "20m".into(),
+            mode: "FT8".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        const QSO_COL_GRID: i64 = 3;
+        for ascending in [true, false] {
+            let rows = db.search_qsos("", ConfirmedFilter::All, QSO_COL_GRID, ascending, 100, 0);
+            assert_eq!(rows.last().unwrap().call, "NOGRID", "ascending={ascending}");
+        }
+    }
+
+    #[test]
+    fn qso_sort_order_by_an_unrecognized_column_falls_back_to_id_desc() {
+        assert_eq!(qso_sort_order_by(999, true), "id DESC");
+    }
+
+    #[test]
+    fn qso_sort_order_by_date_sorts_by_actual_qso_date_time_not_insertion_order() {
+        let db = Db::open_in_memory().unwrap();
+        // Inserted out of date order -- id order must not matter.
+        db.insert_qso(&rec("W1AW", "20260601", "100000", false)).unwrap();
+        db.insert_qso(&rec("K1ABC", "20260603", "120000", false)).unwrap();
+        db.insert_qso(&rec("N0CALL", "20260602", "150000", false)).unwrap();
+
+        const QSO_COL_DATE: i64 = 0;
+        let desc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_DATE, false, 100, 0);
+        assert_eq!(desc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["K1ABC", "N0CALL", "W1AW"]);
+        let asc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_DATE, true, 100, 0);
+        assert_eq!(asc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["W1AW", "N0CALL", "K1ABC"]);
+    }
+
+    #[test]
+    fn qso_sort_order_by_freq_is_numeric_with_blanks_last() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), freq: "14.074".into(),
+            qso_date: "20260601".into(), time_on: "100000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(), freq: "7.074".into(),
+            qso_date: "20260601".into(), time_on: "110000".into(),
+            band: "40m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "N0CALL".into(), freq: "".into(),
+            qso_date: "20260601".into(), time_on: "120000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+
+        const QSO_COL_FREQ: i64 = 5;
+        let asc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_FREQ, true, 100, 0);
+        assert_eq!(asc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["K1ABC", "W1AW", "N0CALL"]);
+        let desc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_FREQ, false, 100, 0);
+        assert_eq!(desc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["W1AW", "K1ABC", "N0CALL"]);
+    }
+
+    #[test]
+    fn qso_sort_order_by_rst_sent_treats_no_report_sentinels_like_a_blank() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "A".into(), rst_sent: "-100".into(),
+            qso_date: "20260601".into(), time_on: "100000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "B".into(), rst_sent: "-05".into(),
+            qso_date: "20260601".into(), time_on: "110000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+
+        const QSO_COL_RST_SENT: i64 = 7;
+        let asc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_RST_SENT, true, 100, 0);
+        assert_eq!(asc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["B", "A"]);
+    }
+
+    #[test]
+    fn qso_sort_order_by_status_puts_conf_first_and_ties_stay_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "A".into(), // no CONF
+            qso_date: "20260601".into(), time_on: "100000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "B".into(), qrz_qsl: true, // CONF
+            qso_date: "20260601".into(), time_on: "110000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "C".into(), lotw_rcvd: true, // CONF
+            qso_date: "20260601".into(), time_on: "120000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+
+        const QSO_COL_STATUS: i64 = 9;
+        let desc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_STATUS, false, 100, 0);
+        // B and C both show CONF and tie on score; the fixed newest-first
+        // tiebreaker keeps them in date/time order (C before B), with the
+        // no-pill row A last.
+        assert_eq!(desc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["C", "B", "A"]);
+    }
+
+    #[test]
+    fn qso_sort_order_by_qsl_scores_received_above_sent_above_neither() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "A".into(),
+            qso_date: "20260601".into(), time_on: "100000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "B".into(), lotw_sent: true,
+            qso_date: "20260601".into(), time_on: "110000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "C".into(), lotw_rcvd: true, confirmed: false,
+            qso_date: "20260601".into(), time_on: "120000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+
+        const QSO_COL_QSL: i64 = 10;
+        let desc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_QSL, false, 100, 0);
+        assert_eq!(desc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["C", "B", "A"]);
+    }
+
+    #[test]
+    fn qso_sort_order_by_state_uses_the_logbook_place_display_value() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "A".into(), state: "WA".into(),
+            qso_date: "20260601".into(), time_on: "100000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "B".into(), state: "CA".into(),
+            qso_date: "20260601".into(), time_on: "110000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "C".into(), state: "".into(), country: "".into(),
+            qso_date: "20260601".into(), time_on: "120000".into(),
+            band: "20m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+
+        const QSO_COL_STATE: i64 = 4;
+        let asc = db.search_qsos("", ConfirmedFilter::All, QSO_COL_STATE, true, 100, 0);
+        assert_eq!(asc.iter().map(|r| r.call.as_str()).collect::<Vec<_>>(), ["B", "A", "C"]);
     }
 
     #[test]

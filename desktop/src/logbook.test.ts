@@ -22,16 +22,8 @@ import {
   qsoCountLabel,
   qsoStatusLabel,
   qsoSyncLabels,
-  QSO_COL_CALL,
-  QSO_COL_DATE,
-  QSO_COL_FREQ,
-  QSO_COL_MODE,
-  QSO_COL_QSL,
-  QSO_COL_RST_SENT,
-  QSO_COL_STATE,
-  QSO_COL_STATUS,
-  sortQsoTable,
   WAS_STATES,
+  wasStatesWorked,
   workedAllContinents,
   type QsoEditForm,
 } from "./logbook";
@@ -300,94 +292,6 @@ describe("qsoSyncLabels", () => {
   });
 });
 
-describe("sortQsoTable", () => {
-  const rows = [
-    qso({ id: 1, call: "W1AW", qso_date: "20260601", time_on: "100000", freq: "14.074", rst_sent: "-12" }),
-    qso({ id: 2, call: "K1ABC", qso_date: "20260603", time_on: "120000", freq: "7.074", rst_sent: "+05" }),
-    qso({ id: 3, call: "N0CALL", qso_date: "20260602", time_on: "150000", freq: "", rst_sent: "" }),
-  ];
-
-  it("date/time sort by actual QSO date+time, not insertion order", () => {
-    const desc = sortQsoTable(rows, QSO_COL_DATE, false);
-    expect(desc.map((r) => r.call)).toEqual(["K1ABC", "N0CALL", "W1AW"]);
-    const asc = sortQsoTable(rows, QSO_COL_DATE, true);
-    expect(asc.map((r) => r.call)).toEqual(["W1AW", "N0CALL", "K1ABC"]);
-  });
-
-  it("sorts a text column case-insensitively, blanks last either direction", () => {
-    const withBlank = [...rows, qso({ id: 4, call: "", qso_date: "20260604", time_on: "090000" })];
-    const asc = sortQsoTable(withBlank, QSO_COL_CALL, true);
-    expect(asc.map((r) => r.call)).toEqual(["K1ABC", "N0CALL", "W1AW", ""]);
-    const desc = sortQsoTable(withBlank, QSO_COL_CALL, false);
-    expect(desc.map((r) => r.call)).toEqual(["W1AW", "N0CALL", "K1ABC", ""]);
-  });
-
-  it("sorts a numeric column with blanks last, ascending and descending", () => {
-    const asc = sortQsoTable(rows, QSO_COL_FREQ, true);
-    expect(asc.map((r) => r.call)).toEqual(["K1ABC", "W1AW", "N0CALL"]);
-    const desc = sortQsoTable(rows, QSO_COL_FREQ, false);
-    expect(desc.map((r) => r.call)).toEqual(["W1AW", "K1ABC", "N0CALL"]);
-  });
-
-  it("strips a leading + from a report before parsing it numerically", () => {
-    const asc = sortQsoTable(rows, QSO_COL_RST_SENT, true);
-    // -12 < +05 numerically; the blank report sorts last.
-    expect(asc.map((r) => r.call)).toEqual(["W1AW", "K1ABC", "N0CALL"]);
-  });
-
-  it("a -120/-100 'no report' sentinel sorts last, same as a blank report", () => {
-    const withSentinel = [
-      qso({ id: 1, call: "A", qso_date: "20260601", time_on: "100000", rst_sent: "-100" }),
-      qso({ id: 2, call: "B", qso_date: "20260601", time_on: "110000", rst_sent: "-05" }),
-    ];
-    const asc = sortQsoTable(withSentinel, QSO_COL_RST_SENT, true);
-    expect(asc.map((r) => r.call)).toEqual(["B", "A"]);
-  });
-
-  it("sorts by status score: CONF (LoTW or QRZ) above no pill, ties newest-first", () => {
-    const statusRows = [
-      qso({ id: 1, call: "A", qso_date: "20260601", time_on: "100000" }), // no pill
-      qso({ id: 2, call: "B", qso_date: "20260601", time_on: "110000", qrz_qsl: true }), // CONF
-      qso({ id: 3, call: "C", qso_date: "20260601", time_on: "120000", lotw_rcvd: true }), // CONF
-    ];
-    const desc = sortQsoTable(statusRows, QSO_COL_STATUS, false);
-    // Both B and C show CONF and tie on score; the stable sort keeps them in
-    // newest-first order (C before B), with the no-pill row A last.
-    expect(desc.map((r) => r.call)).toEqual(["C", "B", "A"]);
-  });
-
-  it("sorts by QSL score: more ✓ marks above more ↑ marks above none", () => {
-    const qslRows = [
-      qso({ id: 1, call: "A", qso_date: "20260601", time_on: "100000" }),
-      qso({ id: 2, call: "B", qso_date: "20260601", time_on: "110000", lotw_sent: true }),
-      qso({ id: 3, call: "C", qso_date: "20260601", time_on: "120000", lotw_rcvd: true, eqsl_rcvd: true }),
-    ];
-    const desc = sortQsoTable(qslRows, QSO_COL_QSL, false);
-    expect(desc.map((r) => r.call)).toEqual(["C", "B", "A"]);
-  });
-
-  it("sorts the State column using logbookPlace's display value", () => {
-    const stateRows = [
-      qso({ id: 1, call: "A", qso_date: "20260601", time_on: "100000", state: "WA" }),
-      qso({ id: 2, call: "B", qso_date: "20260601", time_on: "110000", state: "CA" }),
-      qso({ id: 3, call: "C", qso_date: "20260601", time_on: "120000", state: "", country: "" }),
-    ];
-    const asc = sortQsoTable(stateRows, QSO_COL_STATE, true);
-    expect(asc.map((r) => r.call)).toEqual(["B", "A", "C"]);
-  });
-
-  it("ties fall back to newest-first (stable sort)", () => {
-    // Both rows have the same MODE ("FT8"); a tied text column must keep the
-    // date/time-desc baseline order rather than reshuffling arbitrarily.
-    const tied = [
-      qso({ id: 1, call: "A", qso_date: "20260603", time_on: "090000" }),
-      qso({ id: 2, call: "B", qso_date: "20260602", time_on: "090000" }),
-    ];
-    const byMode = sortQsoTable(tied, QSO_COL_MODE, true);
-    expect(byMode.map((r) => r.call)).toEqual(["A", "B"]); // unchanged: newest-first
-  });
-});
-
 describe("computeVirtualWindow", () => {
   it("renders only the visible slice plus overscan, with correctly sized spacers", () => {
     // 10,000 rows, 26px each, viewport 260px (10 rows visible), scrolled to row 1000.
@@ -445,6 +349,19 @@ describe("workedAllContinents", () => {
 
   it("ignores junk/blank/non-WAC codes entirely", () => {
     expect(workedAllContinents(["", "AN", "ZZ"]).workedCount).toBe(0);
+  });
+});
+
+describe("wasStatesWorked", () => {
+  it("keeps only real WAS states, case/whitespace-insensitive, deduped", () => {
+    expect(wasStatesWorked(["ca", " TX ", "CA"]).sort()).toEqual(["CA", "TX"]);
+  });
+
+  it("drops DC and other non-WAS entries db.rs's worked_states_all can return", () => {
+    // us_states.rs's worked_state_for recognizes DC (and could in principle
+    // resolve to a stray non-US value); the WAS award only counts the 50
+    // real states, so the backend's broader list can't inflate "N / 50".
+    expect(wasStatesWorked(["CA", "DC", "ZZ"])).toEqual(["CA"]);
   });
 });
 

@@ -346,13 +346,20 @@ export const api = {
 
   listLog: (limit: number, offset: number) =>
     invoke<QsoRecord[]>("list_log", { limit, offset }),
-  /** Server-side callsign search + confirmation filter. */
+  /** Server-side callsign search + confirmation filter + column sort
+   *  (sortColumn is one of logbook.ts's QSO_COL_* indices). Sorting happens
+   *  in SQL before `limit` truncates the result -- see db.rs's
+   *  `Db::search_qsos` doc comment for why that matters once the log
+   *  exceeds `limit`: a client-side sort of only the fetched page can never
+   *  surface a row outside it. */
   searchLog: (
     callsign: string,
     filter: "all" | "confirmed" | "unconfirmed",
+    sortColumn: number,
+    sortAscending: boolean,
     limit: number,
     offset: number,
-  ) => invoke<QsoRecord[]>("search_log", { callsign, filter, limit, offset }),
+  ) => invoke<QsoRecord[]>("search_log", { callsign, filter, sortColumn, sortAscending, limit, offset }),
   logCount: () => invoke<number>("log_count"),
   /** Calls already worked on the currently-tuned band, for Decode-list strikethrough. */
   workedCalls: (mode: string) => invoke<string[]>("worked_calls", { mode }),

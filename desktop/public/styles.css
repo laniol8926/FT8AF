@@ -24,6 +24,7 @@
   --ok: #4ade80;         /* Android StatusConfirmed */
   --tx: #ef4444;         /* Android StatusBad */
   --yellow: #facc15;     /* Android StatusWarn */
+  --status-new: #c084fc; /* Android StatusNew -- Logbook Stats tab's CQ-zones stat, WAC worked-chip highlight */
   --radius-xs: 4px;
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -497,9 +498,7 @@ select option {
 
 /* Logbook tab: inline search/filter/export controls + edit dialog. */
 /* Logbook sub-tabs (Stats / Recent / Awards) -- matches Android's segmented
-   control at the top of the Logbook screen. Stats/Awards are themselves
-   honest "not built yet" placeholders (ComingSoonScreen); this is just the
-   tab row that was missing entirely before. */
+   control at the top of the Logbook screen. */
 .log-subtabs {
   display: flex; background: var(--panel-2); border-radius: var(--radius-pill);
   padding: 3px; margin-bottom: 12px; gap: 2px;
@@ -510,6 +509,84 @@ select option {
   cursor: pointer;
 }
 .log-subtab.active { background: var(--panel-3); color: var(--accent); }
+
+/* Logbook Stats/Awards tabs, matching Android's StatsTab/AwardsTab
+   (LogbookScreen.kt): big stat cards, Best DX, WAC, a band donut chart,
+   award progress bars, a grid-coverage heatmap, and a (synthesized,
+   honestly-placeholder-on-both-platforms) signal sparkline. */
+.stats-loading { padding: 24px; text-align: center; }
+.glass-card {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 14px;
+}
+.stats-tab, .awards-tab {
+  display: flex; flex-direction: column; gap: 14px; padding: 0 18px 24px;
+  overflow-y: auto; flex: 1; min-height: 0;
+}
+.stats-section-header {
+  color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; margin-top: 4px;
+}
+.stat-card-row { display: flex; gap: 12px; }
+.stat-card { flex: 1; }
+.stat-card-value { font-size: 28px; font-weight: 700; line-height: 1.1; }
+.stat-card-label { font-size: 11px; font-weight: 500; letter-spacing: 0.04em; margin-top: 2px; }
+
+.best-dx-card { display: flex; align-items: center; justify-content: space-between; }
+.best-dx-call { font-size: 20px; font-weight: 700; color: var(--signal); }
+.best-dx-grid { font-size: 11px; font-weight: 500; margin-top: 2px; }
+.best-dx-distance { font-size: 18px; font-weight: 600; color: var(--accent); }
+
+.wac-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.wac-status { font-size: 13px; font-weight: 600; color: var(--text); }
+.wac-status.complete { color: var(--ok); }
+.wac-chips { display: flex; gap: 6px; }
+.continent-chip {
+  flex: 1; text-align: center; padding: 8px 0; border-radius: var(--radius-sm);
+  background: var(--panel-3); border: 1px solid var(--border);
+  color: var(--text-faint); font-weight: 700; font-size: 12px; font-family: "Geist Mono", monospace;
+}
+.continent-chip.worked {
+  background: rgba(192, 132, 252, 0.16); border-color: rgba(192, 132, 252, 0.5); color: var(--status-new);
+}
+
+.band-donut-card { display: flex; align-items: center; gap: 16px; }
+.band-donut-svg { width: 120px; height: 120px; flex: none; }
+.band-donut-legend { display: flex; flex-direction: column; gap: 5px; }
+.band-donut-legend-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.band-donut-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+.award-progress-card { display: flex; flex-direction: column; }
+.award-progress-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 12px; font-weight: 500; }
+.award-progress-track { height: 6px; border-radius: 3px; background: var(--panel-3); overflow: hidden; }
+.award-progress-fill { height: 6px; border-radius: 3px; }
+
+.needed-states { margin-top: 10px; }
+.needed-states-label { font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; margin-bottom: 5px; }
+.needed-states-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.state-chip {
+  padding: 2px 5px; border-radius: 4px; border: 1px solid; background: transparent;
+  font-size: 10px; font-weight: 600; font-family: "Geist Mono", monospace;
+}
+
+.grid-heatmap-card { display: flex; flex-direction: column; gap: 2px; overflow-x: auto; }
+.grid-heatmap-row { display: flex; gap: 2px; }
+.grid-heatmap-cell { width: 14px; height: 14px; border-radius: 2px; background: rgba(29, 37, 56, 0.4); flex: none; }
+.grid-heatmap-cell.worked { background: rgba(92, 214, 232, 0.7); }
+
+.signal-sparkline-card { height: 96px; padding: 12px; }
+.signal-sparkline-empty { display: flex; align-items: center; justify-content: center; }
+.signal-sparkline-svg { width: 100%; height: 100%; }
+
+.award-card { display: flex; gap: 12px; align-items: flex-start; }
+.award-icon-circle {
+  width: 36px; height: 36px; border-radius: 50%; border: 1px solid;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 15px; flex: none; background: rgba(255, 255, 255, 0.04);
+}
+.award-card-body { flex: 1; min-width: 0; }
+.award-card-header { display: flex; justify-content: space-between; font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.award-card-desc { font-size: 11px; line-height: 1.4; margin-bottom: 8px; }
 
 .logbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .logbar .search { min-width: 160px; }
@@ -546,6 +623,10 @@ select option {
 .qso-table th {
   white-space: pre-line; line-height: 1.25; text-align: left;
   color: var(--muted); font-weight: 700;
+  /* Stays put while the body scrolls underneath it, inside .log-table-list
+     (the real overflow:auto ancestor) -- a solid background is required or
+     scrolled-past rows show through the header on the way by. */
+  position: sticky; top: 0; z-index: 2; background: var(--bg);
 }
 .qso-table th.sortable { cursor: pointer; user-select: none; }
 .qso-table th.sortable:hover { color: var(--text); }

@@ -17,6 +17,7 @@ import {
   onFccGridDone,
   type AudioDevice,
   type BandInfo,
+  type BestDx,
   type ClockSyncEvent,
   type CustomBand,
   type CycleTick,
@@ -27,6 +28,7 @@ import {
   type ImportProgress,
   type ImportSummary,
   type InputLevelEvent,
+  type LogStats,
   type OperatingMode,
   type QsoRecord,
   type RigConfig,
@@ -43,14 +45,20 @@ import {
 } from "./ipc";
 import {
   adifToDateInput,
+  bandColor,
   buildExportArgs,
+  buildGridHeatmapCells,
   buildQsoRecord,
   computeVirtualWindow,
   displayReport,
+  formatDistanceMi,
   formatHhmm,
   formFromQso,
   isLogFiltered,
   logbookPlace,
+  neededStates,
+  neededStatesPreview,
+  NEEDED_STATES_PREVIEW_MAX,
   qslMarks,
   qsoCountLabel,
   qsoStatusLabel,
@@ -58,9 +66,11 @@ import {
   QSO_COL_DATE,
   QSO_TABLE_COLUMNS,
   QSO_TABLE_WEIGHTS,
-  sortQsoTable,
+  wasStatesWorked,
+  workedAllContinents,
   type ConfirmFilter,
   type QsoEditForm,
+  type WacProgress,
 } from "./logbook";
 import { applySelection, configToSelection, rigName, rigOptions } from "./rig";
 import { debounce } from "./debounce";
@@ -955,7 +965,7 @@ export default function App() {
             />
           </div>
         )}
-        {tab === "log" && <LogScreen refreshKey={logRefreshKey} />}
+        {tab === "log" && <LogScreen refreshKey={logRefreshKey} myGrid={myGrid} />}
         {tab === "settings" && (
           <SettingsScreen
             onStatus={setStatus}
@@ -2720,7 +2730,377 @@ function QsoActionsMenu({ onEdit, onDelete }: { onEdit: () => void; onDelete: ()
   );
 }
 
-function LogScreen({ refreshKey }: { refreshKey: number }) {
+/**
+ * Logbook Stats tab, matching Android's StatsTab (`LogbookScreen.kt`): big
+ * stat cards, a Best DX card, the Worked All Continents (WAC) award, a band
+ * donut chart, award progress bars, a grid-square coverage heatmap, and a
+ * signal trend sparkline. `stats` is null while the first fetch is in
+ * flight (see LogScreen's own `useEffect`); `rows` is LogScreen's own
+ * Recent-tab fetch (capped by LOG_FETCH_LIMIT), reused here only for the
+ * sparkline, which doesn't need the whole log -- see SignalSparklineCard.
+ */
+function StatsTab({ stats, rows }: { stats: LogStats | null; rows: QsoRecord[] }) {
+  if (!stats) {
+    return <div className="stats-loading muted">Loading stats…</div>;
+  }
+  const wac = workedAllContinents(stats.continent_codes);
+  const bandTotal = stats.band_counts.reduce((sum, [, n]) => sum + n, 0);
+  // db.rs's worked_states_all resolves via us_states::worked_state_for, a
+  // superset of the 50 WAS states that also recognizes "DC" -- filter down
+  // to the real award count, matching Android's own workedStates reducer
+  // (see wasStatesWorked's doc comment).
+  const statesWorked = wasStatesWorked(stats.states_worked);
+  return (
+    <div className="stats-tab">
+      <div className="stat-card-row">
+        <StatCard label="Total QSOs" value={stats.total_qsos} color="var(--accent)" />
+        <StatCard label="DXCC Entities" value={stats.dxcc_entities} color="var(--signal)" />
+      </div>
+      <div className="stat-card-row">
+        <StatCard label="CQ Zones" value={stats.cq_zones} color="var(--status-new)" />
+        <StatCard label="ITU Zones" value={stats.itu_zones} color="var(--yellow)" />
+      </div>
+
+      {stats.best_dx && (
+        <>
+          <div className="stats-section-header">Best DX</div>
+          <BestDxCard bestDx={stats.best_dx} />
+        </>
+      )}
+
+      <div className="stats-section-header">Worked All Continents</div>
+      <WacCard wac={wac} />
+
+      {stats.band_counts.length > 0 && (
+        <>
+          <div className="stats-section-header">Band Distribution</div>
+          <BandDonutCard bandCounts={stats.band_counts} total={bandTotal} />
+        </>
+      )}
+
+      <div className="stats-section-header">Award Progress</div>
+      <AwardProgressBar
+        label="DXCC Mixed"
+        current={stats.dxcc_entities}
+        total={340}
+        gradient={["var(--signal)", "var(--ok)"]}
+      />
+      <AwardProgressBar
+        label="Worked All States"
+        current={statesWorked.length}
+        total={50}
+        gradient={["var(--accent)", "var(--ok)"]}
+      />
+      <AwardProgressBar
+        label="VUCC Grid Squares"
+        current={stats.grid_squares}
+        total={100}
+        gradient={["var(--status-new)", bandColor("12m")]}
+      />
+      <AwardProgressBar
+        label="DXCC Challenge"
+        current={stats.dxcc_entities * Math.max(stats.band_counts.length, 1)}
+        total={1000}
+        gradient={["var(--accent)", "var(--yellow)"]}
+      />
+
+      <div className="stats-section-header">Grid Coverage</div>
+      <GridHeatmapCard workedFields={stats.worked_grid_fields} />
+
+      <div className="stats-section-header">Signal Trend</div>
+      <SignalSparklineCard rows={rows} />
+    </div>
+  );
+}
+
+function StatCard({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="glass-card stat-card">
+      <div className="stat-card-value mono" style={{ color }}>{value}</div>
+      <div className="stat-card-label muted">{label}</div>
+    </div>
+  );
+}
+
+function BestDxCard({ bestDx }: { bestDx: BestDx }) {
+  return (
+    <div className="glass-card best-dx-card">
+      <div className="best-dx-info">
+        <div className="best-dx-call mono">{bestDx.callsign}</div>
+        {bestDx.grid && <div className="best-dx-grid muted">{bestDx.grid}</div>}
+      </div>
+      <div className="best-dx-distance mono">{formatDistanceMi(bestDx.distance_km)}</div>
+    </div>
+  );
+}
+
+function WacCard({ wac }: { wac: WacProgress }) {
+  return (
+    <div className="glass-card wac-card">
+      <div className="wac-header">
+        <span className={wac.isComplete ? "wac-status complete" : "wac-status"}>
+          {wac.isComplete ? "All six continents worked \u{1F30D}" : `${wac.workedCount} / ${wac.total} continents`}
+        </span>
+        <span className="muted mono">{wac.workedCount} / {wac.total}</span>
+      </div>
+      <div className="wac-chips">
+        {wac.chips.map((chip) => (
+          <span key={chip.code} className={chip.worked ? "continent-chip worked" : "continent-chip"}>
+            {chip.code}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BandDonutCard({ bandCounts, total }: { bandCounts: [string, number][]; total: number }) {
+  const safeTotal = total || 1;
+  const strokeWidth = 18;
+  const r = 50;
+  const circumference = 2 * Math.PI * r;
+  const gapLen = (3 / 360) * circumference;
+  let offset = 0;
+  return (
+    <div className="glass-card band-donut-card">
+      <svg viewBox="0 0 120 120" className="band-donut-svg" aria-hidden>
+        <g transform="rotate(-90 60 60)">
+          {bandCounts.map(([band, n]) => {
+            const fraction = n / safeTotal;
+            const len = Math.max(0, fraction * circumference - gapLen);
+            const dashoffset = -offset;
+            offset += fraction * circumference;
+            return (
+              <circle
+                key={band}
+                cx={60}
+                cy={60}
+                r={r}
+                fill="none"
+                stroke={bandColor(band)}
+                strokeWidth={strokeWidth}
+                strokeDasharray={`${len} ${circumference - len}`}
+                strokeDashoffset={dashoffset}
+                strokeLinecap="round"
+              />
+            );
+          })}
+        </g>
+      </svg>
+      <div className="band-donut-legend">
+        {bandCounts.slice(0, 7).map(([band, n]) => (
+          <div key={band} className="band-donut-legend-row">
+            <span className="band-donut-dot" style={{ background: bandColor(band) }} />
+            <span className="mono">{band}</span>
+            <span className="muted mono">{n}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AwardProgressBar({
+  label, current, total, gradient, remaining,
+}: {
+  label: string;
+  current: number;
+  total: number;
+  gradient: [string, string];
+  remaining?: string[];
+}) {
+  const fraction = Math.max(0, Math.min(1, current / Math.max(total, 1)));
+  return (
+    <div className="glass-card award-progress-card">
+      <div className="award-progress-header">
+        <span>{label}</span>
+        <span className="muted mono">{current} / {total}</span>
+      </div>
+      <div className="award-progress-track">
+        <div
+          className="award-progress-fill"
+          style={{ width: `${fraction * 100}%`, background: `linear-gradient(to right, ${gradient[0]}, ${gradient[1]})` }}
+        />
+      </div>
+      {remaining && remaining.length > 0 && <NeededStatesRow remaining={remaining} accent={gradient[0]} />}
+    </div>
+  );
+}
+
+function NeededStatesRow({ remaining, accent }: { remaining: string[]; accent: string }) {
+  const { shown, overflow } = neededStatesPreview(remaining, NEEDED_STATES_PREVIEW_MAX);
+  return (
+    <div className="needed-states">
+      <div className="needed-states-label muted">STATES NEEDED</div>
+      <div className="needed-states-chips">
+        {shown.map((s) => (
+          <span key={s} className="state-chip" style={{ color: accent, borderColor: accent }}>{s}</span>
+        ))}
+        {overflow > 0 && (
+          <span className="state-chip" style={{ color: accent, borderColor: accent }}>+{overflow}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GridHeatmapCard({ workedFields }: { workedFields: string[] }) {
+  const cells = useMemo(() => buildGridHeatmapCells(new Set(workedFields)), [workedFields]);
+  return (
+    <div className="glass-card grid-heatmap-card">
+      {cells.map((row, i) => (
+        <div key={i} className="grid-heatmap-row">
+          {row.map((cell) => (
+            <span
+              key={cell.field}
+              className={cell.isWorked ? "grid-heatmap-cell worked" : "grid-heatmap-cell"}
+            />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Android's own SignalSparkline is a synthesized placeholder, not real SNR
+ * data -- "QSLCallsignRecord does not carry SNR, so we synthesize a coarse
+ * trend from the per-record index... until SNR is persisted on the QSO log
+ * row" (LogbookScreen.kt's own doc comment). Ported with the same formula
+ * and the same honesty: this is not a real signal trend on either platform
+ * yet, not something desktop is faking that Android has real.
+ */
+function SignalSparklineCard({ rows }: { rows: QsoRecord[] }) {
+  if (rows.length === 0) {
+    return <div className="glass-card signal-sparkline-card signal-sparkline-empty muted mono">No QSOs yet</div>;
+  }
+  const data = rows.slice(-30).map((_, i) => Math.min(5, Math.max(-25, -15 + (i % 20) * 1.2)));
+  const w = 300;
+  const h = 72;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = Math.max(max - min, 1);
+  const stepX = data.length > 1 ? w / (data.length - 1) : w;
+  const points = data.map((v, i) => [i * stepX, h - ((v - min) / range) * h] as const);
+  const linePath = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const fillPath = `${linePath} L${w},${h} L0,${h} Z`;
+  return (
+    <div className="glass-card signal-sparkline-card">
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="signal-sparkline-svg" aria-hidden>
+        <path d={fillPath} fill="var(--signal-soft)" />
+        <path d={linePath} fill="none" stroke="var(--signal)" strokeWidth={2} strokeLinecap="round" />
+      </svg>
+    </div>
+  );
+}
+
+/**
+ * Logbook Awards tab, matching Android's AwardsTab (`LogbookScreen.kt`): six
+ * award cards (DXCC Mixed, WAS, WAZ, WAC, VUCC, IOTA), each a progress bar
+ * plus description. IOTA's current count is always 0 -- desktop (like
+ * Android, per its own "Not tracked in current DB" comment) has no
+ * island-tracking data to compute it from; listed honestly as not-yet-
+ * tracked, not hidden or faked. DXCC Mixed's total genuinely differs from
+ * the Stats tab's own DXCC Mixed bar (100 here vs. 340 there) -- that
+ * mismatch exists in Android's own source, not introduced by this port.
+ */
+function AwardsTab({ stats }: { stats: LogStats | null }) {
+  if (!stats) {
+    return <div className="stats-loading muted">Loading awards…</div>;
+  }
+  const wac = workedAllContinents(stats.continent_codes);
+  const statesWorked = wasStatesWorked(stats.states_worked);
+  const awards: {
+    name: string;
+    description: string;
+    current: number;
+    total: number;
+    color: string;
+    remaining?: string[];
+  }[] = [
+    {
+      name: "DXCC Mixed",
+      description: "Work and confirm 100 DXCC entities on any band/mode",
+      current: stats.dxcc_entities,
+      total: 100,
+      color: "var(--signal)",
+    },
+    {
+      name: "WAS",
+      description: "Work all 50 US states confirmed",
+      current: statesWorked.length,
+      total: 50,
+      color: "var(--accent)",
+      remaining: neededStates(statesWorked),
+    },
+    {
+      name: "WAZ",
+      description: "Work all 40 CQ zones confirmed",
+      current: stats.cq_zones,
+      total: 40,
+      color: "var(--status-new)",
+    },
+    {
+      name: "WAC",
+      description: "Worked All Continents -- contact all six continents",
+      current: wac.workedCount,
+      total: wac.total,
+      color: "var(--status-new)", // Android: Band10m, same hex as StatusNew
+    },
+    {
+      name: "VUCC",
+      description: "VHF/UHF Century Club -- 100 grid squares on a single band",
+      current: stats.grid_squares,
+      total: 100,
+      color: bandColor("12m"), // Android: Band12m
+    },
+    {
+      name: "IOTA",
+      description: "Islands on the Air -- work stations on designated islands",
+      current: 0,
+      total: 100,
+      color: "var(--yellow)", // Android: Band17m, same hex as StatusWarn
+    },
+  ];
+  return (
+    <div className="awards-tab">
+      {awards.map((award) => (
+        <AwardCard key={award.name} {...award} />
+      ))}
+    </div>
+  );
+}
+
+function AwardCard({
+  name, description, current, total, color, remaining,
+}: {
+  name: string;
+  description: string;
+  current: number;
+  total: number;
+  color: string;
+  remaining?: string[];
+}) {
+  const fraction = Math.max(0, Math.min(1, current / Math.max(total, 1)));
+  return (
+    <div className="glass-card award-card">
+      <div className="award-icon-circle" style={{ color, borderColor: color }}>{name[0]}</div>
+      <div className="award-card-body">
+        <div className="award-card-header">
+          <span>{name}</span>
+          <span className="muted mono">{current} / {total}</span>
+        </div>
+        <div className="award-card-desc muted">{description}</div>
+        <div className="award-progress-track">
+          <div className="award-progress-fill" style={{ width: `${fraction * 100}%`, background: color }} />
+        </div>
+        {remaining && remaining.length > 0 && <NeededStatesRow remaining={remaining} accent={color} />}
+      </div>
+    </div>
+  );
+}
+
+function LogScreen({ refreshKey, myGrid }: { refreshKey: number; myGrid: string }) {
   // Android's Logbook is three sub-tabs (Stats / Recent / Awards); desktop
   // only has Recent's equivalent (the QSO table) built. Stats and Awards
   // are real, separate bodies of work (VUCC/WAS/WAC award tracking, a
@@ -2732,6 +3112,15 @@ function LogScreen({ refreshKey }: { refreshKey: number }) {
   const [count, setCount] = useState(0);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ConfirmFilter>("all");
+  // Stats/Awards data: fetched independently of rows/count above, which are
+  // search/filter-scoped for the Recent table -- Android's own stats loader
+  // (LogbookScreen.kt's LaunchedEffect(refreshKey)) always aggregates the
+  // *whole* log regardless of the Recent tab's search box, so this only
+  // depends on refreshKey (bumped after an import) and myGrid (for Best DX).
+  const [stats, setStats] = useState<LogStats | null>(null);
+  useEffect(() => {
+    api.logStats(myGrid).then(setStats);
+  }, [refreshKey, myGrid]);
   // Edit-QSO dialog target: undefined = closed, null = new QSO, record = edit.
   const [editing, setEditing] = useState<QsoRecord | null | undefined>(undefined);
   // Table sort: newest-first (Date, descending) by default.
@@ -2772,16 +3161,14 @@ function LogScreen({ refreshKey }: { refreshKey: number }) {
     return () => ro.disconnect();
   }, []);
 
-  // Memoized: with the fetch cap removed, `rows` can be many thousands of
-  // QSOs, and sorting that on every render -- including the rapid re-renders
-  // from import-progress ticking every 200 records -- made the whole UI feel
-  // unresponsive (confirmed: clicking the Import button appeared to do
-  // nothing while a big unrelated re-sort was in flight). Only recompute when
-  // the data or the sort choice actually changes.
-  const sortedRows = useMemo(
-    () => sortQsoTable(rows, sortColumn, sortAscending),
-    [rows, sortColumn, sortAscending],
-  );
+  // Sorting now happens in SQL, before `LIMIT` truncates the result (see
+  // db.rs's `Db::search_qsos` doc comment) -- `rows` already arrives in the
+  // right order, so there's no client-side re-sort to memoize here anymore.
+  // A client-side sort of only the fetched (capped) page was the actual bug
+  // the user caught: it could only ever reorder whichever `limit` rows
+  // happened to be fetched, never surface a row outside that page no matter
+  // which column was sorted.
+  const sortedRows = rows;
   const virtualWindow = computeVirtualWindow(
     sortedRows.length, ROW_HEIGHT, scrollTop, viewportHeight, OVERSCAN,
   );
@@ -2791,14 +3178,15 @@ function LogScreen({ refreshKey }: { refreshKey: number }) {
     // See LOG_FETCH_LIMIT's own comment for why this is capped, not
     // unconditional, and why that's still correct-enough for the common
     // case rather than silently wrong.
-    api.searchLog(search, filter, LOG_FETCH_LIMIT, 0).then(setRows);
+    api.searchLog(search, filter, sortColumn, sortAscending, LOG_FETCH_LIMIT, 0).then(setRows);
     api.logCount().then(setCount);
   }
-  // Re-query whenever the live search box or the confirmation filter changes,
-  // or App()'s refreshKey bumps after an ADIF import completes (see
-  // LogScreen's own doc comment at the top of this file for why that state
-  // lives in App(), not here).
-  useEffect(refresh, [search, filter, refreshKey]);
+  // Re-query whenever the live search box, the confirmation filter, or the
+  // sort column/direction changes (the backend now does the actual sort --
+  // see above), or App()'s refreshKey bumps after an ADIF import completes
+  // (see LogScreen's own doc comment at the top of this file for why that
+  // state lives in App(), not here).
+  useEffect(refresh, [search, filter, sortColumn, sortAscending, refreshKey]);
 
   async function remove(id?: number | null) {
     if (id == null) return;
@@ -2825,18 +3213,8 @@ function LogScreen({ refreshKey }: { refreshKey: number }) {
           </button>
         ))}
       </div>
-      {logbookTab === "stats" && (
-        <ComingSoonScreen
-          title="Stats"
-          detail="VUCC grid-square progress, a Best DX card, and other logbook statistics, matching the Android app's Stats tab, are planned but not built yet."
-        />
-      )}
-      {logbookTab === "awards" && (
-        <ComingSoonScreen
-          title="Awards"
-          detail="Worked All States (WAS), Worked All Continents (WAC), and other award tracking, matching the Android app's Awards tab, are planned but not built yet."
-        />
-      )}
+      {logbookTab === "stats" && <StatsTab stats={stats} rows={rows} />}
+      {logbookTab === "awards" && <AwardsTab stats={stats} />}
       {logbookTab === "recent" && (
         <>
       <div className="logbar">

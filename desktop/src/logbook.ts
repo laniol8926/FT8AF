@@ -182,7 +182,15 @@ export function filterQsos(
 
 // ---------------------------------------------------------------------------
 // Sortable spreadsheet table (ports the Android Logbook table's format --
-// `LogbookScreen.kt`'s QsoTableHeader/QsoTableRow/sortQsoTable/qslMarks).
+// `LogbookScreen.kt`'s QsoTableHeader/QsoTableRow/qslMarks). The actual
+// column sort used to live here (a `sortQsoTable` pure function, re-run on
+// whatever page of rows the backend had already fetched) but moved to SQL
+// (db.rs's `Db::search_qsos`/`qso_sort_order_by`) once a real bug surfaced:
+// re-sorting only the already-fetched, capped page can never surface a row
+// outside it, so e.g. sorting by Callsign only ever reordered the newest
+// LOG_FETCH_LIMIT rows, never found the alphabetically-first call in the
+// whole log. The QSO_COL_* indices below are still the shared contract
+// between the table header's onSort and the backend's sort-column parameter.
 // ---------------------------------------------------------------------------
 
 /** Column indices of the table view, in display order -- mirrors Android's
@@ -261,12 +269,6 @@ export function qslMarks(r: QsoRecord): QslMark[] {
   ];
 }
 
-/** Sortable QSL score: received counts double, sent single -- an all-received
- *  row (L✓E✓P✓Q✓) sorts above a mostly-sent one (L✓E↑P·Q·). */
-function qslScore(r: QsoRecord): number {
-  return qslMarks(r).reduce((sum, { mark }) => sum + (mark === "✓" ? 2 : mark === "↑" ? 1 : 0), 0);
-}
-
 /**
  * Status pill this row would show: "CONF" when LoTW or QRZ.com confirmed,
  * else none. User's explicit call (2026-11-03, ported from the Android
@@ -301,35 +303,6 @@ export function qsoSyncLabels(r: QsoRecord): string[] {
   return labels;
 }
 
-/** Sortable status score: confirmed first, then newest (via the stable sort's
- *  newest-first baseline) -- matches Android's sort rule for the same column. */
-function qsoStatusScore(r: QsoRecord): number {
-  return qsoStatusLabel(r) ? 1 : 0;
-}
-
-function dateTimeKey(r: QsoRecord): string {
-  // `time_on` is always HHMMSS (6 digits) from this app's own writes, but an
-  // import can carry a shorter HHMM. That's still safe to compare unpadded:
-  // HHMM is a true string prefix of its own HHMMSS (same leading digits), so
-  // plain lexicographic comparison already orders it correctly either way.
-  return `${r.qso_date ?? ""}${r.time_on ?? ""}`;
-}
-
-function sortByDateTimeDesc(rows: QsoRecord[]): QsoRecord[] {
-  return [...rows].sort((a, b) => {
-    const ak = dateTimeKey(a);
-    const bk = dateTimeKey(b);
-    return ak < bk ? 1 : ak > bk ? -1 : 0;
-  });
-}
-
-function parseNumericField(s: string): number | null {
-  const t = (s ?? "").trim().replace(/\+/g, "");
-  if (t === "") return null;
-  const n = Number(t);
-  return Number.isFinite(n) ? n : null;
-}
-
 /** Android's "no report" sentinels (it stores a real `-120`/`-100` int and
  *  writes it to ADIF literally -- a report that could in principle reach this
  *  app by importing one of its exports), or desktop's own "absent" encoding
@@ -343,60 +316,6 @@ function isNoReport(rst: string): boolean {
  *  blank rather than a literal "-120"/"-100". */
 export function displayReport(rst: string): string {
   return isNoReport(rst) ? "" : rst;
-}
-
-/**
- * Sort the table view by `column` (one of the `QSO_COL_*` constants). Date
- * and time sort together (by actual QSO date+time, not insertion order --
- * an imported historical log is not in id order); frequency and reports
- * sort numerically with blanks last; status/QSL sort by their score. Ties
- * fall back to newest-first, relying on `Array.prototype.sort`'s guaranteed
- * stability (ES2019+), same as the Kotlin original relies on `sortedWith`.
- */
-export function sortQsoTable(rows: QsoRecord[], column: number, ascending: boolean): QsoRecord[] {
-  const newestFirst = sortByDateTimeDesc(rows);
-  if (column === QSO_COL_DATE || column === QSO_COL_TIME) {
-    return ascending ? [...newestFirst].reverse() : newestFirst;
-  }
-
-  const numKey: ((r: QsoRecord) => number | null) | null = {
-    [QSO_COL_FREQ]: (r: QsoRecord) => parseNumericField(r.freq),
-    [QSO_COL_RST_SENT]: (r: QsoRecord) => (isNoReport(r.rst_sent) ? null : parseNumericField(r.rst_sent)),
-    [QSO_COL_RST_RCVD]: (r: QsoRecord) => (isNoReport(r.rst_rcvd) ? null : parseNumericField(r.rst_rcvd)),
-    [QSO_COL_STATUS]: (r: QsoRecord) => qsoStatusScore(r),
-    [QSO_COL_QSL]: (r: QsoRecord) => qslScore(r),
-  }[column] ?? null;
-  if (numKey) {
-    return [...newestFirst].sort((a, b) => {
-      const x = numKey(a);
-      const y = numKey(b);
-      if (x == null && y == null) return 0;
-      if (x == null) return 1;
-      if (y == null) return -1;
-      return ascending ? x - y : y - x;
-    });
-  }
-
-  const textKey: ((r: QsoRecord) => string) | null = {
-    [QSO_COL_CALL]: (r: QsoRecord) => (r.call ?? "").toUpperCase(),
-    [QSO_COL_GRID]: (r: QsoRecord) => (r.gridsquare ?? "").toUpperCase(),
-    [QSO_COL_STATE]: (r: QsoRecord) => (logbookPlace(r) ?? "").toUpperCase(),
-    [QSO_COL_MODE]: (r: QsoRecord) => (r.mode ?? "").toUpperCase(),
-  }[column] ?? null;
-  if (textKey) {
-    return [...newestFirst].sort((a, b) => {
-      const x = textKey(a);
-      const y = textKey(b);
-      if (x === "" && y === "") return 0;
-      if (x === "") return 1;
-      if (y === "") return -1;
-      if (x === y) return 0;
-      const cmp = x < y ? -1 : 1;
-      return ascending ? cmp : -cmp;
-    });
-  }
-
-  return newestFirst;
 }
 
 /** A virtualized table's visible window: which row indices to actually
@@ -498,6 +417,26 @@ export const WAS_STATES = [
   "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
   "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
 ] as const;
+
+const WAS_STATE_SET = new Set<string>(WAS_STATES);
+
+/** Filter a raw worked-states list (`db.rs`'s `worked_states_all`, which
+ *  resolves via `us_states::worked_state_for` -- a superset of the 50 WAS
+ *  states that also recognizes "DC") down to only the 50 states the WAS
+ *  award actually counts. Mirrors Android's own `workedStates` reducer
+ *  (`WorkedAllStates.kt`), which filters the same way before counting --
+ *  without this, a log with any DC QSOs shows e.g. "51 / 50" worked. Use
+ *  this (not the raw list's own length) anywhere a WAS *count* is needed;
+ *  `neededStates` below is already safe un-filtered, since it only checks
+ *  which of the 50 canonical states are present, never the reverse. */
+export function wasStatesWorked(raw: string[]): string[] {
+  const seen = new Set<string>();
+  for (const s of raw) {
+    const upper = s.trim().toUpperCase();
+    if (WAS_STATE_SET.has(upper)) seen.add(upper);
+  }
+  return [...seen];
+}
 
 /** The WAS states still needed, in WAS_STATES' canonical order, given the set
  *  already worked (`db.rs`'s `worked_states_all`, already resolved/

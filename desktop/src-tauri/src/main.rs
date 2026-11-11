@@ -222,6 +222,8 @@ fn search_log(
     state: State<AppState>,
     callsign: String,
     filter: String,
+    sort_column: i64,
+    sort_ascending: bool,
     limit: i64,
     offset: i64,
 ) -> Vec<QsoRecord> {
@@ -230,7 +232,7 @@ fn search_log(
         "unconfirmed" => ConfirmedFilter::Unconfirmed,
         _ => ConfirmedFilter::All,
     };
-    state.db.search_qsos(&callsign, filter, limit, offset)
+    state.db.search_qsos(&callsign, filter, sort_column, sort_ascending, limit, offset)
 }
 
 #[tauri::command]
