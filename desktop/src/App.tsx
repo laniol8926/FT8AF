@@ -416,6 +416,20 @@ export default function App() {
     const unlisten = await onImportProgress(setImportProgress);
     try {
       setImportResult(await api.importAdif(path));
+      // A bulk import can add many QSOs across many entities/grids/prefixes/
+      // zones/states/calls in one shot, but it never goes through the live
+      // qso_completed engine event (the only other place these refresh) --
+      // without this, every one of these Decode-screen "worked" sets stays
+      // however it was at app launch until the next live QSO or a band/mode
+      // change, so an imported log's own stations wrongly show as New DXCC /
+      // New Grid / New Prefix / New Zone / New State / not-worked.
+      refreshWorkedCalls();
+      refreshWorkedGrids();
+      refreshWorkedPrefixes();
+      refreshWorkedDxccPrefixes();
+      refreshWorkedCqZones();
+      refreshWorkedStates();
+      refreshWorkedCallsAnyBand();
     } catch (err) {
       setImportError(String(err));
     } finally {

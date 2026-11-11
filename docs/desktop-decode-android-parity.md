@@ -1166,6 +1166,63 @@ first:
   first time): one for a fresh insert, one for the existing-row backfill
   via the duplicate-match path.
 
+## Done this round, part 15: decoder suspended during import, and a stale-cache "New DXCC on US stations" bug
+
+**The decoder now suspends itself during a bulk ADIF import**, freeing up
+CPU on this board instead of fighting the always-on FT8 decode engine for
+it. Confirmed live, same code and data: the full 54,554-record QRZ file
+took 10+ minutes inside the running app but 34s in an isolated benchmark
+with the decoder idle -- the gap was CPU contention, not a remaining logic
+bug in the import path itself (that path's own correctness bugs -- the
+mutex-yield and `synced_qrz`/`synced_cloudlog` write-path fixes -- are part
+14, above, and are unaffected by this). `engine.rs` gained
+`EngineCommand::SetDecodeSuspended(bool)` and the pure, tested
+`decode_dispatch_due(decoding, suspended, ...)` gate (extracted from what
+was previously an inline condition in the run loop, following the same
+pattern as `waterfall_row_due`/`boundary_tx_ready`). This is deliberately
+*not* the same thing as the existing `StopDecode`: it only skips handing a
+slot to the decoder thread -- audio capture, the live waterfall, UDP, and
+`self.decoding` itself are all untouched, so nothing about the running app
+visibly changes except the CPU the decoder would have spent. `main.rs`'s
+`import_adif` command sends `SetDecodeSuspended(true)` before the import
+and resumes it via a `DecodeSuspendGuard` (`Drop`), so it resumes even on
+an error or a caught panic.
+
+**A real production-database round-trip proved both fixes together,
+cleanly, for the first time.** Wiped the real log to 0 rows (backed up
+first), rebuilt with both fixes in place, and imported the full QRZ file
+(54,554 records) followed immediately by a full CQRLOG export of the same
+station's history (54,515 records) through the running app's own Import
+ADIF UI -- not a side-channel script, per standing project practice. QRZ
+import: 45,588 added / 8,966 updated (intra-file duplicates) / 0 skipped,
+~85s, with the sync clock and TX countdown visibly still ticking the whole
+time -- the live-responsiveness proof the isolated benchmark alone
+couldn't give. CQRLOG import: 36 added / 54,479 updated / 0 skipped --
+almost the entire second file matched and merged into the first import's
+own records rather than duplicating, a strong end-to-end confirmation that
+cross-source dedup (two different exporters, different field order/casing)
+works correctly. Final count (45,624) exactly matched the original
+pre-wipe log, with `synced_qrz=1` correctly set on the 45,588 QRZ-sourced
+rows and correctly absent on the 36 CQRLOG-only ones.
+
+**That same test run surfaced a real, separate bug**: every single Decode
+screen row showed "NEW DXCC" after the import finished, including obvious
+already-logged US stations. Not a DXCC-logic bug -- a stale-cache one.
+`workedDxccPrefixes`/`workedGrids`/`workedPrefixes`/`workedCqZones`
+(`App.tsx`) are each fetched exactly once, on mount (`useEffect(fn, [])`),
+and otherwise only refreshed by the live `qso_completed` engine event fired
+per logged QSO; `workedCalls`/`workedCallsAnyBand`/`workedStates` at least
+also refresh on a band/mode change. A bulk ADIF import goes through none
+of that -- it's a single Tauri command writing straight to the database,
+with no `qso_completed` event per record or otherwise -- so after any
+import, every one of these "worked" sets silently keeps whatever it was
+when the app launched until the operator logs one live QSO or changes
+band/mode. On a freshly-launched app with an empty log (exactly this
+test's setup), that means every entity/grid/prefix/zone looks "new" to the
+Decode screen regardless of what the import just added. Fixed by having
+`startImportAdif` call the same seven refresh functions the
+`qso_completed` handler already calls, right after a successful import.
+
 ## Build note
 
 `npm run tauri -- build --no-bundle` is the only way to get a real,
