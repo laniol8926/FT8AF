@@ -1564,6 +1564,18 @@ fn merge_matched_qso(existing: &QsoRecord, imported: &QsoRecord) -> Option<QsoRe
     or_in!(eqsl_sent);
     or_in!(eqsl_rcvd);
     or_in!(qrz_qsl);
+    // Upload-sync flags (not confirmation): without these two, re-importing
+    // an already-logged QSO from a file that now carries
+    // QRZCOM_QSO_UPLOAD_STATUS=Y/APP_FT8AF_SYNCED_CLOUDLOG=Y would never
+    // backfill them onto the existing row -- confirmed the hard way (see
+    // adif_record_to_qso's own doc comment): a log imported before this
+    // field was even read stays stuck with both flags false forever unless
+    // a later re-import can still reach them through this merge path.
+    // Mirrors Android's DatabaseOpr.markImportedUploads, which runs the same
+    // "set if the import says so" UPDATE on a duplicate match, not just a
+    // fresh insert.
+    or_in!(synced_cloudlog);
+    or_in!(synced_qrz);
     if is_generic_mode_family(&merged.mode) && !is_generic_mode_family(&imported.mode) {
         merged.mode = imported.mode.clone();
         changed = true;
@@ -3061,6 +3073,34 @@ mod tests {
 
         // Nothing new to contribute -> no-op.
         assert!(merge_matched_qso(&merged, &imported).is_none());
+    }
+
+    #[test]
+    fn merge_matched_qso_backfills_upload_sync_flags_onto_an_already_logged_qso() {
+        // A QSO logged (or imported) before this app ever read
+        // QRZCOM_QSO_UPLOAD_STATUS/APP_FT8AF_SYNCED_CLOUDLOG -- both flags
+        // stuck at false. Re-importing the same log, now that
+        // adif_record_to_qso actually reads those fields, must be able to
+        // backfill them onto the existing row through this merge path, or
+        // the fix would never take effect for anything already logged.
+        let existing = QsoRecord {
+            call: "K1ABC".into(),
+            synced_cloudlog: false,
+            synced_qrz: false,
+            ..Default::default()
+        };
+        let imported = QsoRecord {
+            synced_cloudlog: true,
+            synced_qrz: true,
+            ..Default::default()
+        };
+        let merged = merge_matched_qso(&existing, &imported).expect("sync flags changed");
+        assert!(merged.synced_cloudlog);
+        assert!(merged.synced_qrz);
+
+        // Already-true flags are never cleared by a re-import that lacks them.
+        let imported_without = QsoRecord { ..Default::default() };
+        assert!(merge_matched_qso(&merged, &imported_without).is_none());
     }
 
     #[test]
