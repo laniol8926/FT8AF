@@ -1112,33 +1112,59 @@ after real rebuild+relaunch cycles throughout -- the Stats/Awards tabs,
 the sticky header (confirmed clean with a zoomed-in pixel crop after each
 attempt), the full-log sort, the Decode row fixes (compared pixel-by-pixel
 against both a desktop screenshot and a real Android screenshot the user
-sent), and the panel-width fix. The QRZ/Cloudlog sync-flag fix's end-to-end
-verification (re-importing a real ~54,500-record QRZ.com export into the
-live 45,622-row log, to confirm `synced_qrz` gets backfilled via
-`merge_matched_qso` and the "QRZ" chip appears) ran for several minutes
-against the real log -- prompted by that, the user asked to check the
-dedupe logic itself for the same "taking too long" class of bug Android
-had and fixed (`ImportSharedLogs.java` commit `319829f7`, an ANR on a real
-~53,000-QSO log, fixed by `DatabaseOpr#yieldImportBatch` calling SQLite's
-`yieldIfContendedSafely()` after nearly every record). That turned up a
-real, separate bug: the indexes needed for fast duplicate matching were
-already ported and confirmed present (`qso_log_import_dedup_idx`,
-`qso_log_lotw_twin_idx`, schema v7) -- but `self.conn`'s Mutex was locked
-once before the import loop and held for the *entire* import, including
-across every `COMMIT;BEGIN` batch boundary, so every other backend command
-needing the same connection (`log_count`, `search_qsos`, `worked_calls`,
-...) blocked for the whole import, not one batch -- confirmed live, the
-Logbook screen showed a stuck/stale QSO count throughout. Fixed by
-dropping and re-acquiring the lock after every record (cheap for
-`parking_lot`'s `Mutex` when uncontended; its eventual-fairness guarantee
-hands the lock directly to a genuinely waiting thread, the closest
-equivalent available to `yieldIfContendedSafely()`), proven with a real
-concurrency test racing a background thread's `total_qsos()` against an
-in-flight import. The large real-file import's own total wall-clock time
-wasn't a regression needing a fix beyond that -- the indexes already make
-each record's lookup fast; 54,554 records against an already-45,000-row
-table on this specific low-power SBC, concurrently with the FT8 decode
-engine competing for CPU, legitimately takes real minutes.
+sent), and the panel-width fix.
+
+**The QRZ/Cloudlog sync-flag fix's end-to-end verification turned into its
+own investigation.** Re-importing a real ~54,500-record QRZ.com export
+into the live 45,622-row log, to confirm `synced_qrz` gets backfilled via
+`merge_matched_qso` and the "QRZ" chip appears, ran for many minutes
+against the real log with `synced_qrz` staying at 0 the whole time. The
+user asked to check the dedupe logic itself for the same "taking too long"
+class of bug Android had and fixed (`ImportSharedLogs.java` commit
+`319829f7`, an ANR on a real ~53,000-QSO log, fixed by
+`DatabaseOpr#yieldImportBatch` calling SQLite's `yieldIfContendedSafely()`
+after nearly every record). That surfaced two real bugs, one performance
+and one correctness -- in that order, since the performance one was found
+first:
+
+- **`self.conn`'s Mutex was locked once before the import loop and held
+  for the *entire* import**, including across every `COMMIT;BEGIN` batch
+  boundary (the SQL-level transaction cycling never released the Rust-
+  level guard) -- every other backend command needing the same connection
+  (`log_count`, `search_qsos`, `worked_calls`, ...) blocked for the whole
+  import, not one batch. Confirmed live: the Logbook screen showed a
+  stuck/stale QSO count throughout. The indexes needed for fast duplicate
+  matching were already ported and confirmed present and in use
+  (`qso_log_import_dedup_idx`/`qso_log_lotw_twin_idx`, schema v7, verified
+  with `EXPLAIN QUERY PLAN`), so this wasn't a second missing index. Fixed
+  by dropping and re-acquiring the lock after every record (cheap for
+  `parking_lot`'s `Mutex` when uncontended; its eventual-fairness
+  guarantee hands the lock directly to a genuinely waiting thread, the
+  closest equivalent available to `yieldIfContendedSafely()`), proven with
+  a real concurrency test racing a background thread's `total_qsos()`
+  against an in-flight import. Also switched every hot-path statement the
+  import loop calls per record to `prepare_cached` (rusqlite's `Connection`
+  has no implicit statement cache the way Android's `SQLiteDatabase` does,
+  so the same query text was being re-parsed and re-planned from scratch
+  on every one of 54,554 records).
+- **The real bug, found by actually reading the imported rows back**:
+  `insert_qso_locked`'s `INSERT` and `update_flags_locked`'s `UPDATE`
+  statements both omitted the `synced_cloudlog`/`synced_qrz` columns
+  entirely. `adif_record_to_qso` correctly parsed
+  `QRZCOM_QSO_UPLOAD_STATUS`/`APP_FT8AF_SYNCED_CLOUDLOG` into the
+  in-memory `QsoRecord`, and `merge_matched_qso` correctly carried both
+  flags into a merged record (its own unit test proved that) -- but
+  neither write path ever bound either value to a SQL parameter, so both
+  were silently dropped before ever reaching the database, on *every*
+  import, not just this one. The two earlier commits fixing the parsing
+  and the merge logic were real but incomplete: neither actually closed
+  the loop to disk. This is exactly why the first verification attempt
+  could never have succeeded no matter how long it ran, and why it needed
+  a fix beyond the performance one. Fixed both write paths, with new tests
+  that read the row back from the database afterward (not just checking
+  the in-memory merge result, which is the gap that let it through the
+  first time): one for a fresh insert, one for the existing-row backfill
+  via the duplicate-match path.
 
 ## Build note
 
