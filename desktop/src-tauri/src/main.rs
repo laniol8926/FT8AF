@@ -12,6 +12,7 @@ use ft8af::bands::{self, BandEntry, CustomBand};
 use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, LogStats, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
 use ft8af::fcc_grid::{self, FccSeedSummary};
+use ft8af::map_tiles::MapTiles;
 use ft8af::os_location::{self, OsLocation};
 use ft8af::rig::{self, HamlibRig, RigConfig, SerialPortInfo};
 use ft8af::wf::WfConfig;
@@ -19,6 +20,7 @@ use ft8af::wf::WfConfig;
 struct AppState {
     engine: EngineHandle,
     db: Arc<Db>,
+    map_tiles: MapTiles,
 }
 
 // --- device / port / band enumeration --------------------------------------
@@ -447,6 +449,18 @@ fn qth_for_call(state: State<AppState>, call: String) -> Option<String> {
     state.db.qth_for_call(&call)
 }
 
+/// Raw JPEG bytes for one offline basemap tile, or an empty body if `(z,x,y)`
+/// isn't in the bundled archive (see `map_tiles.rs`). Returns a raw
+/// `tauri::ipc::Response` rather than a JSON-wrapped/base64 payload: the IPC
+/// bridge resolves that straight to an `ArrayBuffer` in JS, which
+/// `createImageBitmap` decodes without ever navigating a URL -- smaller than
+/// base64, no extra Cargo dependency, and it bypasses the page's `img-src`
+/// CSP entirely (unlike a `data:`/`blob:` URL, which would need it).
+#[tauri::command]
+fn map_tile(state: State<AppState>, z: u32, x: u32, y: u32) -> tauri::ipc::Response {
+    tauri::ipc::Response::new(state.map_tiles.tile_for(z, x, y).unwrap_or_default())
+}
+
 /// Download the FCC amateur-license database, cross-reference it against the
 /// bundled Census ZCTA Gazetteer, and seed `callsign_qth` -- see
 /// `fcc_grid.rs`'s module doc comment for the full pipeline. Emits
@@ -741,13 +755,14 @@ fn main() {
     let db = Arc::new(
         Db::open(data_dir.join("ft8af.sqlite")).expect("failed to open database"),
     );
+    let map_tiles = MapTiles::open(&data_dir).expect("failed to open map tile archive");
 
     let (engine, evt_rx) = engine::spawn(db.clone());
     let db_for_setup = db.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState { engine, db })
+        .manage(AppState { engine, db, map_tiles })
         .setup(move |app| {
             // Forward engine events to the webview on the "engine-event" channel.
             let handle = app.handle().clone();
@@ -875,6 +890,7 @@ fn main() {
             import_adif,
             callsign_qth_count,
             qth_for_call,
+            map_tile,
             import_fcc_grid_seed,
             get_config,
             set_config,

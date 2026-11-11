@@ -1231,28 +1231,51 @@ a dev-mode binary missing the `custom-protocol` feature). A full release
 build on this board took ~36 minutes on the first build after this round's
 dependency churn; expect faster incremental builds after that.
 
-## Open: the real GridTracker tile basemap (planned, not started)
+## Done this round, part 16: the real GridTracker tile basemap (phase 1 of an Android Map-screen port)
 
-The GridTracker map (part 10 above) still renders its background as the
-bundled land/country GeoJSON vector outlines carried over from the first
-(wrong) map build -- the user confirmed this reads as "the ft8af map, not
-the ft8tw map": GridTracker's real look on Android is actual offline
-satellite tile imagery
-(`ft8af/app/src/main/assets/nightUSGS4Layer.sqlite`, 4.5MB, osmdroid's own
-simple SQLite tile-archive format, **not** MBTiles), not a flat vector
-map. A full plan for this was researched, written, and approved this
-round (key-format reverse-engineered and verified against the real file
-via the vendored `osmdroid-android-6.1.14-sources.jar`:
-`index = (((z << z) + x) << z) + y`, confirmed 341 tiles, zoom 0-4, full
-coverage, standard Web Mercator XYZ numbering) -- **but implementation was
-interrupted by the ADIF-import crash investigation (part 11) and never
-started.** The plan is still on disk at
-`~/.claude/plans/precious-scribbling-lark.md` and is the right starting
-point for the next round: switch the map's projection from equirectangular
-to Web Mercator (`mercatorProjection.ts`/`mercatorViewport.ts`, new),
-bundle the sqlite file as a Rust resource and serve tiles over IPC (never
-a `fetch()` -- Tauri's CSP blocks that, confirmed in part 10) via a new
-`map_tiles.rs` + `map_tile(z,x,y)` command returning a data URL, and a
-frontend tile cache in `MapScreen`. The sqlite file itself is already
-copied into place (`desktop/src-tauri/resources/nightUSGS4Layer.sqlite`,
-committed this round) but nothing yet reads it.
+The long-standing gap noted below (several rounds: "GridTracker's real
+look on Android is actual offline satellite tile imagery, not a flat
+vector map") is now closed. This also turned out to be phase 1 of a much
+larger piece of work: a fresh look at Android's current `dev` branch
+found its Map screen has grown into a ~5,000-line feature (a tile-based
+"Tracker" mode, a vector "Azimuthal" radar projection, and a full PSK
+Reporter network overlay) -- far more than the single tile-basemap item
+below ever covered. The user chose to sequence all of it, starting here;
+PSK Reporter, the Azimuthal projection, and remaining polish (state
+borders/labels, connection lines, signal-reach card) are tracked as a
+roadmap in the current plan file, to be designed in detail each in turn.
+
+**The previous "approved plan" referenced below no longer existed** --
+the plan-file slug had been overwritten by an unrelated later session
+(the ADIF-import streaming fix). Its one surviving claim worth
+correcting: it said "standard Web Mercator XYZ numbering." That's wrong.
+Extracting and visually inspecting real tiles from the bundled archive
+this round (z=0's single tile shows an undistorted world -- a
+normal-sized Greenland, a uniform Antarctic strip -- which real Web
+Mercator's high-latitude stretching would never produce) confirms the
+tile set is plain **equirectangular**. The key formula itself
+(`key = z*4^z + x*2^z + y`) was already right, re-derived independently
+and confirmed by extracting specific z=2 tiles and checking their content
+against known geography: (0,0) is the Canadian Arctic archipelago, (0,1)
+is North America (confirms +y = south), (1,0) is Greenland (confirms +x
+= east), (3,3) is Antarctica (the far SE corner).
+
+Because the tiles are equirectangular, desktop's existing
+`mapProjection.ts`/`mapViewport.ts` placed them directly -- no Mercator
+projection module was needed after all. New `desktop/src-tauri/src/
+map_tiles.rs` embeds the already-bundled `resources/nightUSGS4Layer.sqlite`
+(4.6MB) via `include_bytes!`, writes it to the app data dir once on first
+use (rusqlite needs a real file path; its `serialize`/`deserialize`
+feature turned out to need unsafe FFI buffer-copy code to populate from
+embedded bytes, so this is both simpler and matches the project's
+existing `include_str!`/write-once-to-disk resource pattern), and serves
+tiles over a new `map_tile(z,x,y)` command. That command returns a raw
+`tauri::ipc::Response` rather than a base64 `data:` URL -- confirmed this
+needs zero new Cargo dependencies (base64 was only ever a transitive
+dependency) and that `createImageBitmap(Blob)` decodes the raw bytes
+without navigating a URL at all, bypassing the page's `img-src` CSP
+entirely rather than needing it loosened. `MapScreen`'s draw loop now
+layers decoded tile bitmaps over the existing vector land/country
+outlines (which stay as the permanent placeholder for anything not yet
+loaded, not a special-cased fallback), with an in-flight-promise cache so
+a pan/zoom drag's rapid redraws don't fire duplicate tile fetches.

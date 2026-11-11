@@ -39,3 +39,42 @@ export function computeBearing(lat1: number, lon1: number, lat2: number, lon2: n
   const bearing = toDeg(Math.atan2(y, x));
   return (bearing + 360) % 360;
 }
+
+/**
+ * Offline satellite tile basemap (see `src-tauri/src/map_tiles.rs`'s doc
+ * comment for how the archive's key formula and equirectangular-not-Mercator
+ * projection were empirically verified). A tile `(z,x,y)` sits in a plain
+ * `2^z x 2^z` grid over the whole equirectangular world: x increases
+ * eastward from lon -180, y increases *southward* from lat +90 -- so its
+ * bounds are a uniform fraction of the full lon/lat range, no trigonometry
+ * involved (unlike a Mercator tile scheme).
+ */
+export const MAX_TILE_ZOOM = 4;
+
+export interface TileLonLatBounds {
+  lonMin: number;
+  lonMax: number;
+  latMin: number;
+  latMax: number;
+}
+
+/** The lon/lat rectangle tile `(z,x,y)` covers. Does not validate that `x`/`y`
+ *  are actually in range for `z` -- callers already clamp `z` via
+ *  `tileZoomForViewport` and enumerate `x`/`y` from `0` to `2**z - 1`. */
+export function tileLonLatBounds(z: number, x: number, y: number): TileLonLatBounds {
+  const n = 2 ** z;
+  const lonMin = -180 + x * (360 / n);
+  const latMax = 90 - y * (180 / n);
+  return { lonMin, lonMax: lonMin + 360 / n, latMin: latMax - 180 / n, latMax };
+}
+
+/** Which stored zoom level (0-4) best matches the viewport's current world
+ *  pixel width (`EquirectViewport.worldPxW`) -- each tile is 256px square at
+ *  its native resolution, so `worldPxW / 256` tiles span the whole world
+ *  horizontally at a 1:1 pixel match; round to the nearest integer zoom and
+ *  clamp to the archive's stored range (deeper zoom just upsamples z4,
+ *  matching Android's own `setMaxZoomLevel(6.0)` over the same z0-4 data). */
+export function tileZoomForViewport(worldPxW: number): number {
+  const z = Math.round(Math.log2(worldPxW / 256));
+  return Math.min(MAX_TILE_ZOOM, Math.max(0, z));
+}

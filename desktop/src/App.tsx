@@ -92,6 +92,7 @@ import { wpxPrefixOf } from "./wpxPrefix";
 import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
 import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
 import { EquirectViewport } from "./mapViewport";
+import { tileLonLatBounds, tileZoomForViewport } from "./mapProjection";
 import { buildGridTrackerSlot, currentSlotMessages, type SlotMessage } from "./gridTrackerSlot";
 import { nightPolygonLatLon, subsolarPoint } from "./terminator";
 import { forEachRingVertex, parseGeoJsonRings } from "./worldOutlines";
@@ -1210,6 +1211,34 @@ function MapScreen({
 
   const myPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
 
+  // Offline satellite tile basemap (src-tauri/src/map_tiles.rs). Two refs,
+  // not one: `tileCacheRef` dedupes in-flight fetches (the draw effect below
+  // can re-run many times per second mid-drag, and without promise-level
+  // dedup the same tile key would fire duplicate IPC calls before the first
+  // resolves), while `tileBitmapsRef` holds already-decoded bitmaps for the
+  // synchronous draw loop to read -- a canvas draw can't await a promise.
+  // `tileTick` exists purely to force a redraw when a tile finishes loading
+  // asynchronously, independent of any pan/zoom/state change.
+  const tileCacheRef = useRef<Map<string, Promise<ImageBitmap | null>>>(new Map());
+  const tileBitmapsRef = useRef<Map<string, ImageBitmap>>(new Map());
+  const [tileTick, setTileTick] = useState(0);
+  function ensureTileLoaded(z: number, x: number, y: number) {
+    const key = `${z}/${x}/${y}`;
+    if (tileCacheRef.current.has(key)) return;
+    const loaded = api
+      .mapTile(z, x, y)
+      .then((buf) => (buf.byteLength === 0 ? null : createImageBitmap(new Blob([buf], { type: "image/jpeg" }))))
+      .then((bitmap) => {
+        if (bitmap) {
+          tileBitmapsRef.current.set(key, bitmap);
+          setTileTick((t) => t + 1);
+        }
+        return bitmap;
+      })
+      .catch(() => null);
+    tileCacheRef.current.set(key, loaded);
+  }
+
   // Pointer drag-to-pan + wheel-to-zoom.
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   function onPointerDown(e: PointerEvent<HTMLCanvasElement>) {
@@ -1301,6 +1330,34 @@ function MapScreen({
     strokeRings(landRings, MAP_LAND_FILL, MAP_LAND_STROKE, 0.75);
     strokeRings(countryRings, null, MAP_COUNTRY_STROKE, 0.7);
 
+    // Real offline satellite tiles, drawn over the vector outlines above --
+    // which stay as the permanent placeholder for whatever hasn't finished
+    // loading yet, not a special-cased fallback. Tiles are plain
+    // equirectangular (verified empirically against the bundled archive,
+    // see map_tiles.rs), so the existing projection places them directly:
+    // no inverse-projection is needed, since a tile's screen rect is just
+    // its two corners forward-projected through the same `vp` everything
+    // else here uses. At most 2^z * 2^z candidates exist (256 at the max
+    // stored zoom), cheap to brute-force intersect against the canvas every
+    // frame.
+    const tileZoom = tileZoomForViewport(vp.worldPxW);
+    const tilesPerSide = 2 ** tileZoom;
+    for (let tx = 0; tx < tilesPerSide; tx++) {
+      for (let ty = 0; ty < tilesPerSide; ty++) {
+        const bounds = tileLonLatBounds(tileZoom, tx, ty);
+        const topLeft = vp.projectLatLon(bounds.latMax, bounds.lonMin);
+        const bottomRight = vp.projectLatLon(bounds.latMin, bounds.lonMax);
+        const destW = bottomRight.x - topLeft.x;
+        const destH = bottomRight.y - topLeft.y;
+        const visible =
+          topLeft.x + destW >= 0 && topLeft.x <= size.w && topLeft.y + destH >= 0 && topLeft.y <= size.h;
+        if (!visible) continue;
+        ensureTileLoaded(tileZoom, tx, ty);
+        const bitmap = tileBitmapsRef.current.get(`${tileZoom}/${tx}/${ty}`);
+        if (bitmap) ctx.drawImage(bitmap, topLeft.x, topLeft.y, destW, destH);
+      }
+    }
+
     // Gray-line terminator: translucent night fill + amber terminator stroke
     // (Android's GridOsmMapView.initMap also calls setGrayLine()).
     const night = nightPolygonLatLon(subsolarPoint(nowMs));
@@ -1359,7 +1416,19 @@ function MapScreen({
         ctx.fillText(`${marker.callsign} -- ${marker.message.text}`, p.x + r + 3, p.y + 3);
       }
     }
-  }, [size, userScale, pan, landRings, countryRings, slot, selected, nowMs, workedCalls, workedCallsAnyBand]);
+  }, [
+    size,
+    userScale,
+    pan,
+    landRings,
+    countryRings,
+    slot,
+    selected,
+    nowMs,
+    workedCalls,
+    workedCallsAnyBand,
+    tileTick,
+  ]);
 
   return (
     <div ref={containerRef} className="map-screen">

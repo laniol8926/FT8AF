@@ -398,6 +398,11 @@ export const api = {
    *  lookup for decodes that don't carry a grid themselves (TX3-5/73/R73).
    *  Looked up one callsign at a time, never in bulk. */
   qthForCall: (call: string) => invoke<string | null>("qth_for_call", { call }),
+  /** Raw JPEG bytes for one offline basemap tile, or a zero-length
+   *  ArrayBuffer if `(z,x,y)` isn't in the bundled archive (map_tiles.rs).
+   *  Returned as raw IPC bytes, not JSON/base64 -- see main.rs's `map_tile`
+   *  doc comment for why. */
+  mapTile: (z: number, x: number, y: number) => invoke<ArrayBuffer>("map_tile", { z, x, y }),
   /** Download + cross-reference the FCC/Census data, seeding the callsign/grid
    *  cache. Long-running (~200MB download + ~1.7M-record scan) -- pair with
    *  `onFccGridProgress` for a live counter. */

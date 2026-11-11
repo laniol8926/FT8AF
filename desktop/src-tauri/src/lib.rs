@@ -18,6 +18,7 @@ pub mod dsp;
 pub mod dxcc;
 pub mod engine;
 pub mod fcc_grid;
+pub mod map_tiles;
 pub mod mode;
 pub mod os_location;
 pub mod qmx_cat_tones;
