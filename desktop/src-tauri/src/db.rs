@@ -1055,13 +1055,20 @@ impl Db {
         let total = records.len() as i64;
         let mut summary = ImportSummary::default();
 
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
         let _ = conn.execute_batch("BEGIN");
         for (idx, rec) in records.iter().enumerate() {
             Self::import_one_record_locked(&conn, rec, &mut summary);
             let processed = (idx + 1) as i64;
             if processed % Self::IMPORT_BATCH == 0 && processed != total {
                 let _ = conn.execute_batch("COMMIT; BEGIN");
+            }
+            // Drop and re-acquire the lock after every record (not just at a
+            // batch boundary) -- see the doc comment on the matching line in
+            // import_adif_file_with_progress just below for why.
+            if processed != total {
+                drop(conn);
+                conn = self.conn.lock();
             }
             if processed % 200 == 0 || processed == total {
                 on_progress(processed, total);
@@ -1101,7 +1108,7 @@ impl Db {
         let file = std::fs::File::open(path)?;
         let mut reader = crate::adif::AdifStreamReader::new(std::io::BufReader::new(file));
 
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
         let _ = conn.execute_batch("BEGIN");
         let mut processed: i64 = 0;
         while let Some(rec) = reader.next_record()? {
@@ -1109,6 +1116,29 @@ impl Db {
             Self::import_one_record_locked(&conn, &rec, &mut summary);
             if processed % Self::IMPORT_BATCH == 0 && processed != total {
                 let _ = conn.execute_batch("COMMIT; BEGIN");
+            }
+            // Drop and re-acquire the lock after every record, not just at a
+            // batch (COMMIT) boundary. Without this, self.conn's Mutex is held
+            // for the *entire* import -- every other backend command that
+            // also needs it (log_count, search_qsos, worked_calls, ...) blocks
+            // for the whole import's duration, not just one batch, since
+            // dropping to SQL-level COMMIT/BEGIN above never releases the Rust
+            // guard itself. Confirmed live: the Logbook screen showed a
+            // stuck/stale QSO count while a real ~54,500-record import ran
+            // against an already-45,000-row log. Mirrors Android's own
+            // yieldImportBatch fix for the identical "FT8AF isn't responding"
+            // class of bug (ImportSharedLogs.java, commit 319829f7) -- there,
+            // SQLite's yieldIfContendedSafely() lets a genuinely waiting
+            // thread in without giving up the lock otherwise; parking_lot's
+            // Mutex has no such "yield only if contended" primitive, but it
+            // does have eventual fairness (a long-waiting thread gets handed
+            // the lock directly on unlock), so a plain drop+relock here is
+            // the equivalent -- and cheap: a few atomic ops in the
+            // uncontended case, no syscall, so doing it every record (not
+            // just every IMPORT_BATCH) doesn't meaningfully slow the import.
+            if processed != total {
+                drop(conn);
+                conn = self.conn.lock();
             }
             if processed % 200 == 0 || processed == total {
                 on_progress(processed, total);
@@ -3421,6 +3451,53 @@ mod tests {
         });
         assert_eq!(summary.imported, 450);
         assert_eq!(calls, vec![(200, 450), (400, 450), (450, 450)]);
+    }
+
+    /// The actual bug this yield-every-record fix exists for: db.rs's Mutex
+    /// used to be held for the *entire* import (confirmed live on a real
+    /// ~54,500-record QRZ export against an already-45,000-row log -- the
+    /// Logbook screen showed a stuck/stale QSO count the whole time), so any
+    /// other command needing the same connection (log_count, search_qsos,
+    /// worked_calls, ...) blocked for the whole import, not just one batch.
+    /// Mirrors Android's own yieldImportBatch fix for the identical "FT8AF
+    /// isn't responding" class of bug. Proven here by actually racing a
+    /// second thread's total_qsos() against an in-flight import on a real
+    /// background thread and asserting it returns promptly, not only once
+    /// the import finishes.
+    #[test]
+    fn import_adif_with_progress_yields_the_lock_between_records() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let mut adif = String::new();
+        for i in 0..3000 {
+            adif.push_str(&format!(
+                "<call:9>K{i:08}<band:3>20m<mode:3>FT8<qso_date:8>20260101<time_on:6>{:06}<eor>",
+                120000 + i,
+            ));
+        }
+
+        let importer = {
+            let db = Arc::clone(&db);
+            thread::spawn(move || db.import_adif_with_progress(&adif, |_, _| {}))
+        };
+
+        // Give the import a moment to actually start (and take the lock at
+        // least once) before racing it.
+        thread::sleep(Duration::from_millis(5));
+        let start = Instant::now();
+        let _ = db.total_qsos();
+        let waited = start.elapsed();
+
+        let summary = importer.join().unwrap();
+        assert_eq!(summary.imported, 3000);
+        assert!(
+            waited < Duration::from_millis(500),
+            "total_qsos() waited {waited:?} for the import's lock -- it should \
+             yield between records, not hold the lock for the whole import",
+        );
     }
 
     #[test]
