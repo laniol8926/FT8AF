@@ -3546,12 +3546,6 @@ mod tests {
         assert_eq!(calls, vec![(200, 450), (400, 450), (450, 450)]);
     }
 
-    /// The actual bug this yield-every-record fix exists for: db.rs's Mutex
-    /// used to be held for the *entire* import (confirmed live on a real
-    /// ~54,500-record QRZ export against an already-45,000-row log -- the
-    /// Logbook screen showed a stuck/stale QSO count the whole time), so any
-    /// other command needing the same connection (log_count, search_qsos,
-    /// worked_calls, ...) blocked for the whole import, not just one batch.
     /// Mirrors Android's own yieldImportBatch fix for the identical "FT8AF
     /// isn't responding" class of bug. Proven here by actually racing a
     /// second thread's total_qsos() against an in-flight import on a real
