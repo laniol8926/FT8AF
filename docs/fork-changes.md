@@ -499,6 +499,14 @@ for the Hamlib version workaround needed there.
   LF on asset text files). Upstream PR #960, merged.
 - ADIF import: RST parsed leniently, invalid rows reported correctly, size
   cap raised to 200 MB. Upstream PRs #951 and #950, merged.
+- **Swiping the app away from Recents now exits it.** Before, RX decode, mic
+  capture and the wakelock kept running after the swipe (the RX foreground
+  service is a plain started service, and `MainViewModel` is a process-wide
+  singleton), until the app was force-stopped. `onTaskRemoved()` now runs the
+  same full shutdown as the notification's Exit button (stop TX/RX, disconnect
+  the rig, stop the recorder and service). `debug.log` shows
+  `RxForegroundService: exiting (task removed from Recents)`.
+  (`RxForegroundService`, 7e14191c)
 
 ## Testing notes
 
