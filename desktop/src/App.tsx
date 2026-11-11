@@ -87,6 +87,7 @@ import {
   type HuntPriority,
 } from "./hunt";
 import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
+import { formatDecodeDt, formatDecodeFreq, isDecodeDtNotable } from "./decodeRow";
 import { wpxPrefixOf } from "./wpxPrefix";
 import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
 import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
@@ -2464,12 +2465,16 @@ function DecodeScreen(props: {
                   >
                     <span className={"decode-row-msg" + (worked ? " worked" : "")}>{m.text}</span>
                     <span className="decode-row-snr">{m.snr}</span>
-                    <span className="decode-row-freq">{Math.round(m.freq_hz)}</span>
+                    {/* Zero-padded to 4 digits (Android's getFreq_hz(), "%04.0f") so
+                        this column's digits line up row to row regardless of how
+                        many digits the offset itself has. */}
+                    <span className="decode-row-freq">{formatDecodeFreq(m.freq_hz)}</span>
                     {/* DT: a signed offset, highlighted once it's large enough to be
-                        worth the operator's attention (decode timing drifting). */}
-                    <span className={"decode-row-dt" + (Math.abs(m.time_sec) > 1 ? " warn" : "")}>
-                      {m.time_sec >= 0 ? "+" : ""}
-                      {m.time_sec.toFixed(1)}
+                        worth the operator's attention (decode timing drifting). A
+                        value that rounds to zero renders unsigned ("0.0", never
+                        "+0.0"/"-0.0") -- matches Android's formatDecodeDt exactly. */}
+                    <span className={"decode-row-dt" + (isDecodeDtNotable(m.time_sec) ? " warn" : "")}>
+                      {formatDecodeDt(m.time_sec)}
                     </span>
                     {/* Status pill, matching Android's StatusPill.kt (compact
                         variant): colored background + border + a small dot +
