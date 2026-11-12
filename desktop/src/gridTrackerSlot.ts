@@ -67,6 +67,16 @@ export interface GridTrackerSlot<M extends SlotMessage = SlotMessage> {
   lines: QsoLine<M>[];
 }
 
+/** Whether a station marker should be visible, given the Map screen's
+ *  Decodes/Worked layer chips. Ported from `MapRedesign.kt`'s
+ *  `isStationVisible` -- the two chips partition every marker by worked
+ *  status rather than being independently additive: a worked station's
+ *  visibility is controlled only by `workedOn`, an unworked one only by
+ *  `decodesOn`. */
+export function isStationVisible(isWorked: boolean, decodesOn: boolean, workedOn: boolean): boolean {
+  return isWorked ? workedOn : decodesOn;
+}
+
 /** The messages belonging to the single newest decode slot in `messages`
  *  (slot = floor(utcMs / cycleMs)). Order is preserved from the input. */
 export function currentSlotMessages<M extends SlotMessage>(messages: M[], cycleMs: number): M[] {

@@ -21,6 +21,7 @@ pub mod fcc_grid;
 pub mod map_tiles;
 pub mod mode;
 pub mod os_location;
+pub mod psk_reporter;
 pub mod qmx_cat_tones;
 pub mod qmx_meters;
 pub mod qso;

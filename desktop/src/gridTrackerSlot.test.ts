@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { buildGridTrackerSlot, currentSlotMessages, type SlotMessage } from "./gridTrackerSlot";
+import { buildGridTrackerSlot, currentSlotMessages, isStationVisible, type SlotMessage } from "./gridTrackerSlot";
 
 function msg(over: Partial<SlotMessage>): SlotMessage {
   return { callFrom: "K1ABC", callTo: "", isCq: false, grid: "", utcMs: 0, ...over };
@@ -120,4 +120,13 @@ test("a directed message with no callTo (unresolved) is dropped", () => {
   const slot = buildGridTrackerSlot([m], "N0CALL", resolver({}));
   expect(slot.lines).toEqual([]);
   expect(slot.markers).toEqual([]);
+});
+
+test("isStationVisible partitions by worked status, not additively", () => {
+  // Unworked: controlled only by decodesOn.
+  expect(isStationVisible(false, true, false)).toBe(true);
+  expect(isStationVisible(false, false, true)).toBe(false);
+  // Worked: controlled only by workedOn.
+  expect(isStationVisible(true, true, false)).toBe(false);
+  expect(isStationVisible(true, false, true)).toBe(true);
 });

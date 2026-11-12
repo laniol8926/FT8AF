@@ -38,6 +38,11 @@ serialport = "4"
 # (pure Rust, no system OpenSSL dependency, which matters on the ARM SBC
 # this app also targets) rather than native-tls.
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# PSK Reporter spot XML parsing. Already resolved as a transitive
+# dependency (via `plist`, pulled in by Tauri's own macOS bundling
+# tooling) -- this promotes the exact same locked version, no new
+# sub-dependency tree.
+quick-xml = "0.39"
 # dynamic loading of the Hamlib shared library (hamlib-4.dll / libhamlib)
 libloading = "0.8"
 # in-memory unzip for the FCC amateur-license bulk download (l_amat.zip)

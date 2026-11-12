@@ -1279,3 +1279,88 @@ layers decoded tile bitmaps over the existing vector land/country
 outlines (which stay as the permanent placeholder for anything not yet
 loaded, not a special-cased fallback), with an in-flight-promise cache so
 a pan/zoom drag's rapid redraws don't fire duplicate tile fetches.
+
+## Done this round, part 17: Map header row -- layer chips, gray line toggle, a real PSK Reporter overlay (phase 2 of the Map-screen port)
+
+Android's Map header has five things: Decodes/PSK spots/Worked layer
+chips, a Tracker toggle, and a settings gear. The user asked for the
+full row with real logic, not placeholders, but explicitly deferred
+**Tracker to last** -- it switches between two *different*
+marker-rendering systems on Android (`GridOsmMapView`'s own native
+overlays vs. the app's `drawStationLayers` system with layer chips/PSK/
+connection lines), and desktop only has the first kind (phase 1's tiles
++ `gridTrackerSlot.ts`'s markers) -- building a second rendering mode
+just to give Tracker something to toggle to is real, separate work,
+tracked in the current plan file's roadmap. No settings gear either:
+its only desktop-applicable item (gray line) already gets its own
+direct chip, and a dropdown with one real entry plus two N/A ones
+(Projection, Grid tracker full screen -- neither applies without
+phases 3/Tracker) wasn't worth adding.
+
+**Decodes/Worked layer chips**: `isStationVisible(isWorked, decodesOn,
+workedOn)` (ported from `MapRedesign.kt`, now in `gridTrackerSlot.ts`)
+partitions every CQ marker by worked status rather than being
+independently additive -- a worked station's visibility is controlled
+only by the Worked chip, an unworked one only by Decodes. Defaults
+match Android exactly: Decodes on, Worked off.
+
+**Gray line toggle**: the terminator draw block (already correct,
+phase-1-untouched) is now wrapped in `if (grayLineEnabled)`, persisted
+via `get_config`/`set_config` -- the same generic `"true"`/`"false"`
+string round-trip `wf_denoise`/`location_service_enabled` already use,
+no new Rust needed.
+
+**PSK Reporter spot overlay -- a real new network client, not a
+stub.** New `desktop/src-tauri/src/psk_reporter.rs` ports
+`PskReporterClient.kt`, adapted rather than transliterated:
+
+- Confirmed via the real fixture (`ft8af/app/src/test/resources/
+  pskreporter/reception-report.xml` on `origin/dev`) that the root
+  element is `<receptionReports>` with `<activeReceiver .../>` siblings
+  to ignore, and that an attribute present but empty (`receiverLocator=
+  ""`) counts as missing, same as an absent one.
+- **A real bug caught and fixed before it ever ran**: the first draft
+  always plotted the *sender's* callsign/grid as a spot's identity.
+  That's backwards for the default "who heard me" direction
+  (`by_receiver=false`, query `senderCallsign=<me>`) -- in every
+  returned row *we* are the sender, so the station worth plotting is
+  the *receiver* (who actually heard us). Fixed by threading
+  `by_receiver` into `parse_spots` and picking the correct side; caught
+  by writing the test against the real fixture's values, not by
+  inspection.
+- **Band resolution reuses existing Rust code, not a new table**:
+  rather than port Android's `Band` enum/range-table to TypeScript,
+  each spot's band is resolved server-side via the already-existing
+  `bands::band_for_freq_hz` (the same table `db.rs`'s `worked_calls`/
+  `worked_states` use) -- `pskFilter.ts` on the frontend just does a
+  plain string compare against the resolved band name.
+- **Lat/lon stays a frontend concern**, same decision as phase 1's
+  tiles: spots carry a raw `grid` string; the frontend's existing
+  `gridToLatLon` (`hunt.ts`, already robust against malformed input)
+  converts it, no second maidenhead implementation in Rust.
+- **Rate-limit back-off is checked before cooldown, unconditionally**
+  (a 429/503 response's 15-minute lockout can't be bypassed by
+  `force`; the 290s cooldown can). Extracted a pure `fetch_gate`
+  function (mirroring `engine.rs`'s own `decode_dispatch_due`/
+  `boundary_tx_ready` pattern) instead of porting Android's injectable-
+  clock test seam -- plain `i64` millis need no mocking to unit-test.
+- `quick-xml` promoted from a transitive dependency (pulled in via
+  `plist`, Tauri's own macOS bundling tooling) to a direct one --
+  confirmed via `cargo add --dry-run` this resolves to the exact
+  already-locked `0.39.4`, no new version, no new sub-dependency tree.
+- The command returns `{ spots, error }` in one IPC round trip rather
+  than mirroring Android's separate nullable-return + `lastError`
+  property read, since that split only exists there because it's two
+  in-process reads -- over IPC it'd be an extra call for no reason.
+
+**Verified live**, including against real PSK Reporter data: toggling
+each chip visibly changes the map (Decodes/Worked correctly partition
+which markers show, confirmed by a worked-station marker appearing
+only once the Worked chip was turned on; Gray line removes/restores the
+terminator). Enabling PSK spots correctly reveals the Filter chip and
+runs a fetch with no error -- cross-checked with a direct `curl` to
+`retrieve.pskreporter.info` for the same callsign/window, confirming
+the real response is genuinely empty (this station has no reception
+reports in the window queried), not a silent failure. The filter
+sheet's Time/Mode/Direction chips render and update state correctly,
+triggering a refetch on change.

@@ -14,6 +14,7 @@ use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
 use ft8af::fcc_grid::{self, FccSeedSummary};
 use ft8af::map_tiles::MapTiles;
 use ft8af::os_location::{self, OsLocation};
+use ft8af::psk_reporter::{PskFetchResult, PskReporterState};
 use ft8af::rig::{self, HamlibRig, RigConfig, SerialPortInfo};
 use ft8af::wf::WfConfig;
 
@@ -21,6 +22,7 @@ struct AppState {
     engine: EngineHandle,
     db: Arc<Db>,
     map_tiles: MapTiles,
+    psk_reporter: PskReporterState,
 }
 
 // --- device / port / band enumeration --------------------------------------
@@ -461,6 +463,25 @@ fn map_tile(state: State<AppState>, z: u32, x: u32, y: u32) -> tauri::ipc::Respo
     tauri::ipc::Response::new(state.map_tiles.tile_for(z, x, y).unwrap_or_default())
 }
 
+/// Fetches PSK Reporter spots for the Map screen's overlay. `mode` is always
+/// a concrete string the frontend resolves itself (e.g. the live operating
+/// mode, or an explicit filter override) -- there's no synchronous "ask the
+/// engine what mode is live" read on this side the way Android's
+/// `GeneralVariables.currentMode()` singleton allows. Internally
+/// rate-limited/cooled-down exactly like Android's own client -- see
+/// `psk_reporter.rs`'s doc comment.
+#[tauri::command]
+fn psk_reporter_spots(
+    state: State<AppState>,
+    call: String,
+    seconds_back: i64,
+    force: bool,
+    mode: String,
+    by_receiver: bool,
+) -> PskFetchResult {
+    state.psk_reporter.fetch_spots(&call, seconds_back, force, &mode, by_receiver)
+}
+
 /// Download the FCC amateur-license database, cross-reference it against the
 /// bundled Census ZCTA Gazetteer, and seed `callsign_qth` -- see
 /// `fcc_grid.rs`'s module doc comment for the full pipeline. Emits
@@ -756,13 +777,14 @@ fn main() {
         Db::open(data_dir.join("ft8af.sqlite")).expect("failed to open database"),
     );
     let map_tiles = MapTiles::open(&data_dir).expect("failed to open map tile archive");
+    let psk_reporter = PskReporterState::new();
 
     let (engine, evt_rx) = engine::spawn(db.clone());
     let db_for_setup = db.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState { engine, db, map_tiles })
+        .manage(AppState { engine, db, map_tiles, psk_reporter })
         .setup(move |app| {
             // Forward engine events to the webview on the "engine-event" channel.
             let handle = app.handle().clone();
@@ -891,6 +913,7 @@ fn main() {
             callsign_qth_count,
             qth_for_call,
             map_tile,
+            psk_reporter_spots,
             import_fcc_grid_seed,
             get_config,
             set_config,

@@ -174,6 +174,24 @@ export interface LogStats {
   best_dx: BestDx | null;
 }
 
+/** One PSK Reporter reception report, already resolved to "the other
+ *  station" (not necessarily the sender -- see `psk_reporter.rs`'s
+ *  `parse_spots` doc comment for the sender/receiver direction logic). */
+export interface PskReporterSpot {
+  callsign: string;
+  grid: string;
+  band: string;
+  frequency_hz: number;
+  snr: number;
+  mode: string;
+  flow_start_seconds: number;
+}
+
+export interface PskFetchResult {
+  spots: PskReporterSpot[] | null;
+  error: string | null;
+}
+
 /** First-run FCC/Census grid-table seed: see Rust `fcc_grid.rs`'s module doc
  *  comment. "downloading" is the ~200MB FCC amateur-license zip (`total` is
  *  bytes, from Content-Length); "processing" is the per-record FCC→Gazetteer
@@ -403,6 +421,19 @@ export const api = {
    *  Returned as raw IPC bytes, not JSON/base64 -- see main.rs's `map_tile`
    *  doc comment for why. */
   mapTile: (z: number, x: number, y: number) => invoke<ArrayBuffer>("map_tile", { z, x, y }),
+  /** PSK Reporter spots for the Map screen's overlay (psk_reporter.rs).
+   *  `mode` must be a concrete string ("FT8"/"FT4"/"FT2") -- see
+   *  pskFilter.ts's `resolvePskModeString`. A `null` `spots` field means
+   *  the fetch was skipped (cooldown/rate-limit) or failed; callers should
+   *  keep whatever spots they already have, not clear them. */
+  pskReporterSpots: (call: string, secondsBack: number, force: boolean, mode: string, byReceiver: boolean) =>
+    invoke<PskFetchResult>("psk_reporter_spots", {
+      call,
+      secondsBack,
+      force,
+      mode,
+      byReceiver,
+    }),
   /** Download + cross-reference the FCC/Census data, seeding the callsign/grid
    *  cache. Long-running (~200MB download + ~1.7M-record scan) -- pair with
    *  `onFccGridProgress` for a live counter. */

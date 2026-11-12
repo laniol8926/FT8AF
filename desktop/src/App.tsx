@@ -30,6 +30,7 @@ import {
   type InputLevelEvent,
   type LogStats,
   type OperatingMode,
+  type PskReporterSpot,
   type QsoRecord,
   type RigConfig,
   type RigStatusEvent,
@@ -93,8 +94,24 @@ import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
 import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
 import { EquirectViewport } from "./mapViewport";
 import { tileLonLatBounds, tileZoomForViewport } from "./mapProjection";
-import { buildGridTrackerSlot, currentSlotMessages, type SlotMessage } from "./gridTrackerSlot";
+import {
+  buildGridTrackerSlot,
+  currentSlotMessages,
+  isStationVisible,
+  type SlotMessage,
+} from "./gridTrackerSlot";
 import { nightPolygonLatLon, subsolarPoint } from "./terminator";
+import {
+  applyPskBandFilter,
+  initialPskFilter,
+  pskTimeLabel,
+  resolvePskModeString,
+  PSK_TIME_PRESETS,
+  type PskDirection,
+  type PskFilter,
+  type PskMode,
+} from "./pskFilter";
+import { summarizeSignalReach } from "./signalReach";
 import { forEachRingVertex, parseGeoJsonRings } from "./worldOutlines";
 import worldLandGeoJson from "./map-data/world_land.json";
 import worldCountriesGeoJson from "./map-data/world_countries.json";
@@ -940,6 +957,7 @@ export default function App() {
             sortMode={sortMode}
             myGrid={myGrid}
             myCall={myCall}
+            dialHz={dialHz}
             operatingMode={operatingMode}
             filter={filter}
             setFilter={setFilter}
@@ -1095,6 +1113,11 @@ const MAP_LINE_MY_CALL = "#ef4444";
 /** Mirrors styles.css's --text -- Android's tracker_line_color is plain
  *  white; this is desktop's own "default readable text" neutral instead. */
 const MAP_LINE_OTHER = "#e7ecf3";
+/** Mirrors styles.css's --accent -- the PSK spot overlay's marker color. */
+const MAP_PSK_SPOT = "#ffaf5e";
+
+/** PSK Reporter refetch cadence, matching Android's MapScreen.kt. */
+const PSK_POLL_INTERVAL_MS = 5 * 60 * 1000;
 
 // Parsed once at module load (not per-mount) -- see the comment on
 // `landRings`/`countryRings` below for why this is a bundled import, not a
@@ -1121,6 +1144,7 @@ function MapScreen({
   workedCallsAnyBand,
   myGrid,
   myCall,
+  dialHz,
 }: {
   messages: UiMessage[];
   operatingMode: OperatingMode;
@@ -1128,6 +1152,7 @@ function MapScreen({
   workedCallsAnyBand: Set<string>;
   myGrid: string;
   myCall: string;
+  dialHz: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1136,6 +1161,88 @@ function MapScreen({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [selected, setSelected] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Layer chips: Decodes/Worked partition every CQ marker by worked status
+  // (isStationVisible); Gray line toggles the terminator overlay, persisted
+  // the same "true"/"false" get_config/set_config round-trip wf_denoise/
+  // location_service_enabled already use -- no new Rust needed.
+  const [decodesLayer, setDecodesLayer] = useState(true);
+  const [workedLayer, setWorkedLayer] = useState(false);
+  const [grayLineEnabled, setGrayLineEnabled] = useState(true);
+  useEffect(() => {
+    api.getConfig("map_gray_line_enabled").then((v) => {
+      if (v !== null) setGrayLineEnabled(v === "true");
+    });
+  }, []);
+  function toggleGrayLine() {
+    const next = !grayLineEnabled;
+    setGrayLineEnabled(next);
+    api.setConfig("map_gray_line_enabled", String(next));
+  }
+
+  // PSK Reporter overlay. The poll loop lives here (frontend-driven,
+  // mirroring Android's own LaunchedEffect loop in the Compose UI layer,
+  // not a Rust background thread -- see psk_reporter.rs's doc comment and
+  // this file's existing per-decode gridLookup effect below, which already
+  // establishes this exact pattern for this screen).
+  const [pskOverlayEnabled, setPskOverlayEnabled] = useState(false);
+  useEffect(() => {
+    api.getConfig("map_psk_overlay_enabled").then((v) => {
+      if (v !== null) setPskOverlayEnabled(v === "true");
+    });
+  }, []);
+  const [pskFilter, setPskFilter] = useState<PskFilter>(() => initialPskFilter(dialHz, () => null));
+  const [pskSpots, setPskSpots] = useState<(PskReporterSpot & { lat: number; lon: number })[]>([]);
+  const [pskError, setPskError] = useState<string | null>(null);
+  const [filterSheetOpen, setFilterSheetOpen] = useState(false);
+  function togglePskOverlay() {
+    const next = !pskOverlayEnabled;
+    setPskOverlayEnabled(next);
+    api.setConfig("map_psk_overlay_enabled", String(next));
+    if (!next) setFilterSheetOpen(false);
+  }
+
+  useEffect(() => {
+    if (!pskOverlayEnabled) {
+      setPskSpots([]);
+      setPskError(null);
+      return;
+    }
+    let cancelled = false;
+    let firstFetch = true;
+    const modeStr = resolvePskModeString(pskFilter.mode, operatingMode);
+    const byReceiver = pskFilter.direction === "WHO_I_HEARD";
+    async function loop() {
+      while (!cancelled) {
+        const call = myCall.trim().toUpperCase();
+        if (call) {
+          const result = await api.pskReporterSpots(call, pskFilter.timeWindowSec, firstFetch, modeStr, byReceiver);
+          firstFetch = false;
+          if (cancelled) return;
+          if (result.spots) {
+            const withPos = result.spots
+              .map((s) => {
+                const pos = gridToLatLon(s.grid);
+                return pos ? { ...s, lat: pos.lat, lon: pos.lon } : null;
+              })
+              .filter((s): s is PskReporterSpot & { lat: number; lon: number } => s !== null);
+            setPskSpots(applyPskBandFilter(withPos, pskFilter.band));
+            setPskError(null);
+          } else {
+            // No flicker: keep whatever spots are already showing.
+            setPskError(result.error);
+          }
+        } else {
+          setPskSpots([]);
+        }
+        await new Promise((r) => setTimeout(r, PSK_POLL_INTERVAL_MS));
+      }
+    }
+    loop();
+    return () => {
+      cancelled = true;
+    };
+  }, [pskOverlayEnabled, pskFilter, myCall, operatingMode]);
 
   // GridTrackerPanel.kt redraws only the current decode slot on every pass
   // ("no grid shading: with a big log the worked/confirmed/known grids
@@ -1359,29 +1466,48 @@ function MapScreen({
     }
 
     // Gray-line terminator: translucent night fill + amber terminator stroke
-    // (Android's GridOsmMapView.initMap also calls setGrayLine()).
-    const night = nightPolygonLatLon(subsolarPoint(nowMs));
-    if (night.length >= 8) {
-      ctx.beginPath();
-      for (let i = 0; i + 1 < night.length; i += 2) {
-        const p = vp.projectLatLon(night[i + 1], night[i]);
-        if (i === 0) ctx.moveTo(p.x, p.y);
-        else ctx.lineTo(p.x, p.y);
-      }
-      ctx.closePath();
-      ctx.fillStyle = MAP_NIGHT_FILL;
-      ctx.fill();
+    // (Android's GridOsmMapView.initMap also calls setGrayLine()). Gated on
+    // the Gray line chip -- the only part of this draw loop that's a user
+    // toggle rather than always-on.
+    if (grayLineEnabled) {
+      const night = nightPolygonLatLon(subsolarPoint(nowMs));
+      if (night.length >= 8) {
+        ctx.beginPath();
+        for (let i = 0; i + 1 < night.length; i += 2) {
+          const p = vp.projectLatLon(night[i + 1], night[i]);
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = MAP_NIGHT_FILL;
+        ctx.fill();
 
-      ctx.beginPath();
-      const curveLen = night.length - 4;
-      for (let i = 0; i < curveLen; i += 2) {
-        const p = vp.projectLatLon(night[i + 1], night[i]);
-        if (i === 0) ctx.moveTo(p.x, p.y);
-        else ctx.lineTo(p.x, p.y);
+        ctx.beginPath();
+        const curveLen = night.length - 4;
+        for (let i = 0; i < curveLen; i += 2) {
+          const p = vp.projectLatLon(night[i + 1], night[i]);
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.strokeStyle = MAP_TERMINATOR_STROKE;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
       }
-      ctx.strokeStyle = MAP_TERMINATOR_STROKE;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+    }
+
+    // PSK Reporter spot overlay: small squares, drawn under the CQ markers
+    // (the full MarkerStyle.kt shape/SNR-tint system is phase-4 polish, out
+    // of scope here -- this matches the existing marker-drawing style).
+    if (pskOverlayEnabled) {
+      for (const spot of pskSpots) {
+        const p = vp.projectLatLon(spot.lat, spot.lon);
+        const half = 5;
+        ctx.fillStyle = MAP_PSK_SPOT;
+        ctx.fillRect(p.x - half, p.y - half, half * 2, half * 2);
+        ctx.strokeStyle = "#07090f";
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(p.x - half, p.y - half, half * 2, half * 2);
+      }
     }
 
     // QSO lines: the two real stations in each directed exchange this
@@ -1400,12 +1526,15 @@ function MapScreen({
       ctx.stroke();
     }
 
-    // CQ markers, tinted by worked status (same sets the Decode list uses).
+    // CQ markers, tinted by worked status (same sets the Decode list uses),
+    // filtered by the Decodes/Worked layer chips (isStationVisible
+    // partitions by worked status, not additively -- see gridTrackerSlot.ts).
     for (const marker of slot.markers) {
+      const worked = workedCalls.has(marker.callsign) || workedCallsAnyBand.has(marker.callsign);
+      if (!isStationVisible(worked, decodesLayer, workedLayer)) continue;
       const pos = gridToLatLon(marker.grid);
       if (!pos) continue;
       const p = vp.projectLatLon(pos.lat, pos.lon);
-      const worked = workedCalls.has(marker.callsign) || workedCallsAnyBand.has(marker.callsign);
       const isSelected = marker.callsign === selected;
       const fill = worked ? "#4ade80" : "#ffaf5e"; // --ok / --accent
       const r = isSelected ? 9 : 6;
@@ -1428,24 +1557,151 @@ function MapScreen({
     workedCalls,
     workedCallsAnyBand,
     tileTick,
+    grayLineEnabled,
+    decodesLayer,
+    workedLayer,
+    pskOverlayEnabled,
+    pskSpots,
   ]);
 
+  const opPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
+  const signalReach = useMemo(
+    () => summarizeSignalReach(pskSpots, opPos?.lat ?? null, opPos?.lon ?? null),
+    [pskSpots, opPos],
+  );
+
   return (
-    <div ref={containerRef} className="map-screen">
-      <canvas
-        ref={canvasRef}
-        style={{ width: "100%", height: "100%", display: "block", cursor: "grab", touchAction: "none" }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onWheel={onWheel}
-      />
-      <div className="map-overlay-top muted">
-        {slot.markers.length} CQ &middot; {slot.lines.length} QSO this cycle
+    <>
+      <div className="chips">
+        <div
+          className={"chip" + (decodesLayer ? " active" : "")}
+          onClick={() => setDecodesLayer((v) => !v)}
+        >
+          Decodes
+        </div>
+        <div
+          className={"chip" + (pskOverlayEnabled ? " active" : "")}
+          onClick={togglePskOverlay}
+        >
+          PSK spots
+        </div>
+        <div
+          className={"chip" + (workedLayer ? " active" : "")}
+          onClick={() => setWorkedLayer((v) => !v)}
+        >
+          Worked
+        </div>
+        <div className={"chip" + (grayLineEnabled ? " active" : "")} onClick={toggleGrayLine}>
+          Gray line
+        </div>
+        {pskOverlayEnabled && (
+          <div
+            className={"chip" + (filterSheetOpen ? " active" : "")}
+            onClick={() => setFilterSheetOpen((v) => !v)}
+          >
+            Filter
+          </div>
+        )}
       </div>
-      <button type="button" className="map-recenter" onClick={recenter} disabled={!myPos} title="Center on my grid">
-        Me
-      </button>
+      <div ref={containerRef} className="map-screen">
+        <canvas
+          ref={canvasRef}
+          style={{ width: "100%", height: "100%", display: "block", cursor: "grab", touchAction: "none" }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onWheel={onWheel}
+        />
+        <div className="map-overlay-top muted">
+          {slot.markers.length} CQ &middot; {slot.lines.length} QSO this cycle
+          {pskError && <div className="map-psk-error">PSK: {pskError}</div>}
+        </div>
+        <button type="button" className="map-recenter" onClick={recenter} disabled={!myPos} title="Center on my grid">
+          Me
+        </button>
+        {pskOverlayEnabled && filterSheetOpen && (
+          <PskFilterSheet filter={pskFilter} onChange={setPskFilter} />
+        )}
+        {pskOverlayEnabled &&
+          !filterSheetOpen &&
+          pskFilter.direction === "WHO_HEARD_ME" &&
+          signalReach && <SignalReachCard reach={signalReach} />}
+      </div>
+    </>
+  );
+}
+
+function PskFilterSheet({ filter, onChange }: { filter: PskFilter; onChange: (f: PskFilter) => void }) {
+  const modes: PskMode[] = ["CURRENT", "FT8", "FT4", "FT2"];
+  const directions: { id: PskDirection; label: string }[] = [
+    { id: "WHO_HEARD_ME", label: "Heard me" },
+    { id: "WHO_I_HEARD", label: "I heard" },
+  ];
+  return (
+    <div className="glass-card map-filter-sheet">
+      <div className="map-filter-row">
+        <span className="muted">Time</span>
+        <div className="chips">
+          {PSK_TIME_PRESETS.map((sec) => (
+            <div
+              key={sec}
+              className={"chip" + (filter.timeWindowSec === sec ? " active" : "")}
+              onClick={() => onChange({ ...filter, timeWindowSec: sec })}
+            >
+              {pskTimeLabel(sec)}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="map-filter-row">
+        <span className="muted">Mode</span>
+        <div className="chips">
+          {modes.map((m) => (
+            <div
+              key={m}
+              className={"chip" + (filter.mode === m ? " active" : "")}
+              onClick={() => onChange({ ...filter, mode: m })}
+            >
+              {m === "CURRENT" ? "Current" : m}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="map-filter-row">
+        <span className="muted">Direction</span>
+        <div className="chips">
+          {directions.map((d) => (
+            <div
+              key={d.id}
+              className={"chip" + (filter.direction === d.id ? " active" : "")}
+              onClick={() => onChange({ ...filter, direction: d.id })}
+            >
+              {d.label}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SignalReachCard({ reach }: { reach: ReturnType<typeof summarizeSignalReach> }) {
+  if (!reach) return null;
+  return (
+    <div className="glass-card map-signal-reach">
+      <div>
+        {reach.receivers} receiver{reach.receivers === 1 ? "" : "s"}
+      </div>
+      {reach.furthestCall && (
+        <div className="muted">
+          Furthest: {reach.furthestCall} ({formatDistanceMi(reach.furthestKm)})
+        </div>
+      )}
+      {reach.strongestCall && (
+        <div className="muted">
+          Strongest: {reach.strongestCall} ({reach.strongestSnr} dB)
+        </div>
+      )}
     </div>
   );
 }
@@ -2430,6 +2686,7 @@ function DecodeScreen(props: {
   sortMode: DecodeSortMode;
   myGrid: string;
   myCall: string;
+  dialHz: number;
   operatingMode: OperatingMode;
   filter: Filter;
   setFilter: (f: Filter) => void;
@@ -2453,7 +2710,7 @@ function DecodeScreen(props: {
   onToggleMessages: () => void;
 }) {
   const {
-    rightPane, messages, sortMode, myGrid, myCall, operatingMode, filter, setFilter,
+    rightPane, messages, sortMode, myGrid, myCall, dialHz, operatingMode, filter, setFilter,
     workedCalls, workedCallsAnyBand, workedGrids,
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
@@ -2604,6 +2861,7 @@ function DecodeScreen(props: {
               workedCallsAnyBand={workedCallsAnyBand}
               myGrid={myGrid}
               myCall={myCall}
+              dialHz={dialHz}
             />
           ) : (
             <>
