@@ -100,6 +100,8 @@ import {
   isStationVisible,
   type SlotMessage,
 } from "./gridTrackerSlot";
+import { buildAccumulatedStations } from "./stationAccumulator";
+import { buildConnectionLines } from "./connectionLines";
 import { nightPolygonLatLon, subsolarPoint } from "./terminator";
 import {
   applyPskBandFilter,
@@ -958,6 +960,7 @@ export default function App() {
             myGrid={myGrid}
             myCall={myCall}
             dialHz={dialHz}
+            txTarget={txState?.status.target ?? null}
             operatingMode={operatingMode}
             filter={filter}
             setFilter={setFilter}
@@ -1145,6 +1148,7 @@ function MapScreen({
   myGrid,
   myCall,
   dialHz,
+  txTarget,
 }: {
   messages: UiMessage[];
   operatingMode: OperatingMode;
@@ -1153,6 +1157,7 @@ function MapScreen({
   myGrid: string;
   myCall: string;
   dialHz: number;
+  txTarget: string | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1178,6 +1183,26 @@ function MapScreen({
     const next = !grayLineEnabled;
     setGrayLineEnabled(next);
     api.setConfig("map_gray_line_enabled", String(next));
+  }
+
+  // Tracker toggle: ON (the default, matching Android's own "new installs
+  // default to tracker on") keeps today's current-slot-only markers/lines
+  // (buildGridTrackerSlot, unchanged); OFF switches to a cross-session
+  // accumulator (buildAccumulatedStations/buildConnectionLines) -- one
+  // marker per callsign ever decoded, plus a solid line to the live TX
+  // target and dashed lines from anyone calling the operator. Both feed
+  // the exact same drawCqMarker/isStationVisible drawing code below; only
+  // the data source changes.
+  const [trackerOn, setTrackerOn] = useState(true);
+  useEffect(() => {
+    api.getConfig("map_tracker_enabled").then((v) => {
+      if (v !== null) setTrackerOn(v === "true");
+    });
+  }, []);
+  function toggleTracker() {
+    const next = !trackerOn;
+    setTrackerOn(next);
+    api.setConfig("map_tracker_enabled", String(next));
   }
 
   // PSK Reporter overlay. The poll loop lives here (frontend-driven,
@@ -1251,21 +1276,24 @@ function MapScreen({
   // screen's data volume tiny (one cycle's decodes, never the whole
   // session or the whole callsign_qth cache -- see gridTrackerSlot.ts).
   const cycleMs = MODE_CYCLE_MS[operatingMode];
-  const slotMessages = useMemo(
-    () => currentSlotMessages(messages.map(toSlotMessage), cycleMs),
-    [messages, cycleMs],
-  );
+  const allSlotMessages = useMemo(() => messages.map(toSlotMessage), [messages]);
+  const slotMessages = useMemo(() => currentSlotMessages(allSlotMessages, cycleMs), [allSlotMessages, cycleMs]);
 
-  // Per-callsign grid backfill for this slot only: a CQ/grid-reply decode's
-  // own grid is used directly; anything else (and call_to, always -- the
-  // recipient's grid is never in the message itself) is looked up one
-  // callsign at a time (never a bulk fetch of the whole table: an earlier
-  // draft loaded all ~800k FCC-seeded rows at once and OOM'd this board).
-  // `null` means "looked up, not found" so a miss isn't re-queried.
+  // Per-callsign grid backfill: a CQ/grid-reply decode's own grid is used
+  // directly; anything else (and call_to, always -- the recipient's grid is
+  // never in the message itself) is looked up one callsign at a time (never
+  // a bulk fetch of the whole table: an earlier draft loaded all ~800k
+  // FCC-seeded rows at once and OOM'd this board). Scans the *full*
+  // message history, not just the current slot, so Tracker-off mode's
+  // cross-session station accumulator (stationAccumulator.ts) has the same
+  // grid-resolution completeness Tracker-on already had -- harmless when
+  // Tracker is on too, since that just means resolving a superset of the
+  // callsigns it actually needs. `null` means "looked up, not found" so a
+  // miss isn't re-queried.
   const [gridLookup, setGridLookup] = useState<Map<string, string | null>>(new Map());
   useEffect(() => {
     const needed = new Set<string>();
-    for (const m of slotMessages) {
+    for (const m of allSlotMessages) {
       if (!m.callFrom) continue;
       if (!m.grid && !gridLookup.has(m.callFrom)) needed.add(m.callFrom);
       if (!m.isCq && m.callTo && !gridLookup.has(m.callTo)) needed.add(m.callTo);
@@ -1284,7 +1312,7 @@ function MapScreen({
     return () => {
       cancelled = true;
     };
-  }, [slotMessages, gridLookup]);
+  }, [allSlotMessages, gridLookup]);
 
   // The bundled Natural Earth land + admin-0 country outlines (parsed once
   // at module load, above -- not fetched at runtime: Tauri's CSP only
@@ -1311,10 +1339,41 @@ function MapScreen({
     return () => ro.disconnect();
   }, []);
 
+  const resolveGrid = useMemo(() => (call: string) => gridLookup.get(call) ?? null, [gridLookup]);
+
+  // Tracker on: today's current-slot-only markers/lines (unchanged).
   const slot = useMemo(
-    () => buildGridTrackerSlot(slotMessages, myCall, (call) => gridLookup.get(call) ?? null),
-    [slotMessages, myCall, gridLookup],
+    () => buildGridTrackerSlot(slotMessages, myCall, resolveGrid),
+    [slotMessages, myCall, resolveGrid],
   );
+
+  // Tracker off: one marker per callsign ever decoded this session (within
+  // the Decode screen's active filter and MAX_MESSAGES cap), plus a solid
+  // line to the live TX target and dashed lines from anyone calling the
+  // operator -- see stationAccumulator.ts/connectionLines.ts.
+  const accumulatedStations = useMemo(
+    () => buildAccumulatedStations(allSlotMessages, myCall, resolveGrid),
+    [allSlotMessages, myCall, resolveGrid],
+  );
+  const accumulatedLines = useMemo(
+    () => buildConnectionLines(accumulatedStations, txTarget),
+    [accumulatedStations, txTarget],
+  );
+
+  // One shared marker shape for whichever mode is active, pre-filtered by
+  // the Decodes/Worked layer chips -- both the click hit-test and the draw
+  // loop below read this instead of duplicating the per-mode branch twice.
+  const activeMarkers = useMemo(() => {
+    const raw = trackerOn
+      ? slot.markers.map((m) => ({ callsign: m.callsign, grid: m.grid, label: m.message.text }))
+      : accumulatedStations.map((s) => ({ callsign: s.callsign, grid: s.grid, label: s.message.text }));
+    return raw
+      .map((m) => ({
+        ...m,
+        worked: workedCalls.has(m.callsign) || workedCallsAnyBand.has(m.callsign),
+      }))
+      .filter((m) => isStationVisible(m.worked, decodesLayer, workedLayer));
+  }, [trackerOn, slot.markers, accumulatedStations, workedCalls, workedCallsAnyBand, decodesLayer, workedLayer]);
 
   const myPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
 
@@ -1373,7 +1432,7 @@ function MapScreen({
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
       let best: { call: string; d2: number } | null = null;
-      for (const m of slot.markers) {
+      for (const m of activeMarkers) {
         const pos = gridToLatLon(m.grid);
         if (!pos) continue;
         const p = vp.projectLatLon(pos.lat, pos.lon);
@@ -1510,39 +1569,66 @@ function MapScreen({
       }
     }
 
-    // QSO lines: the two real stations in each directed exchange this
-    // slot, not "me" to them (see gridTrackerSlot.ts).
-    for (const line of slot.lines) {
-      const fromPos = gridToLatLon(line.fromGrid);
-      const toPos = gridToLatLon(line.toGrid);
-      if (!fromPos || !toPos) continue;
-      const from = vp.projectLatLon(fromPos.lat, fromPos.lon);
-      const to = vp.projectLatLon(toPos.lat, toPos.lon);
-      ctx.beginPath();
-      ctx.moveTo(from.x, from.y);
-      ctx.lineTo(to.x, to.y);
-      ctx.strokeStyle = line.involvesMyCall ? MAP_LINE_MY_CALL : MAP_LINE_OTHER;
-      ctx.lineWidth = line.involvesMyCall ? 2 : 1.5;
-      ctx.stroke();
+    // Lines: Tracker on draws the two real stations in each directed
+    // exchange this slot (see gridTrackerSlot.ts); Tracker off draws from
+    // the operator's own position instead -- a solid line to the live TX
+    // target, dashed lines from anyone calling the operator (see
+    // connectionLines.ts; the operator end is implicit/shared there, not
+    // stored per-line).
+    if (trackerOn) {
+      for (const line of slot.lines) {
+        const fromPos = gridToLatLon(line.fromGrid);
+        const toPos = gridToLatLon(line.toGrid);
+        if (!fromPos || !toPos) continue;
+        const from = vp.projectLatLon(fromPos.lat, fromPos.lon);
+        const to = vp.projectLatLon(toPos.lat, toPos.lon);
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.strokeStyle = line.involvesMyCall ? MAP_LINE_MY_CALL : MAP_LINE_OTHER;
+        ctx.lineWidth = line.involvesMyCall ? 2 : 1.5;
+        ctx.stroke();
+      }
+    } else if (myPos) {
+      const from = vp.projectLatLon(myPos.lat, myPos.lon);
+      for (const line of accumulatedLines) {
+        const toPos = gridToLatLon(line.toGrid);
+        if (!toPos) continue;
+        const to = vp.projectLatLon(toPos.lat, toPos.lon);
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        if (line.style === "SOLID_TX") {
+          ctx.setLineDash([]);
+          ctx.strokeStyle = MAP_LINE_MY_CALL;
+          ctx.lineWidth = 2;
+        } else {
+          ctx.setLineDash([6, 4]);
+          ctx.strokeStyle = MAP_LINE_OTHER;
+          ctx.lineWidth = 1.5;
+        }
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
     }
 
-    // CQ markers, tinted by worked status (same sets the Decode list uses),
-    // filtered by the Decodes/Worked layer chips (isStationVisible
-    // partitions by worked status, not additively -- see gridTrackerSlot.ts).
-    for (const marker of slot.markers) {
-      const worked = workedCalls.has(marker.callsign) || workedCallsAnyBand.has(marker.callsign);
-      if (!isStationVisible(worked, decodesLayer, workedLayer)) continue;
+    // Station markers, tinted by worked status (same sets the Decode list
+    // uses) -- already filtered by the Decodes/Worked layer chips and
+    // resolved to whichever mode (Tracker on/off) is active; see
+    // `activeMarkers` above.
+    for (const marker of activeMarkers) {
       const pos = gridToLatLon(marker.grid);
       if (!pos) continue;
       const p = vp.projectLatLon(pos.lat, pos.lon);
       const isSelected = marker.callsign === selected;
-      const fill = worked ? "#4ade80" : "#ffaf5e"; // --ok / --accent
+      const fill = marker.worked ? "#4ade80" : "#ffaf5e"; // --ok / --accent
       const r = isSelected ? 9 : 6;
       drawCqMarker(ctx, p.x, p.y, fill, r);
       if (isSelected) {
         ctx.font = "11px sans-serif";
         ctx.fillStyle = "#e7ecf3";
-        ctx.fillText(`${marker.callsign} -- ${marker.message.text}`, p.x + r + 3, p.y + 3);
+        ctx.fillText(`${marker.callsign} -- ${marker.label}`, p.x + r + 3, p.y + 3);
       }
     }
   }, [
@@ -1552,14 +1638,14 @@ function MapScreen({
     landRings,
     countryRings,
     slot,
+    trackerOn,
+    accumulatedLines,
+    activeMarkers,
+    myPos,
     selected,
     nowMs,
-    workedCalls,
-    workedCallsAnyBand,
     tileTick,
     grayLineEnabled,
-    decodesLayer,
-    workedLayer,
     pskOverlayEnabled,
     pskSpots,
   ]);
@@ -1594,6 +1680,9 @@ function MapScreen({
         <div className={"chip" + (grayLineEnabled ? " active" : "")} onClick={toggleGrayLine}>
           Gray line
         </div>
+        <div className={"chip" + (trackerOn ? " active" : "")} onClick={toggleTracker}>
+          Tracker
+        </div>
         {pskOverlayEnabled && (
           <div
             className={"chip" + (filterSheetOpen ? " active" : "")}
@@ -1613,7 +1702,13 @@ function MapScreen({
           onWheel={onWheel}
         />
         <div className="map-overlay-top muted">
-          {slot.markers.length} CQ &middot; {slot.lines.length} QSO this cycle
+          {trackerOn ? (
+            <>
+              {slot.markers.length} CQ &middot; {slot.lines.length} QSO this cycle
+            </>
+          ) : (
+            <>{activeMarkers.length} stations tracked</>
+          )}
           {pskError && <div className="map-psk-error">PSK: {pskError}</div>}
         </div>
         <button type="button" className="map-recenter" onClick={recenter} disabled={!myPos} title="Center on my grid">
@@ -2687,6 +2782,7 @@ function DecodeScreen(props: {
   myGrid: string;
   myCall: string;
   dialHz: number;
+  txTarget: string | null;
   operatingMode: OperatingMode;
   filter: Filter;
   setFilter: (f: Filter) => void;
@@ -2710,7 +2806,7 @@ function DecodeScreen(props: {
   onToggleMessages: () => void;
 }) {
   const {
-    rightPane, messages, sortMode, myGrid, myCall, dialHz, operatingMode, filter, setFilter,
+    rightPane, messages, sortMode, myGrid, myCall, dialHz, txTarget, operatingMode, filter, setFilter,
     workedCalls, workedCallsAnyBand, workedGrids,
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
@@ -2862,6 +2958,7 @@ function DecodeScreen(props: {
               myGrid={myGrid}
               myCall={myCall}
               dialHz={dialHz}
+              txTarget={txTarget}
             />
           ) : (
             <>

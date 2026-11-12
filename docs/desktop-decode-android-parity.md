@@ -1364,3 +1364,51 @@ the real response is genuinely empty (this station has no reception
 reports in the window queried), not a silent failure. The filter
 sheet's Time/Mode/Direction chips render and update state correctly,
 triggering a refetch on change.
+
+## Done this round, part 18: Tracker toggle (phase 3 of the Map-screen port, roadmap complete for now)
+
+Last item from the user's own sequencing ("leave tracker until last b[ut]
+we will also implement it"). Confirmed before writing any code that
+Android's Tracker toggle is a data-source swap, not a second renderer:
+Tracker on (`GridTrackerPanel`/`GridOsmMapView`, already desktop's whole
+Map screen since phase 1) shows only the current decode slot, cleared
+every cycle; Tracker off (`MapScreen.kt`'s own `stations` builder) keeps
+one marker per callsign ever decoded, with lines only for two specific
+things via `ConnectionLines.kt` -- a solid line to the live TX target,
+dashed lines from anyone calling the operator -- not general QSO-exchange
+lines between arbitrary pairs. This meant phase 3 needed no Azimuthal
+projection and no `drawStationLayers`-style rewrite, simplifying it well
+below this file's own earlier "two full rendering systems" framing.
+
+New `desktop/src/stationAccumulator.ts` (`buildAccumulatedStations`) and
+`desktop/src/connectionLines.ts` (`buildConnectionLines`, port of
+`ConnectionLines.kt`) are both pure, feeding the exact same
+`drawCqMarker`/`isStationVisible` drawing phases 1-2 already built --
+only the data source changes on toggle. Confirmed first (not assumed)
+that `App.tsx`'s decoded-message state is newest-first
+(`[...fresh, ...prev]`), so "first occurrence per callsign" is already
+"latest wins," no reversal needed; and that the live TX target
+(`txState.status.target`, already real frontend state from
+`QsoStatus.target` in `qso.rs`/`engine.rs`) simply wasn't threaded past
+`App.tsx` to `MapScreen` yet -- added as a plain prop, no backend changes
+this phase at all.
+
+One pre-existing limitation knowingly inherited, not introduced:
+`MapScreen`'s `messages` prop is already the Decode screen's filtered
+list (whatever chip is active, `All` by default), not a guaranteed-
+unfiltered history -- Tracker-on already lived with this; Tracker-off
+does too.
+
+Verified live against real decode traffic: Tracker on behaves exactly as
+before ("N CQ · N QSO this cycle", clearing every ~15s). Toggling off
+immediately switches the counter to "N stations tracked" and the count
+was observed growing across real cycles without resetting (25 -> 50
+tracked stations over two checks), the definitive proof the accumulator
+persists rather than re-deriving from the current slot. Toggling back on
+correctly reverted to slot-scoped behavior.
+
+This closes the three phases the user asked to sequence (tile basemap,
+header chips/PSK Reporter, Tracker). Azimuthal projection and the
+remaining polish items (state borders/labels, marker SNR/selection
+styling, a richer selected-station card) are still on the roadmap above,
+not yet requested to start.
