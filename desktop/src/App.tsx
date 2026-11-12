@@ -95,7 +95,7 @@ import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type
 import { EquirectViewport, minScaleForLatitude, scalePanForZoom, type Viewport } from "./mapViewport";
 import { AzimuthalViewport } from "./azimuthalViewport";
 import { COMPASS_DIRECTIONS, compassVector, RANGE_RING_KMS, rangeRingRadiusPx } from "./azimuthalProjection";
-import { snrTint } from "./markerStyle";
+import { isNewZoneStation, markerColorForWorkedStatus, snrTint, workedBandStatus } from "./markerStyle";
 import { tileLonLatBounds, tileZoomForViewport } from "./mapProjection";
 import {
   buildGridTrackerSlot,
@@ -1140,12 +1140,14 @@ const MAP_STATE_STROKE_RGB = "148, 163, 184"; // matches MAP_COUNTRY_STROKE's ow
 interface MapSlotMessage extends SlotMessage {
   text: string;
   snr: number;
+  dxccPrefix: string | null;
+  cqZone: number | null;
 }
 
 function toSlotMessage(m: UiMessage): MapSlotMessage {
   return {
     callFrom: m.call_from, callTo: m.call_to, isCq: m.is_cq, grid: m.grid, utcMs: m.utc_ms, text: m.text,
-    snr: m.snr,
+    snr: m.snr, dxccPrefix: m.dxcc_prefix, cqZone: m.cq_zone,
   };
 }
 
@@ -1154,6 +1156,8 @@ function MapScreen({
   operatingMode,
   workedCalls,
   workedCallsAnyBand,
+  workedDxccPrefixes,
+  workedCqZones,
   myGrid,
   myCall,
   dialHz,
@@ -1163,6 +1167,8 @@ function MapScreen({
   operatingMode: OperatingMode;
   workedCalls: Set<string>;
   workedCallsAnyBand: Set<string>;
+  workedDxccPrefixes: Set<string>;
+  workedCqZones: Set<number>;
   myGrid: string;
   myCall: string;
   dialHz: number;
@@ -1405,17 +1411,38 @@ function MapScreen({
   // One shared marker shape for whichever mode is active, pre-filtered by
   // the Decodes/Worked layer chips -- both the click hit-test and the draw
   // loop below read this instead of duplicating the per-mode branch twice.
+  // `message` is kept (not just the fields drawn today) so Tracker-on's
+  // popup (below) can read SNR/grid/DXCC-zone newness and hand `call_from`/
+  // `grid`/`snr` straight to `api.answer` -- the same "call this station
+  // now" action a Decode-row click already triggers (`onAnswer`).
   const activeMarkers = useMemo(() => {
     const raw = trackerOn
-      ? slot.markers.map((m) => ({ callsign: m.callsign, grid: m.grid, label: m.message.text, snr: m.message.snr }))
-      : accumulatedStations.map((s) => ({ callsign: s.callsign, grid: s.grid, label: s.message.text, snr: s.message.snr }));
+      ? slot.markers.map((m) => ({ callsign: m.callsign, grid: m.grid, label: m.message.text, snr: m.message.snr, message: m.message }))
+      : accumulatedStations.map((s) => ({ callsign: s.callsign, grid: s.grid, label: s.message.text, snr: s.message.snr, message: s.message }));
     return raw
-      .map((m) => ({
-        ...m,
-        worked: workedCalls.has(m.callsign) || workedCallsAnyBand.has(m.callsign),
-      }))
+      .map((m) => {
+        const status = workedBandStatus(m.callsign, workedCalls, workedCallsAnyBand);
+        const isNewZone = isNewZoneStation(
+          status,
+          m.message.dxccPrefix,
+          m.message.cqZone,
+          workedDxccPrefixes,
+          workedCqZones,
+        );
+        return { ...m, worked: status.workedThisBand || status.workedOtherBand, ...status, isNewZone };
+      })
       .filter((m) => isStationVisible(m.worked, decodesLayer, workedLayer));
-  }, [trackerOn, slot.markers, accumulatedStations, workedCalls, workedCallsAnyBand, decodesLayer, workedLayer]);
+  }, [
+    trackerOn,
+    slot.markers,
+    accumulatedStations,
+    workedCalls,
+    workedCallsAnyBand,
+    workedDxccPrefixes,
+    workedCqZones,
+    decodesLayer,
+    workedLayer,
+  ]);
 
   const myPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
 
@@ -1484,13 +1511,19 @@ function MapScreen({
       setSelected((prev) => (best ? best.call : prev === null ? null : null));
     }
   }
-  function onWheel(e: WheelEvent<HTMLCanvasElement>) {
-    e.preventDefault();
-    const next = Math.min(20, Math.max(1, userScale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  // Shared by the scroll wheel and the +/- buttons -- neither is anchored to
+  // a cursor position (this panel has no mouse on a touch-only SBC), so both
+  // just scale the existing pan in place, same as `onWheel` always has.
+  function zoomBy(factor: number) {
+    const next = Math.min(20, Math.max(1, userScale * factor));
     const vp = makeViewport(next);
     setUserScale(next);
     const scaledPan = scalePanForZoom(pan, userScale, next);
     setPan(vp.clampPan(scaledPan.x, scaledPan.y));
+  }
+  function onWheel(e: WheelEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15);
   }
   function recenter() {
     if (!myPos) return;
@@ -1511,10 +1544,12 @@ function MapScreen({
     setPan(vp.panToCenter(myPos.lat, myPos.lon));
   }
 
-  // Draw. Re-runs whenever anything visible changes; the canvas itself is
-  // the only thing touched (no React children to diff), so an imperative
-  // redraw is simpler and cheaper than modeling the map as DOM/SVG nodes.
-  useEffect(() => {
+  // Draw. Called on every render-triggering change via the effect below,
+  // and also directly (bypassing React) by the direction-sweep animation
+  // loop further down -- the canvas itself is the only thing touched (no
+  // React children to diff), so an imperative redraw is simpler and
+  // cheaper than modeling the map as DOM/SVG nodes either way.
+  function drawMap() {
     const canvas = canvasRef.current;
     if (!canvas || size.w === 0 || size.h === 0) return;
     const dpr = window.devicePixelRatio || 1;
@@ -1725,6 +1760,18 @@ function MapScreen({
     // connectionLines.ts; the operator end is implicit/shared there, not
     // stored per-line).
     if (trackerOn) {
+      // Direction sweep: a moving highlighted segment traveling from the
+      // caller (fromGrid) toward the receiver (toGrid), looping every
+      // second -- ported from GridPolyLine's DirectionLineAnimator
+      // (Android), which slices a green ~15px segment along the same 0-1s
+      // repeating loop to suggest propagation direction (not a literal
+      // arrowhead). Approximated here as a straight screen-space segment,
+      // matching how the base line itself is already drawn (not a
+      // geodesic curve). `drawMap` is called continuously by the rAF loop
+      // below whenever there's a line to animate, so reading the fraction
+      // straight off the clock (not React state) is enough to animate.
+      const sweepFrac = (performance.now() % 1000) / 1000;
+      const sliceFrac = 0.12;
       for (const line of slot.lines) {
         const fromPos = gridToLatLon(line.fromGrid);
         const toPos = gridToLatLon(line.toGrid);
@@ -1738,6 +1785,20 @@ function MapScreen({
         ctx.strokeStyle = line.involvesMyCall ? MAP_LINE_MY_CALL : MAP_LINE_OTHER;
         ctx.lineWidth = line.involvesMyCall ? 2 : 1.5;
         ctx.stroke();
+
+        const segStart = Math.max(0, sweepFrac - sliceFrac);
+        const sx = from.x + (to.x - from.x) * segStart;
+        const sy = from.y + (to.y - from.y) * segStart;
+        const ex = from.x + (to.x - from.x) * sweepFrac;
+        const ey = from.y + (to.y - from.y) * sweepFrac;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.strokeStyle = "#22ff66";
+        ctx.lineWidth = line.involvesMyCall ? 4 : 3;
+        ctx.lineCap = "round";
+        ctx.stroke();
+        ctx.lineCap = "butt";
       }
     } else if (myPos) {
       const from = vp.projectLatLon(myPos.lat, myPos.lon);
@@ -1771,19 +1832,26 @@ function MapScreen({
       if (!pos) continue;
       const p = vp.projectLatLon(pos.lat, pos.lon);
       const isSelected = marker.callsign === selected;
-      const baseColor = marker.worked ? "#4ade80" : "#ffaf5e"; // --ok / --accent
+      const baseColor = markerColorForWorkedStatus(marker);
       // Selection means full opacity regardless of SNR -- matches
       // Android's own markerStyleFor priority order exactly.
       const fill = isSelected ? baseColor : snrTint(baseColor, marker.snr);
       const r = isSelected ? 9 : 6;
       drawCqMarker(ctx, p.x, p.y, fill, r);
-      if (isSelected) {
+      // Tracker-off keeps the old inline canvas label on selection -- it
+      // has no popup system of its own (Android's equivalent there is a
+      // separate, not-yet-built SelectedStationCard, out of scope here).
+      // Tracker-on's selection instead renders a real popup box below,
+      // matching GridMarkerInfoWindow.
+      if (isSelected && !trackerOn) {
         ctx.font = "11px sans-serif";
         ctx.fillStyle = "#e7ecf3";
         ctx.fillText(`${marker.callsign} -- ${marker.label}`, p.x + r + 3, p.y + 3);
       }
     }
-  }, [
+  }
+
+  const drawMapDeps = [
     size,
     userScale,
     pan,
@@ -1801,13 +1869,80 @@ function MapScreen({
     pskOverlayEnabled,
     pskSpots,
     projectionMode,
-  ]);
+  ];
+  useEffect(() => {
+    drawMap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, drawMapDeps);
+
+  // Keeps the direction-sweep animation (above) moving for as long as
+  // Tracker-on has a line to animate -- ported from DirectionLineAnimator
+  // (Android), whose infinite ValueAnimator calls `mapView.invalidate()`
+  // every frame for as long as the line exists. A ref (not the effect's own
+  // closure) is called each tick so every frame redraws with the *current*
+  // render's pan/zoom/selection, not whatever was in scope when the loop
+  // started; the effect itself only needs to start/stop the loop, so it
+  // depends on nothing but whether there's anything to animate right now.
+  // Throttled to ~15fps (vs. Android's 60fps display refresh): this runs on
+  // a weak ARM SBC and a full canvas redraw backs every tick, so this still
+  // reads as a smooth sweep while costing a lot less than every frame.
+  const drawMapRef = useRef(drawMap);
+  drawMapRef.current = drawMap;
+  const hasAnimatedLines = trackerOn && slot.lines.length > 0;
+  useEffect(() => {
+    if (!hasAnimatedLines) return;
+    let raf = 0;
+    let last = 0;
+    function tick(t: number) {
+      if (t - last >= 66) {
+        last = t;
+        drawMapRef.current();
+      }
+      raf = requestAnimationFrame(tick);
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [hasAnimatedLines]);
 
   const opPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
   const signalReach = useMemo(
     () => summarizeSignalReach(pskSpots, opPos?.lat ?? null, opPos?.lon ?? null),
     [pskSpots, opPos],
   );
+
+  // Tracker-on's CQ labels (rendered below), matching GridMarkerInfoWindow's
+  // real fork customization -- confirmed directly in GridOsmMapView.java's
+  // `showNewInfoWindows()`: on the Map tab panel (`isCompactInfo`), *every*
+  // CQ marker's box auto-shows (not just "new" ones, unlike the full
+  // GridTracker activity), and GridMarkerInfoWindow's own compact branch
+  // strips each box down to one line -- message text + a small inline call
+  // button, no icons/SNR/distance. That's the actual anti-clutter design:
+  // always show a box per marker, but keep each one minimal, not "fewer,
+  // bigger boxes shown only on tap" (what this screen built first, before
+  // being corrected against the real fork source). Position is plain
+  // render-time math (not a hook): `vp` already depends only on
+  // already-reactive state (pan/scale/size/projection/operator position),
+  // so this recomputes correctly on every render exactly the way the draw
+  // effect's own `vp` does. Culled to roughly the visible canvas (with a
+  // small margin) -- `.map-screen` clips overflow either way, but skipping
+  // the DOM node entirely for anything off-screen matters more here than it
+  // did for a single popup, since this can now be dozens of simultaneous
+  // CQ labels on a busy band.
+  const cqLabels = trackerOn
+    ? (() => {
+        const vp = makeViewport(userScale);
+        const margin = 80;
+        const out: { marker: (typeof activeMarkers)[number]; x: number; y: number }[] = [];
+        for (const marker of activeMarkers) {
+          const pos = gridToLatLon(marker.grid);
+          if (!pos) continue;
+          const p = vp.projectLatLon(pos.lat, pos.lon);
+          if (p.x < -margin || p.x > size.w + margin || p.y < -margin || p.y > size.h + margin) continue;
+          out.push({ marker, x: p.x, y: p.y });
+        }
+        return out;
+      })()
+    : [];
 
   return (
     <>
@@ -1870,6 +2005,26 @@ function MapScreen({
         <button type="button" className="map-recenter" onClick={recenter} disabled={!myPos} title="Center on my grid">
           Me
         </button>
+        <div className="map-zoom">
+          <button
+            type="button"
+            onClick={() => zoomBy(1.4)}
+            disabled={userScale >= 20}
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            onClick={() => zoomBy(1 / 1.4)}
+            disabled={userScale <= 1}
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            &minus;
+          </button>
+        </div>
         {pskOverlayEnabled && filterSheetOpen && (
           <PskFilterSheet filter={pskFilter} onChange={setPskFilter} />
         )}
@@ -1877,8 +2032,73 @@ function MapScreen({
           !filterSheetOpen &&
           pskFilter.direction === "WHO_HEARD_ME" &&
           signalReach && <SignalReachCard reach={signalReach} />}
+        {cqLabels.map(({ marker, x, y }) => (
+          <TrackerCqLabel
+            key={marker.callsign}
+            marker={marker}
+            screenX={x}
+            screenY={y}
+            myCall={myCall}
+            onCall={() =>
+              api.answer({
+                call_from: marker.message.callFrom,
+                grid: marker.message.grid,
+                snr: marker.message.snr,
+              })
+            }
+          />
+        ))}
       </div>
     </>
+  );
+}
+
+/**
+ * Tracker-on's always-on CQ label -- ported from `GridMarkerInfoWindow.java`'s
+ * *compact* branch, which is specifically the fork's own customization for
+ * this embedded panel (`GridOsmMapView.isCompactInfo`): rather than the full
+ * GridTracker activity's behavior (a detailed box, shown only for a "new"
+ * station), the Map tab panel auto-shows a box for *every* CQ marker but
+ * strips each one down to a single line -- message text (struck through
+ * once worked this band, matching the Kotlin source's
+ * `Paint.STRIKE_THRU_TEXT_FLAG` toggle) plus a small inline call button, no
+ * icons/SNR/distance. That's the real anti-clutter design: always show,
+ * but keep each box minimal, not "fewer, bigger boxes shown only on tap"
+ * (what this screen built first, before being corrected against the actual
+ * fork source). The call button is wired straight to `api.answer` -- the
+ * same "call this station now" IPC call a Decode-row click already makes,
+ * matching `doCallNow()`. A highlighted border still applies for a
+ * not-yet-worked DXCC/CQ-zone station (`isNewZone`), since that styling is
+ * unconditional in the source, not part of the compact/full split.
+ */
+function TrackerCqLabel({
+  marker,
+  screenX,
+  screenY,
+  myCall,
+  onCall,
+}: {
+  marker: {
+    callsign: string;
+    label: string;
+    workedThisBand: boolean;
+    isNewZone: boolean;
+  };
+  screenX: number;
+  screenY: number;
+  myCall: string;
+  onCall: () => void;
+}) {
+  const isMe = marker.callsign.toUpperCase() === myCall.trim().toUpperCase();
+  return (
+    <div className={"map-cq-label" + (marker.isNewZone ? " new-zone" : "")} style={{ left: screenX, top: screenY }}>
+      <span className={marker.workedThisBand ? "worked" : undefined}>{marker.label}</span>
+      {!isMe && (
+        <button type="button" onClick={onCall} title={`Call ${marker.callsign} now`} aria-label={`Call ${marker.callsign} now`}>
+          &#9658;
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -3111,6 +3331,8 @@ function DecodeScreen(props: {
               operatingMode={operatingMode}
               workedCalls={workedCalls}
               workedCallsAnyBand={workedCallsAnyBand}
+              workedDxccPrefixes={workedDxccPrefixes}
+              workedCqZones={workedCqZones}
               myGrid={myGrid}
               myCall={myCall}
               dialHz={dialHz}

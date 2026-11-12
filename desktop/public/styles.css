@@ -264,6 +264,73 @@ select option {
   cursor: pointer;
 }
 .map-recenter:disabled { opacity: 0.5; cursor: not-allowed; }
+.map-zoom {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.map-zoom button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.map-zoom button:disabled { opacity: 0.5; cursor: not-allowed; }
+/* One compact box per CQ marker, always shown while Tracker is on (not
+   gated by tap/selection) -- see TrackerCqLabel's doc comment for why this
+   is the real anti-clutter design the fork settled on: many thin one-line
+   boxes, not a few detailed ones. */
+.map-cq-label {
+  position: absolute;
+  transform: translate(8px, -50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: rgba(14, 19, 30, 0.82);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 4;
+}
+.map-cq-label.new-zone { border-color: var(--accent); background: var(--accent-soft); }
+.map-cq-label span.worked { text-decoration: line-through; color: var(--muted); font-weight: 400; }
+.map-cq-label button {
+  pointer-events: auto;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #07090f;
+  font-size: 7px;
+  line-height: 1;
+  cursor: pointer;
+}
 .map-psk-error { color: var(--yellow); margin-top: 2px; pointer-events: none; }
 .map-filter-sheet, .map-signal-reach {
   position: absolute;
