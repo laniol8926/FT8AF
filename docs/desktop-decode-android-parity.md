@@ -1412,3 +1412,110 @@ header chips/PSK Reporter, Tracker). Azimuthal projection and the
 remaining polish items (state borders/labels, marker SNR/selection
 styling, a richer selected-station card) are still on the roadmap above,
 not yet requested to start.
+
+## Done this round, part 19: Azimuthal projection, state borders/labels, marker SNR tint -- plus two real pan/zoom bugs found live
+
+User asked for all three together, with an explicit instruction to verify
+the compass-bearing direction arrows are actually correct, not just
+visually plausible. Took that literally: `azProject`'s resulting screen
+angle (via `atan2(x,-y)`) is cross-checked in `azimuthalProjection.test.ts`
+against the already-tested `computeBearing` for five real city pairs
+spanning all four quadrants, before any rendering code existed, and the
+screen vector for a compass bearing (`dx = sin(theta), dy = -cos(theta)`)
+is derived from first principles rather than transcribed from Android's
+own internal rotation.
+
+**Azimuthal (radar) projection**: one small `Viewport` interface
+(`projectLatLon`/`clampPan`/`panToCenter`/`pxPerLonDegree`, `mapViewport.ts`)
+let `EquirectViewport` and the new `AzimuthalViewport` be swapped from a
+single `makeViewport()` factory in `MapScreen`, instead of duplicating the
+six call sites that used to construct `EquirectViewport` inline. New
+`azimuthalProjection.ts` (`azProject`, range rings, compass directions) and
+`azimuthalViewport.ts` port Android's azimuthal pan/zoom rule exactly: pan
+is only allowed once zoomed in past 1x, and "Me" is just a scale/pan reset,
+since centering is baked into the projection itself via the operator's own
+lat/lon, not a pannable offset. The whole globe maps into the unit disc
+exactly (radius 1 = antipode), so -- unlike the equirect tiles -- this is
+the one case where clipping to the disc is a correctness requirement, not
+an optimization.
+
+Found and fixed live, not just in a screenshot glance: the 8 compass
+labels (drawn `discRadiusPx + 12`px outward from a fixed center, as UI
+chrome that doesn't pan or scale) were landing right at or past the
+panel's own edge, so N/E/S/W were invisible even though the underlying
+math -- and the always-visible NE/SE/SW/NW intercardinals -- was already
+correct. Fixed with a `COMPASS_LABEL_MARGIN_PX = 28` reservation in
+`discRadiusPx`'s own computation; re-verified live, all 8 labels now sit
+inside the panel with N at top, E at right, S at bottom, W at left.
+
+**State borders/labels**: `us_states.json` copied verbatim from the
+Android repo's bundled resource; `worldOutlines.ts` gained
+`US_STATE_ABBR`, `ringSignedArea`/`ringCentroid` (shoelace formula, with a
+plain-vertex-mean fallback for a degenerate ring), `largestOuterRing` (so
+Hawaii's MultiPolygon labels its main island, not a small one), and
+`stateBorderAlpha` (linear fade between two `pxPerLonDegree` thresholds).
+Deliberately not porting Android's `regionNameAt`/`UsStateLocator`
+point-in-polygon lookup -- desktop already answers "which state is this
+point in" a different way, via a backend grid-square table used by the
+Decode list's New-State filter, unrelated to map rendering.
+
+**Marker SNR tint**: `markerStyle.ts`'s `snrTint` ports `MarkerStyle.kt`'s
+formula exactly (`t = clamp((snr+24)/34, 0, 1)`, `alpha = 0.78 + 0.22*t`);
+selection still means full opacity regardless of SNR, matching Android's
+own priority order. Required threading `snr` through `MapSlotMessage` --
+it existed on `UiMessage` but the Map screen's slimmed-down shape had been
+dropping it.
+
+### Two real bugs found during live verification, not assumed away
+
+The user caught both live, by eye, while this round's verification was
+still in progress -- their own grid rendering in "northern Illinois" and
+"most of the US grids show up in Canada" turned out to describe two
+separate, real, pre-existing bugs (both present since phase 1, neither
+introduced this round), not a data or projection-math problem:
+
+1. **The grid math and tile archive were independently verified correct
+   first**, before suspecting the rendering code -- `gridToLatLon("EM71")`
+   by hand, a temporary on-canvas debug overlay plotting known reference
+   points (equator, poles) that landed exactly where hand-calculated pixel
+   math predicted, and a direct RGB sample of the operator's own tile
+   pixel (`(55, 49, 17)`, real land color) plus a seamless stitch of two
+   adjacent tiles across their shared seam (confirming the archive's key
+   formula). All correct. The bug was downstream, in interaction state.
+
+2. **`onWheel` never scaled the pan offset when zooming** (`App.tsx`,
+   present since the original phase-1 commit) -- it re-clamped the same
+   raw `pan.x`/`pan.y` pixel offset to the new scale's bounds, but a fixed
+   pixel offset covers progressively fewer degrees as the world scales up,
+   so every zoom step silently dragged the visible center back toward the
+   unpanned origin (lon 0, lat 0). Confirmed live: zooming in while already
+   panned over the US kept sliding the view back toward Greenwich/the
+   equator. Fixed with a new pure `scalePanForZoom(pan, oldScale, newScale)`
+   (`mapViewport.ts`, 4 new tests, including a regression test that the
+   point at canvas center stays at canvas center across a zoom step) --
+   `onWheel` now scales `pan` by the same ratio as the scale change before
+   clamping.
+
+3. **`drawStateBorders()` was called before the tile-drawing loop** in
+   equirect mode, so the instant a tile bitmap finished loading, its
+   opaque JPEG painted directly over the border lines and labels drawn
+   just beneath it -- state borders could never actually appear in tile
+   mode, no matter how far zoomed in. Caught by zooming in well past the
+   fade-in threshold over real US terrain and seeing nothing. Fixed by
+   moving the `drawStateBorders()` call to after the tile loop, so borders
+   draw on top of the satellite imagery as intended.
+
+Re-verified live after both fixes, from a clean rebuild: zooming in while
+panned over the southeastern US now stays put instead of drifting away,
+and state border lines with 2-letter labels (TX, LA, MS, AL, GA, FL, TN,
+NC, SC, KY, VA, WV, IL, IN, ...) are clearly visible over real satellite
+terrain, correctly positioned relative to each other. Marker opacity was
+confirmed visibly varying with real decode SNR in Tracker-off mode (32
+accumulated stations, clearly different vividness between a strong and a
+weak signal's marker).
+
+This completes the phase-4 polish item from the roadmap above. The one
+remaining roadmap item (the rest of `MarkerStyle.kt`'s shape variety for
+isCQ/isToMe, zoom-dependent label visibility, `ConnectionLines.kt` styling
+refinements, a richer selected-station detail card with bearing/distance)
+is not yet requested to start.

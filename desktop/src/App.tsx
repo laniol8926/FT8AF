@@ -92,7 +92,10 @@ import { formatDecodeDt, formatDecodeFreq, isDecodeDtNotable } from "./decodeRow
 import { wpxPrefixOf } from "./wpxPrefix";
 import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
 import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
-import { EquirectViewport } from "./mapViewport";
+import { EquirectViewport, scalePanForZoom, type Viewport } from "./mapViewport";
+import { AzimuthalViewport } from "./azimuthalViewport";
+import { COMPASS_DIRECTIONS, compassVector, RANGE_RING_KMS, rangeRingRadiusPx } from "./azimuthalProjection";
+import { snrTint } from "./markerStyle";
 import { tileLonLatBounds, tileZoomForViewport } from "./mapProjection";
 import {
   buildGridTrackerSlot,
@@ -114,9 +117,10 @@ import {
   type PskMode,
 } from "./pskFilter";
 import { summarizeSignalReach } from "./signalReach";
-import { forEachRingVertex, parseGeoJsonRings } from "./worldOutlines";
+import { forEachRingVertex, parseGeoJsonRings, parseStateLabels, stateBorderAlpha } from "./worldOutlines";
 import worldLandGeoJson from "./map-data/world_land.json";
 import worldCountriesGeoJson from "./map-data/world_countries.json";
+import usStatesGeoJson from "./map-data/us_states.json";
 
 type Tab = "decode" | "waterfall" | "log" | "settings" | "map" | "pota";
 type Filter = "all" | "cq" | "pota" | "dxcc" | "zone" | "state" | "grid" | "prefix" | "needed" | "tome";
@@ -1127,16 +1131,21 @@ const PSK_POLL_INTERVAL_MS = 5 * 60 * 1000;
 // runtime fetch.
 const MAP_LAND_RINGS = parseGeoJsonRings(worldLandGeoJson);
 const MAP_COUNTRY_RINGS = parseGeoJsonRings(worldCountriesGeoJson);
+const MAP_STATE_RINGS = parseGeoJsonRings(usStatesGeoJson);
+const MAP_STATE_LABELS = parseStateLabels(usStatesGeoJson);
+const MAP_STATE_STROKE_RGB = "148, 163, 184"; // matches MAP_COUNTRY_STROKE's own color, alpha-faded separately
 
 /** The decode-list fields `gridTrackerSlot.ts` needs, plus the raw text for
- *  a clicked marker's label. */
+ *  a clicked marker's label and the SNR for marker tinting. */
 interface MapSlotMessage extends SlotMessage {
   text: string;
+  snr: number;
 }
 
 function toSlotMessage(m: UiMessage): MapSlotMessage {
   return {
     callFrom: m.call_from, callTo: m.call_to, isCq: m.is_cq, grid: m.grid, utcMs: m.utc_ms, text: m.text,
+    snr: m.snr,
   };
 }
 
@@ -1203,6 +1212,39 @@ function MapScreen({
     const next = !trackerOn;
     setTrackerOn(next);
     api.setConfig("map_tracker_enabled", String(next));
+  }
+
+  // Azimuthal (radar) projection toggle. "equirect" (the default) keeps
+  // today's tile basemap + pan/zoom exactly as-is; "azimuthal" is a
+  // great-circle-centered disc, pure vector (no tiles, matching Android's
+  // own azimuthal mode by design). Pixel offsets don't carry across
+  // projections -- Android resets zoom/pan on switch, so this does too.
+  const [projectionMode, setProjectionMode] = useState<"equirect" | "azimuthal">("equirect");
+  useEffect(() => {
+    api.getConfig("map_projection_mode").then((v) => {
+      if (v === "azimuthal" || v === "equirect") setProjectionMode(v);
+    });
+  }, []);
+  useEffect(() => {
+    setUserScale(1);
+    setPan({ x: 0, y: 0 });
+  }, [projectionMode]);
+  function toggleProjection() {
+    const next = projectionMode === "equirect" ? "azimuthal" : "equirect";
+    setProjectionMode(next);
+    api.setConfig("map_projection_mode", next);
+  }
+
+  /** Constructs whichever `Viewport` the active projection needs. Every
+   *  call site below only ever calls `.clampPan`/`.projectLatLon`/
+   *  `.panToCenter`/`.pxPerLonDegree` immediately after constructing, so
+   *  this factory is the one place that branches on `projectionMode` --
+   *  the call sites themselves stay projection-agnostic. */
+  function makeViewport(scale: number, px = pan.x, py = pan.y): Viewport {
+    if (projectionMode === "azimuthal") {
+      return new AzimuthalViewport(size.w, size.h, myPos?.lat ?? 0, myPos?.lon ?? 0, scale, px, py);
+    }
+    return new EquirectViewport(size.w, size.h, scale, px, py);
   }
 
   // PSK Reporter overlay. The poll loop lives here (frontend-driven,
@@ -1365,8 +1407,8 @@ function MapScreen({
   // loop below read this instead of duplicating the per-mode branch twice.
   const activeMarkers = useMemo(() => {
     const raw = trackerOn
-      ? slot.markers.map((m) => ({ callsign: m.callsign, grid: m.grid, label: m.message.text }))
-      : accumulatedStations.map((s) => ({ callsign: s.callsign, grid: s.grid, label: s.message.text }));
+      ? slot.markers.map((m) => ({ callsign: m.callsign, grid: m.grid, label: m.message.text, snr: m.message.snr }))
+      : accumulatedStations.map((s) => ({ callsign: s.callsign, grid: s.grid, label: s.message.text, snr: s.message.snr }));
     return raw
       .map((m) => ({
         ...m,
@@ -1419,7 +1461,7 @@ function MapScreen({
     if (Math.abs(dx) > 2 || Math.abs(dy) > 2) d.moved = true;
     d.x = e.clientX;
     d.y = e.clientY;
-    const vp = new EquirectViewport(size.w, size.h, userScale, pan.x, pan.y);
+    const vp = makeViewport(userScale);
     setPan(vp.clampPan(pan.x + dx, pan.y + dy));
   }
   function onPointerUp(e: PointerEvent<HTMLCanvasElement>) {
@@ -1428,7 +1470,7 @@ function MapScreen({
     if (d && !d.moved) {
       // A click (no drag): select the nearest CQ marker within 14px, if any.
       const rect = e.currentTarget.getBoundingClientRect();
-      const vp = new EquirectViewport(size.w, size.h, userScale, pan.x, pan.y);
+      const vp = makeViewport(userScale);
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
       let best: { call: string; d2: number } | null = null;
@@ -1445,14 +1487,15 @@ function MapScreen({
   function onWheel(e: WheelEvent<HTMLCanvasElement>) {
     e.preventDefault();
     const next = Math.min(20, Math.max(1, userScale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-    const vp = new EquirectViewport(size.w, size.h, next, pan.x, pan.y);
+    const vp = makeViewport(next);
     setUserScale(next);
-    setPan(vp.clampPan(pan.x, pan.y));
+    const scaledPan = scalePanForZoom(pan, userScale, next);
+    setPan(vp.clampPan(scaledPan.x, scaledPan.y));
   }
   function recenter() {
     if (!myPos) return;
     setUserScale(1);
-    const vp = new EquirectViewport(size.w, size.h, 1);
+    const vp = makeViewport(1, 0, 0);
     setPan(vp.panToCenter(myPos.lat, myPos.lon));
   }
 
@@ -1472,7 +1515,7 @@ function MapScreen({
     ctx.fillStyle = "#07090f";
     ctx.fillRect(0, 0, size.w, size.h);
 
-    const vp = new EquirectViewport(size.w, size.h, userScale, pan.x, pan.y);
+    const vp = makeViewport(userScale);
 
     function strokeRings(rings: number[][], fill: string | null, stroke: string, width: number) {
       ctx!.beginPath();
@@ -1493,42 +1536,136 @@ function MapScreen({
       ctx!.stroke();
     }
 
-    strokeRings(landRings, MAP_LAND_FILL, MAP_LAND_STROKE, 0.75);
-    strokeRings(countryRings, null, MAP_COUNTRY_STROKE, 0.7);
-
-    // Real offline satellite tiles, drawn over the vector outlines above --
-    // which stay as the permanent placeholder for whatever hasn't finished
-    // loading yet, not a special-cased fallback. Tiles are plain
-    // equirectangular (verified empirically against the bundled archive,
-    // see map_tiles.rs), so the existing projection places them directly:
-    // no inverse-projection is needed, since a tile's screen rect is just
-    // its two corners forward-projected through the same `vp` everything
-    // else here uses. At most 2^z * 2^z candidates exist (256 at the max
-    // stored zoom), cheap to brute-force intersect against the canvas every
+    // US state borders/labels -- shared between both projections, since
+    // both read `pxPerLonDegree` off whichever `Viewport` is active.
+    // Skipped entirely (not drawn at ~0 alpha) once zoomed out past the
+    // fade threshold -- no point stroking/filling invisible text every
     // frame.
-    const tileZoom = tileZoomForViewport(vp.worldPxW);
-    const tilesPerSide = 2 ** tileZoom;
-    for (let tx = 0; tx < tilesPerSide; tx++) {
-      for (let ty = 0; ty < tilesPerSide; ty++) {
-        const bounds = tileLonLatBounds(tileZoom, tx, ty);
-        const topLeft = vp.projectLatLon(bounds.latMax, bounds.lonMin);
-        const bottomRight = vp.projectLatLon(bounds.latMin, bounds.lonMax);
-        const destW = bottomRight.x - topLeft.x;
-        const destH = bottomRight.y - topLeft.y;
-        const visible =
-          topLeft.x + destW >= 0 && topLeft.x <= size.w && topLeft.y + destH >= 0 && topLeft.y <= size.h;
-        if (!visible) continue;
-        ensureTileLoaded(tileZoom, tx, ty);
-        const bitmap = tileBitmapsRef.current.get(`${tileZoom}/${tx}/${ty}`);
-        if (bitmap) ctx.drawImage(bitmap, topLeft.x, topLeft.y, destW, destH);
+    function drawStateBorders() {
+      const alpha = stateBorderAlpha(vp.pxPerLonDegree);
+      if (alpha <= 0.02) return;
+      strokeRings(MAP_STATE_RINGS, null, `rgba(${MAP_STATE_STROKE_RGB}, ${alpha * 0.6})`, 0.6);
+      ctx!.font = "9px sans-serif";
+      ctx!.fillStyle = `rgba(${MAP_STATE_STROKE_RGB}, ${alpha})`;
+      ctx!.textAlign = "center";
+      ctx!.textBaseline = "middle";
+      for (const label of MAP_STATE_LABELS) {
+        const p = vp.projectLatLon(label.lat, label.lon);
+        ctx!.fillText(label.abbr, p.x, p.y);
       }
+      ctx!.textAlign = "start";
+      ctx!.textBaseline = "alphabetic";
+    }
+
+    if (projectionMode === "azimuthal" && myPos) {
+      // Azimuthal is pure vector (no tiles, matching Android's own
+      // azimuthal mode by design) and must clip to the disc: the whole
+      // globe maps into normalized radius 1 exactly, so there is no valid
+      // projection beyond it -- unlike the equirect tiles (phase 1), this
+      // is the one case where clipping is a correctness requirement, not
+      // a cosmetic choice.
+      const azVp = vp as AzimuthalViewport;
+      const opProjected = vp.projectLatLon(myPos.lat, myPos.lon);
+      const clipRadius = azVp.discRadiusPx * userScale;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(opProjected.x, opProjected.y, clipRadius, 0, Math.PI * 2);
+      ctx.clip();
+      strokeRings(landRings, MAP_LAND_FILL, MAP_LAND_STROKE, 0.75);
+      strokeRings(countryRings, null, MAP_COUNTRY_STROKE, 0.7);
+      drawStateBorders();
+      // Range rings pan/scale with the map (centered on the operator's
+      // current panned position) -- the five fixed Android always draws.
+      ctx.setLineDash([4, 6]);
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.25)";
+      ctx.lineWidth = 1;
+      for (const km of RANGE_RING_KMS) {
+        const radius = rangeRingRadiusPx(km, azVp.discRadiusPx, userScale);
+        ctx.beginPath();
+        ctx.arc(opProjected.x, opProjected.y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Compass bearings: a fixed UI reference, not a map feature, so they
+      // deliberately don't pan or scale -- drawn from the canvas's own
+      // fixed geometric center, length pinned to the unzoomed disc radius,
+      // outside the clip region above (matches Android's own framing of
+      // these as chrome, not map content).
+      const fixedCx = size.w / 2;
+      const fixedCy = size.h / 2;
+      for (const dir of COMPASS_DIRECTIONS) {
+        const v = compassVector(dir.angleDeg);
+        const x2 = fixedCx + v.dx * azVp.discRadiusPx;
+        const y2 = fixedCy + v.dy * azVp.discRadiusPx;
+        ctx.beginPath();
+        ctx.moveTo(fixedCx, fixedCy);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = dir.cardinal ? "rgba(255, 175, 94, 0.5)" : "rgba(148, 163, 184, 0.3)";
+        ctx.lineWidth = dir.cardinal ? 1 : 0.5;
+        ctx.stroke();
+        const lx = fixedCx + v.dx * (azVp.discRadiusPx + 12);
+        const ly = fixedCy + v.dy * (azVp.discRadiusPx + 12);
+        ctx.font = dir.cardinal ? "bold 12px sans-serif" : "10px sans-serif";
+        ctx.fillStyle = dir.cardinal ? "#ffaf5e" : "#8a96b1";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(dir.label, lx, ly);
+      }
+      ctx.textAlign = "start";
+      ctx.textBaseline = "alphabetic";
+    } else {
+      strokeRings(landRings, MAP_LAND_FILL, MAP_LAND_STROKE, 0.75);
+      strokeRings(countryRings, null, MAP_COUNTRY_STROKE, 0.7);
+
+      // Real offline satellite tiles, drawn over the vector outlines above
+      // -- which stay as the permanent placeholder for whatever hasn't
+      // finished loading yet, not a special-cased fallback. Tiles are
+      // plain equirectangular (verified empirically against the bundled
+      // archive, see map_tiles.rs), so the existing projection places them
+      // directly: no inverse-projection is needed, since a tile's screen
+      // rect is just its two corners forward-projected through the same
+      // `vp` everything else here uses. At most 2^z * 2^z candidates exist
+      // (256 at the max stored zoom), cheap to brute-force intersect
+      // against the canvas every frame.
+      const equirectVp = vp as EquirectViewport;
+      const tileZoom = tileZoomForViewport(equirectVp.worldPxW);
+      const tilesPerSide = 2 ** tileZoom;
+      for (let tx = 0; tx < tilesPerSide; tx++) {
+        for (let ty = 0; ty < tilesPerSide; ty++) {
+          const bounds = tileLonLatBounds(tileZoom, tx, ty);
+          const topLeft = vp.projectLatLon(bounds.latMax, bounds.lonMin);
+          const bottomRight = vp.projectLatLon(bounds.latMin, bounds.lonMax);
+          const destW = bottomRight.x - topLeft.x;
+          const destH = bottomRight.y - topLeft.y;
+          const visible =
+            topLeft.x + destW >= 0 && topLeft.x <= size.w && topLeft.y + destH >= 0 && topLeft.y <= size.h;
+          if (!visible) continue;
+          ensureTileLoaded(tileZoom, tx, ty);
+          const bitmap = tileBitmapsRef.current.get(`${tileZoom}/${tx}/${ty}`);
+          if (bitmap) ctx.drawImage(bitmap, topLeft.x, topLeft.y, destW, destH);
+        }
+      }
+
+      // State borders/labels drawn AFTER the tiles, not before -- the tiles
+      // are opaque JPEGs, so drawing borders first (the original order) got
+      // them completely painted over the instant a tile finished loading.
+      // Confirmed live: zoomed in well past the fade-in threshold over real
+      // US terrain, no borders ever appeared until this was reordered.
+      drawStateBorders();
     }
 
     // Gray-line terminator: translucent night fill + amber terminator stroke
     // (Android's GridOsmMapView.initMap also calls setGrayLine()). Gated on
-    // the Gray line chip -- the only part of this draw loop that's a user
-    // toggle rather than always-on.
-    if (grayLineEnabled) {
+    // the Gray line chip, and on equirect projection specifically: the
+    // night polygon's pole-closing construction (nightPolygonLatLon) is
+    // built for a rectangular equirect canvas (closing the ring through
+    // whichever pole is dark at lon=±180) and doesn't make geometric sense
+    // projected through the azimuthal disc -- an azimuthal-correct
+    // terminator would need its own geometry, out of this phase's scope,
+    // so this is skipped rather than drawn wrong.
+    if (grayLineEnabled && projectionMode === "equirect") {
       const night = nightPolygonLatLon(subsolarPoint(nowMs));
       if (night.length >= 8) {
         ctx.beginPath();
@@ -1622,7 +1759,10 @@ function MapScreen({
       if (!pos) continue;
       const p = vp.projectLatLon(pos.lat, pos.lon);
       const isSelected = marker.callsign === selected;
-      const fill = marker.worked ? "#4ade80" : "#ffaf5e"; // --ok / --accent
+      const baseColor = marker.worked ? "#4ade80" : "#ffaf5e"; // --ok / --accent
+      // Selection means full opacity regardless of SNR -- matches
+      // Android's own markerStyleFor priority order exactly.
+      const fill = isSelected ? baseColor : snrTint(baseColor, marker.snr);
       const r = isSelected ? 9 : 6;
       drawCqMarker(ctx, p.x, p.y, fill, r);
       if (isSelected) {
@@ -1648,6 +1788,7 @@ function MapScreen({
     grayLineEnabled,
     pskOverlayEnabled,
     pskSpots,
+    projectionMode,
   ]);
 
   const opPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
@@ -1682,6 +1823,9 @@ function MapScreen({
         </div>
         <div className={"chip" + (trackerOn ? " active" : "")} onClick={toggleTracker}>
           Tracker
+        </div>
+        <div className={"chip" + (projectionMode === "azimuthal" ? " active" : "")} onClick={toggleProjection}>
+          Azimuthal
         </div>
         {pskOverlayEnabled && (
           <div

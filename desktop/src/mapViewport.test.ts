@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { EquirectViewport } from "./mapViewport";
+import { EquirectViewport, scalePanForZoom } from "./mapViewport";
 
 // Ported from Android's MapViewportTest.kt.
 
@@ -64,5 +64,48 @@ describe("EquirectViewport", () => {
     const zoomed = new EquirectViewport(1080, 2000, 3);
     expect(zoomed.maxPanX()).toBeGreaterThan(base.maxPanX());
     expect(zoomed.maxPanY()).toBeGreaterThan(0);
+  });
+});
+
+describe("scalePanForZoom", () => {
+  test("zooming in scales pan up by the same ratio as the scale change", () => {
+    const p = scalePanForZoom({ x: 100, y: -40 }, 2, 4);
+    expect(p.x).toBeCloseTo(200, 6);
+    expect(p.y).toBeCloseTo(-80, 6);
+  });
+
+  test("zooming out scales pan down by the same ratio", () => {
+    const p = scalePanForZoom({ x: 200, y: -80 }, 4, 2);
+    expect(p.x).toBeCloseTo(100, 6);
+    expect(p.y).toBeCloseTo(-40, 6);
+  });
+
+  test("no scale change leaves pan unchanged", () => {
+    const p = scalePanForZoom({ x: 123, y: 456 }, 5, 5);
+    expect(p).toEqual({ x: 123, y: 456 });
+  });
+
+  test("the point at canvas center stays at canvas center across a zoom step", () => {
+    // Regression for the real bug: an unscaled pan made zooming drift back
+    // toward lon 0/lat 0 instead of staying on the point you were viewing.
+    const oldScale = 2;
+    const newScale = 3;
+    const oldPan = { x: 37, y: -19 };
+    const oldVp = new EquirectViewport(1000, 800, oldScale, oldPan.x, oldPan.y);
+
+    // Whatever lat/lon currently sits at the canvas center under oldVp --
+    // derived by inverting `project`, not guessed.
+    const nx = -oldPan.x / (oldVp.worldPxW / 2);
+    const ny = -oldPan.y / (oldVp.worldPxH / 2);
+    const centerLatLon = { lat: -ny * 90, lon: nx * 180 };
+    const projectedAtOld = oldVp.projectLatLon(centerLatLon.lat, centerLatLon.lon);
+    expect(projectedAtOld.x).toBeCloseTo(500, 6);
+    expect(projectedAtOld.y).toBeCloseTo(400, 6);
+
+    const scaledPan = scalePanForZoom(oldPan, oldScale, newScale);
+    const newVp = new EquirectViewport(1000, 800, newScale, scaledPan.x, scaledPan.y);
+    const projectedAtNew = newVp.projectLatLon(centerLatLon.lat, centerLatLon.lon);
+    expect(projectedAtNew.x).toBeCloseTo(500, 6);
+    expect(projectedAtNew.y).toBeCloseTo(400, 6);
   });
 });

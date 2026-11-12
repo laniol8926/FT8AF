@@ -16,6 +16,32 @@ export interface Point {
   y: number;
 }
 
+/** The pan offset to carry into a new zoom level so the point currently at
+ *  the canvas center stays there, before re-clamping to the new scale's
+ *  bounds -- a fixed pixel offset covers progressively fewer degrees as the
+ *  world scales up, so leaving `pan` unscaled drifts the view back toward
+ *  the unpanned origin (lon 0, lat 0) on every zoom step. */
+export function scalePanForZoom(pan: Point, oldScale: number, newScale: number): Point {
+  const ratio = newScale / oldScale;
+  return { x: pan.x * ratio, y: pan.y * ratio };
+}
+
+/**
+ * The minimal surface `MapScreen` actually needs from a projection's
+ * viewport, shared between `EquirectViewport` and `AzimuthalViewport`
+ * (`azimuthalViewport.ts`) so the pan/zoom handlers and draw loop can stay
+ * projection-agnostic -- both classes already structurally satisfy this,
+ * no inheritance needed.
+ */
+export interface Viewport {
+  projectLatLon(lat: number, lon: number): Point;
+  clampPan(px: number, py: number): Point;
+  panToCenter(lat: number, lon: number): Point;
+  /** Longitude pixels per degree at the current zoom -- drives the
+   *  state-border fade (`stateBorderAlpha`, `worldOutlines.ts`). */
+  readonly pxPerLonDegree: number;
+}
+
 /**
  * Maps the pure `equirectProject` output (normalized [-1,1] on each axis)
  * onto a concrete canvas, edge-to-edge, with a user zoom and pan offset.
