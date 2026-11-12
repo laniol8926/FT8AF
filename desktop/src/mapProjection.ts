@@ -42,12 +42,33 @@ export function computeBearing(lat1: number, lon1: number, lat2: number, lon2: n
 
 /**
  * Offline satellite tile basemap (see `src-tauri/src/map_tiles.rs`'s doc
- * comment for how the archive's key formula and equirectangular-not-Mercator
- * projection were empirically verified). A tile `(z,x,y)` sits in a plain
- * `2^z x 2^z` grid over the whole equirectangular world: x increases
- * eastward from lon -180, y increases *southward* from lat +90 -- so its
- * bounds are a uniform fraction of the full lon/lat range, no trigonometry
- * involved (unlike a Mercator tile scheme).
+ * comment for the key formula). A tile `(z,x,y)` sits in a **standard Web
+ * Mercator / "slippy map" XYZ** grid over the whole world: `2^z x 2^z`
+ * tiles, x increasing eastward from lon -180 as a uniform fraction of the
+ * full 360 degrees (no trigonometry needed on that axis), y increasing
+ * southward from the Mercator-projected top of the world -- NOT a uniform
+ * fraction of the 180-degree latitude range, unlike x's longitude.
+ *
+ * **This was originally (wrongly) assumed to be plain equirectangular, and
+ * that bug shipped and was live-tested as correct before being caught.**
+ * The mistake survived casual checks (the equator landed correctly --
+ * Mercator and equirect agree exactly at the equator -- and low-zoom tiles
+ * "looked" undistorted enough at a glance) but produced a growing
+ * north-south misplacement of real raster imagery against anything placed
+ * by true lon/lat (state borders, markers), worst at high latitude and
+ * invisible at the equator -- exactly Mercator's own distortion curve. It
+ * was only caught by precisely overlaying real US state border vectors over
+ * the raw tiles and finding them systematically off; switching this
+ * function's latitude math to the standard inverse Mercator formula below
+ * made every one of those overlays land pixel-perfect (reference points
+ * exactly on their real-world features, state lines exactly on the real
+ * coastline) at z=2, z=3, and z=4 alike. Do not revert this to a linear
+ * `90 - y*(180/n)` formula without redoing that same real-border-overlay
+ * proof -- a quadtree parent/child consistency check or a "looks about
+ * right" visual glance are both insufficient; they can't tell equirect
+ * from Mercator apart (both pyramids are internally self-consistent, and
+ * both are hard to eyeball-distinguish without a precise ground truth
+ * overlay).
  */
 export const MAX_TILE_ZOOM = 4;
 
@@ -58,14 +79,28 @@ export interface TileLonLatBounds {
   latMax: number;
 }
 
+/** Inverse Web Mercator: `f` is the fraction of the way down the full
+ *  projected world (0 = top, 1 = bottom), returns the latitude there. Never
+ *  reaches the true poles (the projection is undefined there) -- `f=0`/`f=1`
+ *  give the standard ~85.0511 degree Mercator cutoff, which is exactly what
+ *  every `f` passed in by `tileLonLatBounds` evaluates to, since `y` only
+ *  ever ranges over `0..n` inclusive. */
+function mercatorLatAtFraction(f: number): number {
+  return (Math.atan(Math.sinh(Math.PI * (1 - 2 * f))) * 180) / Math.PI;
+}
+
 /** The lon/lat rectangle tile `(z,x,y)` covers. Does not validate that `x`/`y`
  *  are actually in range for `z` -- callers already clamp `z` via
  *  `tileZoomForViewport` and enumerate `x`/`y` from `0` to `2**z - 1`. */
 export function tileLonLatBounds(z: number, x: number, y: number): TileLonLatBounds {
   const n = 2 ** z;
   const lonMin = -180 + x * (360 / n);
-  const latMax = 90 - y * (180 / n);
-  return { lonMin, lonMax: lonMin + 360 / n, latMin: latMax - 180 / n, latMax };
+  return {
+    lonMin,
+    lonMax: lonMin + 360 / n,
+    latMax: mercatorLatAtFraction(y / n),
+    latMin: mercatorLatAtFraction((y + 1) / n),
+  };
 }
 
 /** Which stored zoom level (0-4) best matches the viewport's current world

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { EquirectViewport, scalePanForZoom } from "./mapViewport";
+import { EquirectViewport, minScaleForLatitude, scalePanForZoom } from "./mapViewport";
 
 // Ported from Android's MapViewportTest.kt.
 
@@ -64,6 +64,50 @@ describe("EquirectViewport", () => {
     const zoomed = new EquirectViewport(1080, 2000, 3);
     expect(zoomed.maxPanX()).toBeGreaterThan(base.maxPanX());
     expect(zoomed.maxPanY()).toBeGreaterThan(0);
+  });
+});
+
+describe("minScaleForLatitude", () => {
+  test("near the equator, only the safety margin pushes scale past 1 -- no real headroom is needed", () => {
+    expect(minScaleForLatitude(423, 423, 0)).toBeCloseTo(1.2, 6);
+  });
+
+  test("caps at scale 20 for a near-polar latitude", () => {
+    expect(minScaleForLatitude(423, 423, 89.9)).toBeCloseTo(20, 6);
+  });
+
+  test("floors at scale 1 when the panel is already wide enough at scale 1 to have headroom", () => {
+    // A 2:1+ canvas has worldPxH < canvasH is impossible, but worldPxH can
+    // already exceed canvasH at scale 1 if baseUniform > canvasH (bound by
+    // canvasW/2 instead) -- no zoom-in is needed in that case.
+    expect(minScaleForLatitude(300, 600, 31.5)).toBeCloseTo(1, 6);
+  });
+
+  test("regression: the returned scale actually gives EquirectViewport enough vertical headroom to reach the target latitude -- not just a plausible-looking number", () => {
+    // Reproduces the real bug: a near-square panel (canvasH == baseUniform,
+    // i.e. canvasW < 2*canvasH) where scale 1 has exactly zero vertical pan
+    // room (maxPanY() === 0), so panToCenter's Y offset used to clamp away
+    // to 0 regardless of latitude -- e.g. Alabama (lat ~31.5) stayed pinned
+    // to the equator at canvas center.
+    const canvasW = 441;
+    const canvasH = 423;
+    const lat = 31.5;
+    const lon = -85;
+    const base = new EquirectViewport(canvasW, canvasH, 1, 0, 0).baseUniform;
+    expect(base).toBeCloseTo(canvasH, 6); // confirms this canvas hits the zero-headroom case at scale 1
+
+    const scale = minScaleForLatitude(canvasH, base, lat);
+    expect(scale).toBeGreaterThan(1);
+
+    const vp = new EquirectViewport(canvasW, canvasH, scale, 0, 0);
+    const pan = vp.panToCenter(lat, lon);
+    const vpAtPan = new EquirectViewport(canvasW, canvasH, scale, pan.x, pan.y);
+    const p = vpAtPan.projectLatLon(lat, lon);
+    // The recentered point must land at the canvas center -- not clamped
+    // away to some other latitude, as it was before this fix.
+    expect(p.x).toBeCloseTo(canvasW / 2, 1);
+    expect(p.y).toBeCloseTo(canvasH / 2, 1);
+    expect(pan.y).not.toBe(0);
   });
 });
 

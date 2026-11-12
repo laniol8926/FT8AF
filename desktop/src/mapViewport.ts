@@ -26,6 +26,27 @@ export function scalePanForZoom(pan: Point, oldScale: number, newScale: number):
   return { x: pan.x * ratio, y: pan.y * ratio };
 }
 
+/** The smallest zoom scale at which `EquirectViewport.panToCenter` can
+ *  actually reach `lat` -- "cover" mode fills the canvas height with the
+ *  world's full +-90 degree latitude range the moment `worldPxH` reaches
+ *  `canvasH` (always true at scale 1 whenever the panel isn't at least 2:1
+ *  wide, since `baseUniform` is then bound by `canvasH`, not `canvasW/2`),
+ *  which makes `maxPanY()` exactly 0 -- so `panToCenter`'s Y offset clamps
+ *  away silently and the view stays pinned to the equator regardless of
+ *  what latitude was requested. Found live: on a near-square map panel,
+ *  pressing the "Me" button (which recentered at a hardcoded scale 1) left
+ *  an Alabama operator's real latitude far above canvas center, equator-
+ *  locked -- only longitude actually recentered. Solving
+ *  `canvasH <= baseUniform*scale*(1-|lat|/90)` for `scale` gives the
+ *  breakeven point; a 1.2x margin keeps the target comfortably inside the
+ *  clamp rather than exactly on its edge, and the result is clamped to the
+ *  app's own [1, 20] zoom range. */
+export function minScaleForLatitude(canvasH: number, baseUniform: number, lat: number): number {
+  const ny = Math.min(0.999, Math.abs(lat) / 90);
+  const minScale = canvasH / (baseUniform * (1 - ny));
+  return Math.min(20, Math.max(1, minScale * 1.2));
+}
+
 /**
  * The minimal surface `MapScreen` actually needs from a projection's
  * viewport, shared between `EquirectViewport` and `AzimuthalViewport`

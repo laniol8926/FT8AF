@@ -92,7 +92,7 @@ import { formatDecodeDt, formatDecodeFreq, isDecodeDtNotable } from "./decodeRow
 import { wpxPrefixOf } from "./wpxPrefix";
 import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
 import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
-import { EquirectViewport, scalePanForZoom, type Viewport } from "./mapViewport";
+import { EquirectViewport, minScaleForLatitude, scalePanForZoom, type Viewport } from "./mapViewport";
 import { AzimuthalViewport } from "./azimuthalViewport";
 import { COMPASS_DIRECTIONS, compassVector, RANGE_RING_KMS, rangeRingRadiusPx } from "./azimuthalProjection";
 import { snrTint } from "./markerStyle";
@@ -1494,8 +1494,20 @@ function MapScreen({
   }
   function recenter() {
     if (!myPos) return;
-    setUserScale(1);
-    const vp = makeViewport(1, 0, 0);
+    if (projectionMode === "azimuthal") {
+      // Azimuthal already centers on the operator via the projection itself
+      // (opLat/opLon baked into AzimuthalViewport) -- scale 1, pan {0,0} is
+      // the correct "home" view, not a special case to work around.
+      setUserScale(1);
+      setPan({ x: 0, y: 0 });
+      return;
+    }
+    // See minScaleForLatitude's doc comment (mapViewport.ts) -- scale 1
+    // can't reach a non-equatorial latitude on this panel at all.
+    const base = new EquirectViewport(size.w, size.h, 1, 0, 0).baseUniform;
+    const scale = minScaleForLatitude(size.h, base, myPos.lat);
+    setUserScale(scale);
+    const vp = makeViewport(scale, 0, 0);
     setPan(vp.panToCenter(myPos.lat, myPos.lon));
   }
 
