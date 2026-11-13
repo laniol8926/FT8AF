@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import type { BandInfo, ClockSyncEvent, OperatingMode, RigStatusEvent } from "../ipc";
 import type { HuntPriority } from "../hunt";
-import { HUNT_PRIORITIES } from "../hunt";
 import { SettingsDetailScaffold, SettingsRow } from "./SettingsPrimitives";
 import { OperatorCard } from "./OperatorCard";
 import { EditOperatorDialog } from "./EditOperatorDialog";
@@ -10,10 +9,12 @@ import { RadioAudioSettings } from "./RadioAudioSettings";
 import { AboutSettings } from "./AboutSettings";
 import { TimeSyncSettings } from "./TimeSyncSettings";
 import { DecodeFilterSettings } from "./DecodeFilterSettings";
+import { AdvancedSettings } from "./AdvancedSettings";
+import { TransmissionSettings } from "./TransmissionSettings";
 import type { HighlightConfig } from "../qsoStatus";
 import type { WorkedMode, WorkedScope } from "../decodeFilters";
 
-type Category = "radio" | "about" | "timesync" | "decodefilters";
+type Category = "radio" | "about" | "timesync" | "decodefilters" | "advanced" | "transmission";
 
 /**
  * Settings landing page, matching the real Android fork's own
@@ -41,6 +42,8 @@ export function SettingsScreen(props: {
   onMode: (m: OperatingMode) => void;
   showVolumeSlider: boolean;
   onShowVolumeSlider: (v: boolean) => void;
+  huntEnabled: boolean;
+  onHuntEnabled: (v: boolean) => void;
   huntPriority: HuntPriority;
   onHuntPriority: (p: HuntPriority) => void;
   huntAvoidPileups: boolean;
@@ -86,10 +89,13 @@ export function SettingsScreen(props: {
   onAlertOnCqReply: (v: boolean) => void;
   alertOnQsoComplete: boolean;
   onAlertOnQsoComplete: (v: boolean) => void;
+  decodeDeep: boolean;
+  onDecodeDeep: (v: boolean) => void;
 }) {
   const {
     onStatus, clock, onSettingsSaved, onRigLabel, onBandsChanged, operatingMode, rig,
     bands, dialHz, onBand, onMode, showVolumeSlider, onShowVolumeSlider,
+    huntEnabled, onHuntEnabled,
     huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
     inputGain, onInputGain, txGain, onTxGain, displayHz, onDisplayHz,
     onUpdateGridTable, gridSeedBusy, onAudioBandConfigChanged,
@@ -99,6 +105,7 @@ export function SettingsScreen(props: {
     filterShowOnlyCQ, onFilterShowOnlyCQ, filterNeededOnly, onFilterNeededOnly,
     watchCallsigns, onWatchCallsigns, alertNewDxcc, onAlertNewDxcc, alertNewState, onAlertNewState,
     alertOnCqReply, onAlertOnCqReply, alertOnQsoComplete, onAlertOnQsoComplete,
+    decodeDeep, onDecodeDeep,
   } = props;
 
   const [category, setCategory] = useState<Category | null>(null);
@@ -239,6 +246,31 @@ export function SettingsScreen(props: {
     );
   }
 
+  if (category === "advanced") {
+    return (
+      <SettingsDetailScaffold title="Advanced" onBack={() => setCategory(null)}>
+        <AdvancedSettings decodeDeep={decodeDeep} onDecodeDeep={onDecodeDeep} />
+      </SettingsDetailScaffold>
+    );
+  }
+
+  if (category === "transmission") {
+    return (
+      <SettingsDetailScaffold title="Transmission" onBack={() => setCategory(null)}>
+        <TransmissionSettings
+          huntEnabled={huntEnabled}
+          onHuntEnabled={onHuntEnabled}
+          huntPriority={huntPriority}
+          onHuntPriority={onHuntPriority}
+          huntAvoidPileups={huntAvoidPileups}
+          onHuntAvoidPileups={onHuntAvoidPileups}
+          huntMinSnr={huntMinSnr}
+          onHuntMinSnr={onHuntMinSnr}
+        />
+      </SettingsDetailScaffold>
+    );
+  }
+
   const rigName = rig?.connected ? rig.model : "Not connected";
   const antennaDisplay = antenna || "--";
   const powerDisplay = power ? `${power}W` : "--";
@@ -286,73 +318,13 @@ export function SettingsScreen(props: {
 
       <div className="settings-category-list panel settings-category-card">
         <SettingsRow label="Radio & Audio" description="Rig connection, audio devices, bands" onClick={() => setCategory("radio")} />
-        <SettingsRow label="Transmission" disabled />
+        <SettingsRow label="Transmission" description="TX protection, Tune, Hunt/auto-sequence" onClick={() => setCategory("transmission")} />
         <SettingsRow label="Time Sync" description="Manual clock correction for offline operating" onClick={() => setCategory("timesync")} />
         <SettingsRow label="Decode & Filters" onClick={() => setCategory("decodefilters")} />
         <SettingsRow label="Voice Assistant" description="Spoken announcements and hands-free voice commands" disabled />
         <SettingsRow label="Logging & Awards" disabled />
-        <SettingsRow label="Advanced" description="Backup & restore settings, decode tuning" disabled />
+        <SettingsRow label="Advanced" description="Backup & restore settings, decode tuning" onClick={() => setCategory("advanced")} />
         <SettingsRow label="About" onClick={() => setCategory("about")} />
-      </div>
-
-      {/* Hunt stays inline for now, same shape as before this phase --
-          folded into the Transmission category once that phase lands. */}
-      <div className="panel">
-        <h3>Hunt</h3>
-        <div className="col">
-          <div className="muted">
-            When Hunt is on (toggle it from the top bar), the app auto-answers
-            the best eligible CQ each cycle instead of waiting for a manual
-            click — never while already in a QSO. These options control which
-            CQ counts as "best." Ported from the Android app's own Hunt engine;
-            two of its priorities aren't available here yet (DXCC entity
-            lookup, and POTA "new park" ranking need data this app doesn't
-            fetch yet).
-          </div>
-          <div className="field">
-            <label>Priority</label>
-            <select value={huntPriority} onChange={(e) => onHuntPriority(e.target.value as HuntPriority)}>
-              {HUNT_PRIORITIES.map((p) => (
-                <option key={p} value={p}>
-                  {p === "latest" ? "Latest (most recent decode)"
-                    : p === "strongest" ? "Strongest signal"
-                    : p === "weakest" ? "Weakest signal"
-                    : p === "farthest" ? "Farthest station"
-                    : p === "pota_first" ? "POTA activators first"
-                    : "New grid first"}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={huntAvoidPileups}
-                onChange={(e) => onHuntAvoidPileups(e.target.checked)}
-                style={{ width: "auto" }}
-              />
-              Avoid pileups when a pileup-free CQ is available
-            </label>
-          </div>
-          <div className="field">
-            <label>Minimum SNR (dB) — blank disables the floor</label>
-            <input
-              value={huntMinSnr == null ? "" : String(huntMinSnr)}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                if (v === "") {
-                  onHuntMinSnr(null);
-                  return;
-                }
-                const n = parseInt(v, 10);
-                if (!Number.isNaN(n)) onHuntMinSnr(n);
-              }}
-              placeholder="e.g. -15"
-              style={{ width: 80 }}
-            />
-          </div>
-        </div>
       </div>
 
     </div>

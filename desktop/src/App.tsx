@@ -303,6 +303,13 @@ export default function App() {
   }
   useEffect(refreshAudioBandConfig, []);
 
+  // Settings -> Advanced's "Decode Depth" (own key, see AdvancedSettings.tsx's
+  // doc comment for why it isn't Android's decodeDepth).
+  const [decodeDeep, setDecodeDeep] = useState(false);
+  useEffect(() => {
+    api.getConfig("decodeDeep").then((v) => setDecodeDeep(v === "1"));
+  }, []);
+
   // Decode & Filters (Settings -> Decode & Filters, ported from Android's
   // DecodeFilterSettings.kt): decode-list highlight toggles, worked-station
   // handling, the callsign blocklist, two of the six Decode Filters toggles
@@ -800,6 +807,11 @@ export default function App() {
       case "meter":
         setMeter(e.data);
         break;
+      case "clear_decode_list":
+        // Settings -> Transmission's "Clear decodes on band/mode change" --
+        // same effect as the manual "Clear the decode list" button.
+        setMessages([]);
+        break;
       case "info":
         setStatus(e.data);
         break;
@@ -1231,6 +1243,8 @@ export default function App() {
               api.setConfig("showTxVolumeSlider", v ? "1" : "0");
             }}
             onAudioBandConfigChanged={refreshAudioBandConfig}
+            decodeDeep={decodeDeep}
+            onDecodeDeep={setDecodeDeep}
             highlightConfig={highlightConfig}
             onHighlightConfig={setHighlightConfig}
             workedMode={workedMode}
@@ -1261,6 +1275,11 @@ export default function App() {
             onAlertOnCqReply={setAlertOnCqReply}
             alertOnQsoComplete={alertOnQsoComplete}
             onAlertOnQsoComplete={setAlertOnQsoComplete}
+            huntEnabled={huntEnabled}
+            onHuntEnabled={(v) => {
+              setHuntEnabled(v);
+              api.setConfig("hunt_enabled", String(v));
+            }}
             huntPriority={huntPriority}
             onHuntPriority={setHuntPriority}
             huntAvoidPileups={huntAvoidPileups}
@@ -1306,6 +1325,7 @@ export default function App() {
           txGain={txGain}
           onTxGain={onTxGain}
           showVolumeSlider={showVolumeSlider}
+          onClearSwrLockout={() => api.clearSwrLockout()}
         />
       )}
       <TabBar
@@ -4628,16 +4648,29 @@ function TxBar(props: {
   txGain: number;
   onTxGain: (v: number) => void;
   showVolumeSlider: boolean;
+  onClearSwrLockout: () => void;
 }) {
   const {
     txState, onSetTxPeriod, bands, dialHz, onBand, operatingMode, onMode,
-    onToggleTune, txGain, onTxGain, showVolumeSlider,
+    onToggleTune, txGain, onTxGain, showVolumeSlider, onClearSwrLockout,
   } = props;
   const preferredParity = txState?.preferred_tx_parity ?? null;
   const tuning = txState?.tuning ?? false;
   const transmitting = txState?.transmitting ?? false;
   return (
     <div className="txbar">
+      {/* Settings -> Transmission -> TX Protection's SWR Halt fired: TX/Tune
+          is blocked until the operator explicitly clears it (matches
+          Android's own persistent lockout banner, not an auto-dismissing
+          toast). */}
+      {txState?.swr_lockout && (
+        <div className="txbar-row swr-lockout-banner">
+          <span>⚠ SWR protection halted TX -- check your antenna/feedline</span>
+          <button className="pill pill-dark" onClick={onClearSwrLockout}>
+            Clear lockout
+          </button>
+        </div>
+      )}
       {/* Row 1 -- Band & Mode, matching Android's BandModeRow. Same
           BandModePicker as TopBar's title, just the "card" layout -- the
           full "14.074 MHz · 20m · FT8" label Android's TxStrip/drawer rows

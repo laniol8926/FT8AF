@@ -16,6 +16,15 @@ describe("audioDeviceLabel", () => {
     );
   });
 
+  it("names the QMX's ALSA card (registered as \"Transceiver\") and recommends the plughw variant", () => {
+    expect(audioDeviceLabel(dev("plughw:CARD=Transceiver,DEV=0"))).toBe(
+      "QRP Labs QMX Transceiver — plughw:CARD=Transceiver,DEV=0 — recommended",
+    );
+    expect(audioDeviceLabel(dev("sysdefault:CARD=Transceiver"))).toBe(
+      "QRP Labs QMX Transceiver — sysdefault:CARD=Transceiver",
+    );
+  });
+
   it("gives the Linux sound servers readable names", () => {
     expect(audioDeviceLabel(dev("pipewire"))).toBe("PipeWire sound server");
     expect(audioDeviceLabel(dev("default"))).toBe("Linux system default");

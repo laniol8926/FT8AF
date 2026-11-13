@@ -68,6 +68,9 @@ export interface TxStateEvent {
   /** Operator's preferred TX slot parity for the next CQ/QSO start (0 = Even,
    *  1 = Odd, null = no preference) — see `set_tx_period`. */
   preferred_tx_parity: number | null;
+  /** SWR Halt's lockout -- see `clear_swr_lockout`. True blocks starting any
+   *  new TX/Tune until explicitly cleared. */
+  swr_lockout: boolean;
 }
 
 export interface RigStatusEvent {
@@ -281,6 +284,15 @@ export interface AppInfo {
   build_date: string;
 }
 
+/** Settings -> Advanced's parsed backup file, previewed before import. */
+export interface ParsedSettingsBackup {
+  format_version: number;
+  app_version: string;
+  created_at: string;
+  config: Record<string, string>;
+  follow_callsigns: string[];
+}
+
 /** Waterfall FFT window (developer setting, issue #428). */
 export type WfWindow = "rect" | "hann" | "hamming" | "blackman" | "blackman_harris";
 
@@ -335,6 +347,9 @@ export type EngineEvent =
    *  -- see rig.rs's supports_meter_query). Either field is null when that
    *  particular query didn't return a valid reading. */
   | { type: "meter"; data: { swr_ratio: number | null; power_watts: number | null } }
+  /** Settings -> Transmission's "Clear decodes on band/mode change": wipe the
+   *  decode-row list, same as the manual "Clear the decode list" button. */
+  | { type: "clear_decode_list" } // unit variant -- no "data" key at all
   | { type: "info"; data: string }
   | { type: "error"; data: string };
 
@@ -374,6 +389,23 @@ export const api = {
   setQmxCatTones: (enabled: boolean) => invoke("set_qmx_cat_tones", { enabled }),
   selectRig: (config: RigConfig) => invoke("select_rig", { config }),
   disconnectRig: () => invoke("disconnect_rig"),
+  /** Settings -> Transmission -> TX Protection. SWR threshold is a plain
+   *  ratio (e.g. 3.0), not Android's normalized 0-255 scale. */
+  setSwrHaltEnabled: (enabled: boolean) => invoke("set_swr_halt_enabled", { enabled }),
+  setSwrHaltThreshold: (threshold: number) => invoke("set_swr_halt_threshold", { threshold }),
+  clearSwrLockout: () => invoke("clear_swr_lockout"),
+  /** Settings -> Transmission -> Tune. */
+  setTuneMaxOnSeconds: (seconds: number) => invoke("set_tune_max_on_seconds", { seconds }),
+  setTuneMethod: (method: number) => invoke("set_tune_method", { method }),
+  setTuneLevelIndependent: (independent: boolean) => invoke("set_tune_level_independent", { independent }),
+  setTuneLevel: (gain: number) => invoke("set_tune_level", { gain }),
+  /** Settings -> Transmission's "TX Watchdog" / "Max 73 Sends" (0 = unlimited/Auto). */
+  setTxWatchdog: (limit: number) => invoke("set_tx_watchdog", { limit }),
+  setMax73Sends: (cap: number) => invoke("set_max_73_sends", { cap }),
+  /** Settings -> Auto-Sequence's "Auto-CQ after QSO". */
+  setAutoCqAfterQso: (enabled: boolean) => invoke("set_auto_cq_after_qso", { enabled }),
+  /** Settings -> Transmission's "Clear decodes on band/mode change". */
+  setClearOnBandModeChange: (enabled: boolean) => invoke("set_clear_on_band_mode_change", { enabled }),
   refreshStatus: () => invoke("refresh_status"),
   resyncTime: () => invoke("resync_time"),
   /** Manual clock-correction stepper for offline operating (Settings -> Time Sync). */
@@ -437,6 +469,16 @@ export const api = {
    *  never loaded into JS/sent over IPC (an earlier version did that and
    *  could buffer a large real log several times over in memory). */
   importAdif: (path: string) => invoke<ImportSummary>("import_adif", { path }),
+
+  /** Settings -> Advanced's backup/export/import. */
+  exportSettingsBackup: (includeSensitive: boolean) =>
+    invoke<string>("export_settings_backup", { includeSensitive }),
+  pickSettingsBackupFile: () => invoke<string | null>("pick_settings_backup_file"),
+  previewSettingsBackup: (path: string) => invoke<ParsedSettingsBackup>("preview_settings_backup", { path }),
+  applySettingsBackup: (config: Record<string, string>, followCallsigns: string[]) =>
+    invoke<void>("apply_settings_backup", { config, followCallsigns }),
+  /** Settings -> Advanced's "Decode Depth" toggle. */
+  setDecodeDepth: (deep: boolean) => invoke("set_decode_depth", { deep }),
 
   /** Rows in the callsign/grid cache -- 0 means the FCC/Census seed hasn't run yet. */
   callsignQthCount: () => invoke<number>("callsign_qth_count"),

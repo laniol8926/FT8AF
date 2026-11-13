@@ -65,6 +65,18 @@ pub struct QsoEngine {
     pub mode: String,
     pub active: bool,
     pub auto_return_to_cq: bool,
+    /// Settings -> Transmission's "TX Watchdog" ("Stop After" N unanswered
+    /// attempts) -- ported in spirit from Android's `GeneralVariables.
+    /// noReplyLimit`/`shouldGiveUpTarget`. `0` = unlimited (Android's own
+    /// default), matching Android's own semantics exactly even though
+    /// desktop's stage model differs (see `should_give_up_target`'s doc
+    /// comment for why this re-derives the signal natively rather than
+    /// porting Android's numeric `functionOrder` arithmetic line for line).
+    pub no_reply_limit: u32,
+    /// Settings -> Transmission's "Max 73 Sends" -- ported in spirit from
+    /// Android's `GeneralVariables.max73Sends`/`hasReachedMax73Sends`.
+    /// `0` = Auto/off (Android's own default).
+    pub max_73_sends: u32,
 
     stage: TxStage,
     target: Option<String>,
@@ -78,6 +90,15 @@ pub struct QsoEngine {
     /// so a Bye73 that missed its slot (late TX window, rig busy, encode failure)
     /// is retransmitted next slot instead of being clobbered by the wrap-up.
     bye73_sent: bool,
+    /// Consecutive slots, for the current target, where no reply was heard
+    /// at all (we're in `Grid`/`Report`/`RReport` -- still calling, not yet
+    /// logged). Reset whenever the target changes or any reply advances the
+    /// stage. Drives `no_reply_limit` / the "TX Watchdog" setting.
+    no_reply_count: u32,
+    /// How many times `RR73`/`73` (stages `Rr73`/`Bye73`) has actually been
+    /// transmitted for the current target (set in `notify_transmitted`,
+    /// reset on target change). Drives `max_73_sends`.
+    final_ack_sends: u32,
 }
 
 impl QsoEngine {
@@ -90,6 +111,8 @@ impl QsoEngine {
             mode: "FT8".to_string(),
             active: false,
             auto_return_to_cq: true,
+            no_reply_limit: 0,
+            max_73_sends: 0,
             stage: TxStage::Idle,
             target: None,
             grid_rcvd: None,
@@ -98,6 +121,8 @@ impl QsoEngine {
             tx_message: None,
             started_ms: 0,
             bye73_sent: false,
+            no_reply_count: 0,
+            final_ack_sends: 0,
         }
     }
 
@@ -123,6 +148,14 @@ impl QsoEngine {
     pub fn notify_transmitted(&mut self) {
         if self.stage == TxStage::Bye73 {
             self.bye73_sent = true;
+        }
+        // Count actual RR73/73 sends for max_73_sends -- see that field's
+        // doc comment. Bye73 is already inherently bounded to one retransmit
+        // (process_rx finishes the QSO the very next cycle once bye73_sent),
+        // so only Rr73's repeat loop ever reaches the cap in practice, but
+        // both are counted for parity with Android's own order-4/5 counter.
+        if matches!(self.stage, TxStage::Rr73 | TxStage::Bye73) {
+            self.final_ack_sends = self.final_ack_sends.saturating_add(1);
         }
     }
 
@@ -208,6 +241,25 @@ impl QsoEngine {
         self.report_rcvd = None;
         self.started_ms = util::now_unix_ms();
         self.bye73_sent = false;
+        self.no_reply_count = 0;
+        self.final_ack_sends = 0;
+    }
+
+    /// Give up on the current target without logging a QSO -- the TX
+    /// Watchdog's no-reply limit or the Max 73 Sends cap was hit. Mirrors
+    /// `finish_qso`'s un-logged shape: returns to CQ when `auto_return_to_cq`,
+    /// otherwise goes idle, same as Android's own "move on" behavior rather
+    /// than hanging on a station that stopped answering.
+    fn give_up_target(&mut self) {
+        self.reset_qso();
+        if self.auto_return_to_cq {
+            self.stage = TxStage::Cq;
+            self.tx_message = Some(format!("CQ {} {}", self.my_call, self.my_grid));
+        } else {
+            self.active = false;
+            self.stage = TxStage::Idle;
+            self.tx_message = None;
+        }
     }
 
     /// Process the decoded messages of a finished RX slot. Updates `tx_message`
@@ -244,8 +296,39 @@ impl QsoEngine {
         });
 
         let msg = match mine {
-            Some(m) => m.clone(),
-            None => return None, // no reply this slot; scheduler retransmits
+            Some(m) => {
+                // Evidence heard from the target -- reset the TX Watchdog's
+                // silence counter (matches Android's own noReplyCount, which
+                // resets on every decode from the target, not just on a
+                // target change).
+                self.no_reply_count = 0;
+                m.clone()
+            }
+            None => {
+                // No reply this slot -- advance the give-up counters that
+                // apply to the current stage (see no_reply_limit/
+                // max_73_sends' doc comments). Cq is exempt: there's no
+                // specific target to give up on yet.
+                match self.stage {
+                    TxStage::Grid | TxStage::Report | TxStage::RReport => {
+                        self.no_reply_count = self.no_reply_count.saturating_add(1);
+                        if should_give_up_target(self.no_reply_limit, self.no_reply_count) {
+                            self.give_up_target();
+                        }
+                    }
+                    TxStage::Rr73 => {
+                        let unlimited_failsafe =
+                            self.max_73_sends == 0 && self.final_ack_sends >= RR73_GIVEUP_CYCLES_FAILSAFE;
+                        if has_reached_max_73_sends(self.max_73_sends, self.final_ack_sends)
+                            || unlimited_failsafe
+                        {
+                            self.give_up_target();
+                        }
+                    }
+                    TxStage::Cq | TxStage::Bye73 | TxStage::Idle => {}
+                }
+                return None; // scheduler retransmits (or we just gave up above)
+            }
         };
 
         if self.target.is_none() {
@@ -372,6 +455,31 @@ impl QsoEngine {
         }
     }
 }
+
+/// TX Watchdog ("Stop After" N unanswered attempts). Ported in spirit from
+/// Android's `FT8TransmitSignal.shouldGiveUpTarget` -- desktop's stage model
+/// differs enough (7 named `TxStage`s vs. Android's 6 numeric
+/// `functionOrder`s) that this re-derives the same "silence since the
+/// target last replied" signal natively via `no_reply_count` rather than
+/// porting Android's order-number arithmetic line for line. `0` = unlimited
+/// (Android's own `noReplyLimit=0` default) -- the operator's own Stop/
+/// Hunt-rotate remains the ultimate backstop, matching Android's documented
+/// reliance on its separate TX-supervision timeout for the unlimited case.
+pub fn should_give_up_target(no_reply_limit: u32, no_reply_count: u32) -> bool {
+    no_reply_limit > 0 && no_reply_count >= no_reply_limit
+}
+
+/// Max 73 Sends cap. Ported in spirit from Android's
+/// `FT8TransmitSignal.hasReachedMax73Sends`. `0` = Auto/off (Android's own
+/// default): no cap, just the `RR73_GIVEUP_CYCLES_FAILSAFE` safety net below.
+pub fn has_reached_max_73_sends(max_73_sends: u32, final_ack_sends: u32) -> bool {
+    max_73_sends > 0 && final_ack_sends >= max_73_sends
+}
+
+/// Hard failsafe for the `Rr73` retry loop when Max 73 Sends is left at
+/// Auto (`0`): never hold the run frequency on a target that stopped
+/// replying forever. Matches Android's own `RR73_GIVEUP_CYCLES` constant.
+pub const RR73_GIVEUP_CYCLES_FAILSAFE: u32 = 3;
 
 /// FT8 reports are clamped to roughly [-30, +30].
 fn clamp_report(snr: i32) -> i32 {
@@ -625,5 +733,112 @@ mod tests {
         }
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
         assert_eq!(e.status().stage, TxStage::Bye73);
+    }
+
+    // --- TX Watchdog (no_reply_limit) / Max 73 Sends (max_73_sends) ---
+
+    #[test]
+    fn should_give_up_target_pure_cases() {
+        assert!(!should_give_up_target(0, 1000)); // unlimited never gives up here
+        assert!(!should_give_up_target(5, 4));
+        assert!(should_give_up_target(5, 5));
+        assert!(should_give_up_target(5, 6));
+    }
+
+    #[test]
+    fn has_reached_max_73_sends_pure_cases() {
+        assert!(!has_reached_max_73_sends(0, 1000)); // Auto/off never caps here
+        assert!(!has_reached_max_73_sends(3, 2));
+        assert!(has_reached_max_73_sends(3, 3));
+    }
+
+    #[test]
+    fn tx_watchdog_gives_up_a_silent_target_and_returns_to_cq() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 2;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        // Two silent slots -- not given up yet.
+        assert!(e.process_rx(&[]).is_none());
+        assert_eq!(e.status().stage, TxStage::Grid);
+        assert!(e.process_rx(&[]).is_none());
+        // The 2nd silent slot hits the limit and gives up -> back to CQ.
+        assert_eq!(e.status().stage, TxStage::Cq);
+        assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
+    }
+
+    #[test]
+    fn tx_watchdog_disabled_never_gives_up() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 0;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        for _ in 0..50 {
+            e.process_rx(&[]);
+        }
+        assert_eq!(e.status().stage, TxStage::Grid);
+    }
+
+    #[test]
+    fn tx_watchdog_disabled_without_auto_return_to_cq_goes_idle() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.auto_return_to_cq = false;
+        e.no_reply_limit = 1;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[]);
+        assert_eq!(e.status().stage, TxStage::Idle);
+        assert!(!e.active);
+        assert_eq!(e.tx_message(), None);
+    }
+
+    #[test]
+    fn a_reply_resets_the_no_reply_counter() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 2;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[]); // 1 silent slot
+        // A real reply arrives before the limit -- must reset the counter,
+        // not carry it over into the next stage.
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]);
+        assert_eq!(e.status().stage, TxStage::RReport);
+        e.process_rx(&[]);
+        assert_eq!(e.status().stage, TxStage::RReport); // 1 silent slot, not given up
+        e.process_rx(&[]);
+        // 2nd silent slot in THIS stage hits the limit (counter was reset by the reply).
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn max_73_sends_caps_rr73_retransmission_and_returns_to_cq() {
+        // Drive a Grid -> RReport(n) -> send_rr73 -> Rr73 loop (RReport's
+        // own RR73-reply path goes straight to Bye73 instead; Rr73 is the
+        // stage that actually retransmits RR73 while the target is silent).
+        let mut e2 = QsoEngine::new("K0XYZ", "EN37");
+        e2.max_73_sends = 2;
+        e2.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e2.process_rx(&[msg("K0XYZ", "K1ABC", "R-12", "", -8)]); // RReport -> send_rr73 -> Rr73
+        assert_eq!(e2.status().stage, TxStage::Rr73);
+        e2.notify_transmitted(); // 1st RR73 send
+        e2.process_rx(&[]); // silent, not capped yet (1 < 2)
+        assert_eq!(e2.status().stage, TxStage::Rr73);
+        e2.notify_transmitted(); // 2nd RR73 send
+        e2.process_rx(&[]); // silent, now capped (2 >= 2) -> give up
+        assert_eq!(e2.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn rr73_unlimited_failsafe_still_gives_up_eventually() {
+        // max_73_sends left at Auto (0): the RR73_GIVEUP_CYCLES_FAILSAFE
+        // safety net still ends the loop instead of holding the frequency
+        // forever on a target that stopped replying.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "R-12", "", -8)]); // -> Rr73
+        assert_eq!(e.status().stage, TxStage::Rr73);
+        for _ in 0..RR73_GIVEUP_CYCLES_FAILSAFE {
+            e.notify_transmitted();
+            e.process_rx(&[]);
+        }
+        assert_eq!(e.status().stage, TxStage::Cq);
     }
 }

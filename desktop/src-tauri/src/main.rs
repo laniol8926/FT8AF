@@ -16,6 +16,7 @@ use ft8af::map_tiles::MapTiles;
 use ft8af::os_location::{self, OsLocation};
 use ft8af::psk_reporter::{PskFetchResult, PskReporterState};
 use ft8af::rig::{self, HamlibRig, RigConfig, SerialPortInfo};
+use ft8af::settings_backup::{self, ParsedBackup};
 use ft8af::wf::WfConfig;
 
 struct AppState {
@@ -157,6 +158,12 @@ fn set_rx_audio_channel(state: State<AppState>, channel: i32) {
     state.engine.send(EngineCommand::SetRxAudioChannel(channel));
 }
 
+/// Settings -> Advanced's "Decode Depth" toggle (Fast/Deep).
+#[tauri::command]
+fn set_decode_depth(state: State<AppState>, deep: bool) {
+    state.engine.send(EngineCommand::SetDecodeDepth(deep));
+}
+
 #[tauri::command]
 fn set_tx_audio_channel(state: State<AppState>, channel: i32) {
     state.engine.send(EngineCommand::SetTxAudioChannel(channel));
@@ -170,6 +177,67 @@ fn set_qmx_cat_tones(state: State<AppState>, enabled: bool) {
 #[tauri::command]
 fn disconnect_rig(state: State<AppState>) {
     state.engine.send(EngineCommand::DisconnectRig);
+}
+
+/// Settings -> Transmission -> TX Protection's SWR Halt toggle.
+#[tauri::command]
+fn set_swr_halt_enabled(state: State<AppState>, enabled: bool) {
+    state.engine.send(EngineCommand::SetSwrHaltEnabled(enabled));
+}
+
+/// SWR Halt's threshold, a plain ratio (e.g. 3.0).
+#[tauri::command]
+fn set_swr_halt_threshold(state: State<AppState>, threshold: f32) {
+    state.engine.send(EngineCommand::SetSwrHaltThreshold(threshold));
+}
+
+/// Operator dismisses the SWR lockout banner, allowing TX again.
+#[tauri::command]
+fn clear_swr_lockout(state: State<AppState>) {
+    state.engine.send(EngineCommand::ClearSwrLockout);
+}
+
+#[tauri::command]
+fn set_tune_max_on_seconds(state: State<AppState>, seconds: i64) {
+    state.engine.send(EngineCommand::SetTuneMaxOnSeconds(seconds));
+}
+
+#[tauri::command]
+fn set_tune_method(state: State<AppState>, method: i32) {
+    state.engine.send(EngineCommand::SetTuneMethod(method));
+}
+
+#[tauri::command]
+fn set_tune_level_independent(state: State<AppState>, independent: bool) {
+    state.engine.send(EngineCommand::SetTuneLevelIndependent(independent));
+}
+
+#[tauri::command]
+fn set_tune_level(state: State<AppState>, gain: f32) {
+    state.engine.send(EngineCommand::SetTuneLevel(gain));
+}
+
+/// Settings -> Transmission's "TX Watchdog" ("Stop After" N unanswered attempts).
+#[tauri::command]
+fn set_tx_watchdog(state: State<AppState>, limit: u32) {
+    state.engine.send(EngineCommand::SetTxWatchdog(limit));
+}
+
+#[tauri::command]
+fn set_max_73_sends(state: State<AppState>, cap: u32) {
+    state.engine.send(EngineCommand::SetMax73Sends(cap));
+}
+
+/// Settings -> Auto-Sequence's "Auto-CQ after QSO".
+#[tauri::command]
+fn set_auto_cq_after_qso(state: State<AppState>, enabled: bool) {
+    state.engine.send(EngineCommand::SetAutoCqAfterQso(enabled));
+}
+
+/// Settings -> Transmission's "Clear decodes on band/mode change".
+#[tauri::command]
+fn set_clear_on_band_mode_change(state: State<AppState>, enabled: bool) {
+    state.engine.send(EngineCommand::SetClearOnBandModeChange(enabled));
 }
 
 #[tauri::command]
@@ -458,6 +526,69 @@ async fn import_adif(
             .to_string()
     })?
     .map_err(|e| format!("Couldn't read that file: {e}"))
+}
+
+// --- Settings backup/export/import (Advanced category) ---------------------
+
+/// Serialize the whole config table (+ the Hunt watchlist) as backup JSON --
+/// returned as a string, same shape as `export_adif`, so the frontend can
+/// save it with the identical Blob+`<a download>` trick already proven for
+/// the ADIF export (lands in the OS Downloads folder with no native dialog
+/// needed, unlike import below).
+#[tauri::command]
+fn export_settings_backup(state: State<AppState>, include_sensitive: bool) -> String {
+    let config = state.db.all_config();
+    let follow_callsigns = state.db.list_follow_callsigns();
+    let created_at = chrono::Utc::now().format("%Y-%m-%d %H:%M").to_string();
+    settings_backup::build_backup_json(
+        &config,
+        include_sensitive,
+        env!("CARGO_PKG_VERSION"),
+        &created_at,
+        follow_callsigns,
+    )
+}
+
+/// Native "pick a settings backup file" dialog, same reasoning as
+/// `pick_adif_file` (immune to the WebKitGTK repaint-freeze bug; lets the
+/// following read happen by path rather than piping file contents through
+/// IPC as a `<input type="file">` would).
+#[tauri::command]
+async fn pick_settings_backup_file(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .file()
+        .add_filter("FT8AF settings backup", &["json"])
+        .blocking_pick_file()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Read and validate a settings backup file, for the import confirmation
+/// dialog to preview (key count, created-at) before anything is applied.
+#[tauri::command]
+fn preview_settings_backup(path: String) -> Result<ParsedBackup, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Couldn't read that file: {e}"))?;
+    settings_backup::parse_backup_json(&text)
+}
+
+/// Apply a previewed backup: writes every config key, and adds every
+/// followed callsign (union with whatever's already in the watchlist,
+/// matching `add_follow_callsign`'s own insert-or-ignore semantics --
+/// restoring a backup never *removes* a callsign the operator added since).
+#[tauri::command]
+fn apply_settings_backup(
+    state: State<AppState>,
+    config: std::collections::BTreeMap<String, String>,
+    follow_callsigns: Vec<String>,
+) -> Result<(), String> {
+    for (k, v) in config {
+        state.db.set_config(&k, &v).map_err(|e| e.to_string())?;
+    }
+    for call in follow_callsigns {
+        state.db.add_follow_callsign(&call);
+    }
+    Ok(())
 }
 
 /// Total rows in `callsign_qth` -- the frontend's first-run check: an empty
@@ -951,10 +1082,22 @@ fn main() {
             set_input_device,
             set_output_device,
             set_rx_audio_channel,
+            set_decode_depth,
             set_tx_audio_channel,
             set_qmx_cat_tones,
             select_rig,
             disconnect_rig,
+            set_swr_halt_enabled,
+            set_swr_halt_threshold,
+            clear_swr_lockout,
+            set_tune_max_on_seconds,
+            set_tune_method,
+            set_tune_level_independent,
+            set_tune_level,
+            set_tx_watchdog,
+            set_max_73_sends,
+            set_auto_cq_after_qso,
+            set_clear_on_band_mode_change,
             refresh_status,
             resync_time,
             set_clock_offset,
@@ -983,6 +1126,10 @@ fn main() {
             export_adif,
             pick_adif_file,
             import_adif,
+            export_settings_backup,
+            pick_settings_backup_file,
+            preview_settings_backup,
+            apply_settings_backup,
             callsign_qth_count,
             qth_for_call,
             map_tile,

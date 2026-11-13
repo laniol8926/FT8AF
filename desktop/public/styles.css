@@ -518,6 +518,7 @@ select option {
    drawer row (Band & Mode / TX period+Tune+DX / TX volume), stacked. */
 .txbar { display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; background: var(--panel-2); border-top: 1px solid var(--border); }
 .txbar-row { display: flex; align-items: center; gap: 12px; }
+.swr-lockout-banner { justify-content: space-between; background: var(--tx); border-radius: 6px; padding: 8px 10px; color: #fff; font-size: 13px; }
 
 /* Shared Band & Mode picker (BandModePicker): the clickable label+chevron
    that opens BandModeSheet, in both its "title" (bare, big label -- TopBar)

@@ -20,6 +20,7 @@ use crate::qmx_cat_tones as cat_tones;
 use crate::qmx_meters;
 use crate::qso::{QsoEngine, QsoOutcome, QsoStatus};
 use crate::rig::{RigConfig, RigConnection};
+use crate::tx_protection;
 use crate::util;
 use crate::wf::{WfConfig, WfProcessor, WfWindow};
 
@@ -389,6 +390,11 @@ pub enum EngineCommand {
     /// `import_adif` (true before the import, false after, via a guard that
     /// resumes even on error).
     SetDecodeSuspended(bool),
+    /// Settings -> Advanced's "Decode Depth" toggle -- see `decode_deep`'s
+    /// own doc comment. Re-spawns the decoder thread (same mechanism
+    /// `switch_mode` already uses) since there's no live mid-stream config
+    /// channel into it.
+    SetDecodeDepth(bool),
     SetStation { call: String, grid: String },
     SetBand(u64),
     SetBaseFreq(i32),
@@ -470,6 +476,35 @@ pub enum EngineCommand {
     SetUdpConfig(crate::udp::UdpConfig),
     /// Re-broadcast this session's decodes over UDP (inbound WSJT-X Replay).
     UdpReplay,
+    /// Settings -> Transmission -> TX Protection's SWR Halt toggle.
+    SetSwrHaltEnabled(bool),
+    /// SWR Halt's threshold, a plain ratio (e.g. `3.0`) -- see
+    /// `tx_protection`'s module doc for why this isn't Android's normalized
+    /// 0-255 scale.
+    SetSwrHaltThreshold(f32),
+    /// Operator dismisses the SWR lockout banner, allowing TX again --
+    /// matches Android's `MeterProtectionController.clearSwrLockout`.
+    ClearSwrLockout,
+    /// Settings -> Transmission -> Tune's max-on-seconds cap.
+    SetTuneMaxOnSeconds(i64),
+    /// Settings -> Transmission -> Tune's method picker (Automatic/Internal/
+    /// Low power tone) -- see `tx_protection::decide_tune_action`.
+    SetTuneMethod(i32),
+    /// Settings -> Transmission -> Tune's "independent tune level" toggle.
+    SetTuneLevelIndependent(bool),
+    /// The independent tune level itself (0.0-1.0, same scale as `tx_gain`).
+    SetTuneLevel(f32),
+    /// Settings -> Transmission's "TX Watchdog" ("Stop After" N unanswered
+    /// attempts) -- Android's `noReplyLimit`, 0 = unlimited.
+    SetTxWatchdog(u32),
+    /// Settings -> Transmission's "Max 73 Sends" -- Android's `max73Sends`,
+    /// 0 = Auto/off.
+    SetMax73Sends(u32),
+    /// Settings -> Auto-Sequence's "Auto-CQ after QSO" -- see `Engine::new`'s
+    /// doc comment on why desktop's *default* differs from Android's own.
+    SetAutoCqAfterQso(bool),
+    /// Settings -> Transmission's "Clear decodes on band/mode change".
+    SetClearOnBandModeChange(bool),
     Shutdown,
 }
 
@@ -519,6 +554,9 @@ pub struct TxStateEvent {
     /// Operator's preferred TX slot parity for the next CQ/QSO start (0 =
     /// Even, 1 = Odd, `None` = no preference) -- see `EngineCommand::SetTxPeriod`.
     pub preferred_tx_parity: Option<i64>,
+    /// SWR Halt's lockout -- see `EngineCommand::ClearSwrLockout`. True
+    /// blocks starting any new TX/Tune until explicitly cleared.
+    pub swr_lockout: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -587,6 +625,10 @@ pub enum EngineEvent {
     /// only — see [`crate::rig::supports_meter_query`]). Either field is
     /// `None` when that particular query didn't return a valid reading.
     Meter(MeterEvent),
+    /// Settings -> Transmission's "Clear decodes on band/mode change": the
+    /// UI should wipe its own decode-row list, same as the operator
+    /// pressing the manual "Clear the decode list" button.
+    ClearDecodeList,
     Info(String),
     Error(String),
 }
@@ -735,6 +777,11 @@ struct Engine {
     /// pause than `decoding` itself. See that command's doc comment for why
     /// it exists and exactly what it does and doesn't touch.
     decode_suspended: bool,
+    /// Settings -> Advanced's "Decode Depth" -- see `spawn_decoder_thread`'s
+    /// doc comment. Only takes effect on the next decoder (re)spawn
+    /// (mode switch or `EngineCommand::SetDecodeDepth`), same as `mode`
+    /// itself -- the decoder thread has no live mid-stream config channel.
+    decode_deep: bool,
     dial_hz: u64,
     tx_audio_hz: i32,
     /// TX output level (0.0–1.0) applied to the waveform before playback.
@@ -829,6 +876,39 @@ struct Engine {
     udp: crate::udp::UdpService,
     /// UTC ms of the last UDP Heartbeat sent (rate-limits it to ~15 s).
     last_udp_heartbeat_ms: i64,
+    /// Settings -> Transmission -> TX Protection: SWR Halt. A plain ratio
+    /// threshold, not Android's normalized 0-255 (see `tx_protection`'s
+    /// module doc). Checked in the periodic meter tick and at the end of a
+    /// CAT-tone over (`finalize_tx`) via `note_swr_reading`.
+    swr_halt_enabled: bool,
+    swr_halt_threshold: f32,
+    /// Session-only, never persisted (matches Android's own `swrLockout`
+    /// LiveData) -- set by `note_swr_reading`, cleared only by an explicit
+    /// `EngineCommand::ClearSwrLockout`. Blocks starting any new TX/Tune
+    /// (`maybe_transmit`/`start_tune`) until cleared.
+    swr_lockout: bool,
+    /// Settings -> Transmission -> Tune. Hard cap on a single tune carrier
+    /// (`TuneController.DEFAULT_MAX_ON_SECONDS`-equivalent) -- desktop's
+    /// Tune had no timeout at all before this.
+    tune_max_on_seconds: i64,
+    /// Monotonic start of the in-flight tune, for the max-on timeout. `None`
+    /// whenever `tx_tune` is `None` (set together in `start_tune`, cleared
+    /// together in `finalize_tx`).
+    tune_started_at: Option<Instant>,
+    /// Settings -> Transmission -> Tune's method picker (Automatic/Internal/
+    /// Rig tuner/Low power tone) -- see `tx_protection::decide_tune_action`'s
+    /// doc comment for why `Internal`/`Automatic` currently behave alike on
+    /// desktop (no rig backend here exposes an ATU-start CAT command yet).
+    tune_method: i32,
+    /// Settings -> Transmission -> Tune's "independent tune level" -- when
+    /// true, Tune uses `tune_gain` instead of the normal `tx_gain` for its
+    /// carrier (ported from Android's own separate tune-level slider: a
+    /// tuner match often wants less power than a full FT8 over).
+    tune_level_independent: bool,
+    tune_gain: f32,
+    /// Settings -> Transmission's "Clear decodes on band/mode change" --
+    /// see `EngineCommand::SetBand`/`switch_mode`.
+    clear_on_band_mode_change: bool,
 }
 
 /// Whether the keepalive should resend PTT-on now. `since_last_on` is the
@@ -850,13 +930,14 @@ fn should_refresh_ptt(
 /// protocol (`Mode::ffi_protocol()`) -- called once from `Engine::new` and
 /// again from `switch_mode` whenever the operating mode changes, since a
 /// `Decoder` is built for one protocol for its whole lifetime.
-fn spawn_decoder_thread(protocol: std::os::raw::c_int) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
+fn spawn_decoder_thread(protocol: std::os::raw::c_int, deep: bool) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
     let (slot_tx, slot_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let (dec_tx, dec_rx) = std::sync::mpsc::channel::<Vec<DecodedMessage>>();
     std::thread::Builder::new()
         .name("ft8af-decoder".into())
         .spawn(move || {
             let mut decoder = Decoder::new(SAMPLE_RATE, protocol);
+            decoder.set_deep(deep);
             while let Ok(slot) = slot_rx.recv() {
                 decoder.feed_slot(&slot);
                 let n = decoder.find_sync();
@@ -917,10 +998,34 @@ impl Engine {
         let rx_offset_ms = 0;
         let _ = db.set_config("rx_offset_ms", "0");
         let mode = Mode::from_config(&db.get_config("operating_mode").unwrap_or_default());
+        // Settings -> Advanced's "Decode Depth": more LDPC iterations + a
+        // lower sync-score threshold (see `Decoder::set_deep`'s own doc
+        // comment) -- a real, already-ported-but-never-wired knob found
+        // while researching Advanced, not new decode logic. Own config key
+        // (`decodeDeep`, plain boolean) rather than Android's `decodeDepth`
+        // (0/1/2 Fast/Balanced/Deep): desktop only has this one FAST/DEEP
+        // distinction, no separate BALANCED tier, so reusing Android's 3-
+        // value encoding would be a false equivalence.
+        let decode_deep = db.get_config("decodeDeep").as_deref() == Some("1");
         let mut qso = QsoEngine::new(my_call, my_grid);
         qso.band = bands::band_for_freq_hz(dial_hz).to_string();
         qso.freq_mhz = bands::freq_mhz_string(dial_hz);
         qso.mode = mode.display_name().to_string();
+        // Settings -> Transmission's TX Watchdog / Max 73 Sends -- Android's
+        // own key names, plain integer counts, 0 = unlimited/Auto (Android's
+        // own defaults).
+        qso.no_reply_limit = db.get_config("noReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        qso.max_73_sends = db.get_config("max73Sends").and_then(|s| s.parse().ok()).unwrap_or(0);
+        // Settings -> Auto-Sequence's "Auto-CQ after QSO" (Android's
+        // `autoCQAfterQSO`, default **false**). Desktop's own default here
+        // is deliberately kept at **true** when the key is unset -- this
+        // field already existed, hardcoded true, before this Settings pass
+        // (every completed QSO has always auto-chained back into CQ on
+        // desktop); wiring it to Android's real default would silently
+        // change that behavior for every existing install the first time
+        // this build runs. An operator who wants Android's own default can
+        // just switch the new toggle off.
+        qso.auto_return_to_cq = db.get_config("autoCQAfterQSO").map(|s| s == "1").unwrap_or(true);
 
         // Restore persisted waterfall FFT knobs (issue #428); defaults match
         // the historical hard-coded pipeline (Hann, 2048, 6-segment Welch).
@@ -950,10 +1055,39 @@ impl Engine {
         .sanitize();
         let wf = WfProcessor::new(wf_cfg);
 
-        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol());
+        // Settings -> Transmission -> TX Protection/Tune/Clear-on-change.
+        // Thresholds/levels use Android's exact defaults where this is a
+        // direct equivalent (tune max-on seconds); SWR halt uses a plain
+        // ratio, not Android's normalized 0-255 scale (see tx_protection's
+        // module doc).
+        let swr_halt_enabled = db.get_config("swrHaltEnabled").map(|s| s == "1").unwrap_or(false);
+        let swr_halt_threshold = db
+            .get_config("swrHaltThreshold")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(tx_protection::DEFAULT_SWR_HALT_THRESHOLD);
+        let tune_max_on_seconds = tx_protection::clamp_tune_max_on_seconds(
+            db.get_config("tuneMaxOnSeconds")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(tx_protection::DEFAULT_TUNE_MAX_ON_SECONDS),
+        );
+        let tune_method = tx_protection::clamp_tune_method(
+            db.get_config("tuneMethod").and_then(|s| s.parse().ok()).unwrap_or(0),
+        );
+        let tune_level_independent =
+            db.get_config("tuneLevelIndependent").map(|s| s == "1").unwrap_or(false);
+        let tune_gain = db
+            .get_config("tuneLevel")
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(clamp_tx_gain)
+            .unwrap_or(tx_gain);
+        let clear_on_band_mode_change =
+            db.get_config("clearOnBandModeChange").map(|s| s == "1").unwrap_or(true);
+
+        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol(), decode_deep);
 
         Engine {
             db,
+            decode_deep,
             evt,
             accum: Arc::new(SlotAccumulator::new()),
             slot_tx,
@@ -995,6 +1129,15 @@ impl Engine {
             wf,
             last_wf_slot: -1,
             last_udp_heartbeat_ms: 0,
+            swr_halt_enabled,
+            swr_halt_threshold,
+            swr_lockout: false,
+            tune_max_on_seconds,
+            tune_started_at: None,
+            tune_method,
+            tune_level_independent,
+            tune_gain,
+            clear_on_band_mode_change,
         }
     }
 
@@ -1104,7 +1247,16 @@ impl Engine {
                 // last value, same as Android's.
                 let meter_safe_to_poll = self.tx_playback.is_some() || self.tx_tune.is_some();
                 if meter_safe_to_poll && self.rig_supports_meters {
-                    self.poll_meters();
+                    let swr = self.poll_meters();
+                    self.note_swr_reading(swr);
+                    // SWR Halt just fired on a reading taken mid-transmission
+                    // (tx_playback) or mid-tune (tx_tune) -- abort it right
+                    // now rather than waiting for the over to finish on its
+                    // own, matching Android's `haltForSwr` calling
+                    // `setActivated(false)` immediately.
+                    if self.swr_lockout && (self.tx_playback.is_some() || self.tx_tune.is_some()) {
+                        self.finalize_tx();
+                    }
                 }
             }
 
@@ -1112,6 +1264,20 @@ impl Engine {
             // monotonic clock, not on the 1 Hz UI tick, which runs on the
             // NTP-corrected clock and can stall when the offset steps backwards.
             self.refresh_ptt_keepalive();
+
+            // Tune max-on timeout: force-stop a tune that's run past its
+            // configured cap even if the operator does nothing -- a
+            // continuous carrier is the most dangerous thing this app can
+            // emit, so this is checked every loop pass against the same
+            // monotonic clock as the PTT keepalive above (immune to the
+            // NTP-corrected `now`'s clock-jump caveat), not gated on the
+            // 1 Hz UI tick.
+            if let Some(started) = self.tune_started_at {
+                if tx_protection::tune_expired(started.elapsed().as_millis() as i64, self.tune_max_on_seconds) {
+                    self.emit(EngineEvent::Info(format!("Tune stopped after {}s", self.tune_max_on_seconds)));
+                    self.finalize_tx();
+                }
+            }
 
             // Decode stays anchored to the UTC slot. Do not shift this from a
             // decoded message's DT: doing so changes the sample chosen as the slot
@@ -1237,6 +1403,17 @@ impl Engine {
     /// (`txed_slot` guard), so calling it from both `handle_decoded` and a command
     /// handler in the same slot transmits at most once.
     fn maybe_transmit(&mut self, slot_id: i64) {
+        // SWR Halt's lockout blocks every new transmission -- CQ, a QSO
+        // reply, or a courtesy 73 alike -- until explicitly cleared. Gating
+        // here (the one place every activation path funnels through, see
+        // StartCq/Answer/SetStage/FreeText) rather than at each of those
+        // call sites: the operator's click still arms `qso` normally (the
+        // QSO panel shows what it's waiting to send), it just never keys
+        // until the lockout clears -- matches Android's
+        // `setActivated(false)` in spirit without losing the click.
+        if self.swr_lockout {
+            return;
+        }
         // All the keying rules — active QSO, locked-parity alternation, once per
         // slot, and early enough in the cycle to fit the waveform — live in the pure
         // `tx_slot_eligible` so the run loop's boundary trigger shares them exactly.
@@ -1316,10 +1493,11 @@ impl Engine {
             ));
             return;
         }
+        let was_active = self.qso.active;
         self.qso.stop();
         self.tx_parity = None;
 
-        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol());
+        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol(), self.decode_deep);
         self.slot_tx = slot_tx;
         self.dec_rx = dec_rx;
 
@@ -1346,8 +1524,28 @@ impl Engine {
 
         let _ = self.db.set_config("operating_mode", mode.display_name());
         self.emit(EngineEvent::Info(format!("switched to {}", mode.display_name())));
-        self.publish_tx_state();
+        self.clear_decodes_and_target(was_active);
         self.publish_rig_status();
+    }
+
+    /// Settings -> Transmission's "Clear decodes on band/mode change": wipe
+    /// the UI's decode list and reset the TX target back to CQ, mirroring
+    /// Android's `MainViewModel.clearDecodesAndTarget`/`resetToCQ`. `was_active`
+    /// is the QSO engine's `active` flag from *before* the band/mode change
+    /// (callers capture it before touching anything) -- CQ is only re-armed
+    /// when something was actually running, so moving the dial while idle
+    /// doesn't start transmitting out of nowhere. No-op (beyond publishing
+    /// state) when the setting is off. Always publishes TX state so the UI's
+    /// QSO panel reflects a cleared or re-armed target immediately.
+    fn clear_decodes_and_target(&mut self, was_active: bool) {
+        if self.clear_on_band_mode_change {
+            if was_active {
+                self.tx_parity = self.preferred_tx_parity;
+                self.qso.start_cq();
+            }
+            self.emit(EngineEvent::ClearDecodeList);
+        }
+        self.publish_tx_state();
     }
 
     /// Begin transmitting `message`, returning immediately. Playback runs off the
@@ -1475,8 +1673,29 @@ impl Engine {
         if self.tx_playback.is_some() || self.tx_cat.is_some() || self.tx_tune.is_some() {
             return;
         }
+        // SWR Halt's lockout blocks a new Tune exactly like a new TX --
+        // matches Android's own `FT8TransmitSignal.startTune` refusing while
+        // `isSwrLocked()` (a high-SWR fault doesn't go away just because the
+        // operator wants to try tuning again; they must clear it first).
+        if self.swr_lockout {
+            self.emit(EngineEvent::Error(
+                "SWR protection lockout is active -- clear it in Settings before tuning".into(),
+            ));
+            return;
+        }
+        // Tune method "Internal tuner": refuse rather than key a surprise
+        // carrier when no rig ATU-start path is available -- see
+        // `tx_protection::decide_tune_action`'s doc comment on why
+        // `atu_available` is always `false` here today.
+        if tx_protection::decide_tune_action(self.tune_method, false) == tx_protection::TuneAction::Unavailable {
+            self.emit(EngineEvent::Error(
+                "Tune method is set to \"Internal tuner\", but no connected rig exposes one over CAT yet".into(),
+            ));
+            return;
+        }
         self.set_ptt(true);
         std::thread::sleep(Duration::from_millis(PTT_DELAY_MS));
+        let tune_gain = if self.tune_level_independent { self.tune_gain } else { self.tx_gain };
         if self.tx_via_cat_tones {
             if let Some(rig) = self.rig.as_mut() {
                 if let Err(e) = rig.send_raw_cat(&cat_tones::ta_command(self.tx_audio_hz as f64)) {
@@ -1487,12 +1706,7 @@ impl Engine {
             }
             self.tx_tune = Some(TuneHandle::Cat);
         } else {
-            match output::prepare_tune(
-                self.output_device.as_deref(),
-                self.tx_audio_hz as f32,
-                self.tx_gain,
-                self.tx_audio_channel,
-            ) {
+            match output::prepare_tune(self.output_device.as_deref(), self.tx_audio_hz as f32, tune_gain, self.tx_audio_channel) {
                 Ok(h) => self.tx_tune = Some(TuneHandle::Audio(h)),
                 Err(e) => {
                     self.emit(EngineEvent::Error(format!("tune failed: {e}")));
@@ -1501,6 +1715,7 @@ impl Engine {
                 }
             }
         }
+        self.tune_started_at = Some(Instant::now());
         self.publish_tx_state();
     }
 
@@ -1549,14 +1764,18 @@ impl Engine {
         let had_audio = self.tx_playback.take().is_some();
         let had_cat = self.tx_cat.take().is_some();
         let had_tune = self.tx_tune.take();
+        self.tune_started_at = None;
         let tune_was_cat = matches!(had_tune, Some(TuneHandle::Cat));
         if had_cat || tune_was_cat {
             // A CAT-tone transmission doesn't get polled live (see the 1Hz
             // tick block's comment on why) -- take one last reading here
             // instead, while RF from the final symbol is still live, just
-            // before the key-up command below silences it.
+            // before the key-up command below silences it. Only sets the
+            // lockout for the *next* over (see note_swr_reading) -- this one
+            // is already ending, so there's nothing left here to abort.
             if had_cat && self.rig_supports_meters {
-                self.poll_meters();
+                let swr = self.poll_meters();
+                self.note_swr_reading(swr);
             }
             if let Some(rig) = self.rig.as_mut() {
                 // Best-effort: a failed key-up here has already failed every
@@ -1590,8 +1809,8 @@ impl Engine {
     /// against the persisted value (via `set_power_watts_if_changed`)
     /// provides the same "don't rewrite on every over if the reading is
     /// stable" dedup Android's own save-on-unkey gets from a different angle.
-    fn poll_meters(&mut self) {
-        let Some(rig) = self.rig.as_mut() else { return };
+    fn poll_meters(&mut self) -> Option<f32> {
+        let Some(rig) = self.rig.as_mut() else { return None };
         let swr = rig
             .send_raw_cat_query(qmx_meters::SWR_QUERY, qmx_meters::REPLY_TERM)
             .ok()
@@ -1610,6 +1829,40 @@ impl Engine {
                     let _ = self.db.set_config("powerWatts", &text);
                 }
             }
+        }
+        swr
+    }
+
+    /// Check an SWR reading against the halt threshold and set the lockout
+    /// if it fires -- ported from Android's `MeterProtectionController.
+    /// onMeterUpdate`'s SWR half (ALC sampling is handled separately, see
+    /// `tx_protection`'s module doc on why desktop has nothing to feed it
+    /// yet). Deliberately does **not** itself stop any transmission: the
+    /// periodic meter tick aborts a live `tx_playback`/`tx_tune` right after
+    /// calling this (see that call site); the `finalize_tx` call site (a
+    /// CAT-tone over's final reading) only needs the lockout set for the
+    /// *next* over, since that over is already ending -- and calling
+    /// `finalize_tx` again from in here, while already inside it, would be
+    /// real re-entrancy.
+    fn note_swr_reading(&mut self, swr: Option<f32>) {
+        if self.swr_lockout {
+            return; // already locked out; nothing new to do until cleared
+        }
+        let tuning = self.tx_tune.is_some();
+        if tx_protection::should_halt_for_swr(swr, self.swr_halt_enabled, self.swr_halt_threshold, tuning) {
+            self.swr_lockout = true;
+            // Matches Android's `haltForSwr` calling `setActivated(false)`:
+            // a high-SWR fault ends the whole auto-sequence (CQ or QSO),
+            // not just this one over -- the operator must explicitly clear
+            // the lockout and re-arm, not just wait for the next slot.
+            self.qso.stop();
+            self.tx_parity = None;
+            self.emit(EngineEvent::Error(format!(
+                "SWR protection: TX halted (SWR {:.1}, threshold {:.1}) -- clear the lockout in Settings to resume",
+                swr.unwrap_or(0.0),
+                self.swr_halt_threshold
+            )));
+            self.publish_tx_state();
         }
     }
 
@@ -1809,6 +2062,7 @@ impl Engine {
             status: self.qso.status(),
             tuning: self.tx_tune.is_some(),
             preferred_tx_parity: self.preferred_tx_parity,
+            swr_lockout: self.swr_lockout,
         }));
         // Mirror the state change out over WSJT-X UDP so companion apps see TX
         // start/stop and QSO progress without waiting for the next 1 Hz tick.
@@ -1906,6 +2160,13 @@ impl Engine {
             EngineCommand::SetDecodeSuspended(suspended) => {
                 self.decode_suspended = suspended;
             }
+            EngineCommand::SetDecodeDepth(deep) => {
+                self.decode_deep = deep;
+                let _ = self.db.set_config("decodeDeep", if deep { "1" } else { "0" });
+                let (slot_tx, dec_rx) = spawn_decoder_thread(self.mode.ffi_protocol(), deep);
+                self.slot_tx = slot_tx;
+                self.dec_rx = dec_rx;
+            }
             EngineCommand::SetStation { call, grid } => {
                 self.qso.my_call = call.to_uppercase();
                 self.qso.my_grid = util::grid4(&grid).to_uppercase();
@@ -1928,6 +2189,7 @@ impl Engine {
                 self.udp.clear_replay_cache();
                 self.broadcast_status();
                 self.publish_rig_status();
+                self.clear_decodes_and_target(self.qso.active);
             }
             EngineCommand::SetBaseFreq(hz) => {
                 self.tx_audio_hz = hz.clamp(MIN_TX_AUDIO_HZ, MAX_TX_AUDIO_HZ);
@@ -1978,6 +2240,50 @@ impl Engine {
                 }
             }
             EngineCommand::UdpReplay => self.udp.replay(),
+            EngineCommand::SetSwrHaltEnabled(enabled) => {
+                self.swr_halt_enabled = enabled;
+                let _ = self.db.set_config("swrHaltEnabled", if enabled { "1" } else { "0" });
+            }
+            EngineCommand::SetSwrHaltThreshold(threshold) => {
+                self.swr_halt_threshold = threshold;
+                let _ = self.db.set_config("swrHaltThreshold", &threshold.to_string());
+            }
+            EngineCommand::ClearSwrLockout => {
+                self.swr_lockout = false;
+                self.publish_tx_state();
+            }
+            EngineCommand::SetTuneMaxOnSeconds(seconds) => {
+                self.tune_max_on_seconds = tx_protection::clamp_tune_max_on_seconds(seconds);
+                let _ = self.db.set_config("tuneMaxOnSeconds", &self.tune_max_on_seconds.to_string());
+            }
+            EngineCommand::SetTuneMethod(method) => {
+                self.tune_method = tx_protection::clamp_tune_method(method);
+                let _ = self.db.set_config("tuneMethod", &self.tune_method.to_string());
+            }
+            EngineCommand::SetTuneLevelIndependent(independent) => {
+                self.tune_level_independent = independent;
+                let _ = self.db.set_config("tuneLevelIndependent", if independent { "1" } else { "0" });
+            }
+            EngineCommand::SetTuneLevel(gain) => {
+                self.tune_gain = clamp_tx_gain(gain);
+                let _ = self.db.set_config("tuneLevel", &self.tune_gain.to_string());
+            }
+            EngineCommand::SetTxWatchdog(limit) => {
+                self.qso.no_reply_limit = limit;
+                let _ = self.db.set_config("noReplyLimit", &limit.to_string());
+            }
+            EngineCommand::SetMax73Sends(cap) => {
+                self.qso.max_73_sends = cap;
+                let _ = self.db.set_config("max73Sends", &cap.to_string());
+            }
+            EngineCommand::SetAutoCqAfterQso(enabled) => {
+                self.qso.auto_return_to_cq = enabled;
+                let _ = self.db.set_config("autoCQAfterQSO", if enabled { "1" } else { "0" });
+            }
+            EngineCommand::SetClearOnBandModeChange(enabled) => {
+                self.clear_on_band_mode_change = enabled;
+                let _ = self.db.set_config("clearOnBandModeChange", if enabled { "1" } else { "0" });
+            }
             EngineCommand::SetInputDevice(name) => {
                 self.input_device = name.clone();
                 let _ = self.db.set_config("input_device", name.as_deref().unwrap_or(""));
@@ -2177,7 +2483,7 @@ mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, format_watts, reply_tx_audio_hz, rms_dbfs,
         should_default_qmx_cat_tones_on, should_refresh_ptt, resolve_tx_audio_channel,
-        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, TuneHandle, CLIP_PEAK,
+        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, EngineEvent, TuneHandle, CLIP_PEAK,
         DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ,
         MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
@@ -2762,5 +3068,138 @@ mod tests {
         pending = pending.saturating_sub(1);
         assert_eq!(pending, 0);
         assert!(!awaiting_any_decode(pending));
+    }
+
+    // --- TX Protection / Tune timeout / Clear-on-change -------------------
+
+    fn test_engine() -> Engine {
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        Engine::new(db, evt_tx, cmd_tx)
+    }
+
+    #[test]
+    fn swr_halt_sets_lockout_and_deactivates_the_qso() {
+        let mut engine = test_engine();
+        engine.swr_halt_enabled = true;
+        engine.swr_halt_threshold = 3.0;
+        engine.qso.start_cq();
+        assert!(engine.qso.active);
+
+        engine.note_swr_reading(Some(3.75));
+        assert!(engine.swr_lockout);
+        assert!(!engine.qso.active, "a halt must deactivate the whole auto-sequence");
+    }
+
+    #[test]
+    fn swr_halt_never_fires_while_tuning() {
+        let mut engine = test_engine();
+        engine.swr_halt_enabled = true;
+        engine.swr_halt_threshold = 3.0;
+        engine.tx_tune = Some(TuneHandle::Cat);
+
+        engine.note_swr_reading(Some(9.0));
+        assert!(!engine.swr_lockout);
+    }
+
+    #[test]
+    fn lockout_blocks_new_transmission_until_explicitly_cleared() {
+        let mut engine = test_engine();
+        engine.swr_lockout = true;
+        engine.qso.start_cq();
+        engine.qso.active = true; // re-armed after the halt, as StartCq would do
+        let before = engine.qso.tx_message().map(|s| s.to_string());
+
+        engine.maybe_transmit(engine.cur_slot());
+        // Blocked: no transmission attempted, state untouched.
+        assert_eq!(engine.qso.tx_message().map(|s| s.to_string()), before);
+
+        engine.handle(EngineCommand::ClearSwrLockout);
+        assert!(!engine.swr_lockout);
+    }
+
+    #[test]
+    fn start_tune_refuses_while_locked_out() {
+        let mut engine = test_engine();
+        engine.swr_lockout = true;
+        engine.start_tune();
+        assert!(engine.tx_tune.is_none());
+    }
+
+    #[test]
+    fn start_tune_refuses_internal_method_with_no_atu() {
+        let mut engine = test_engine();
+        engine.tune_method = crate::tx_protection::TUNE_METHOD_INTERNAL;
+        engine.start_tune();
+        assert!(engine.tx_tune.is_none(), "must not key a surprise carrier");
+    }
+
+    #[test]
+    fn tune_timeout_force_stops_a_forgotten_tune() {
+        let mut engine = test_engine();
+        engine.tune_max_on_seconds = 10;
+        engine.tx_tune = Some(TuneHandle::Cat);
+        engine.tune_started_at = Some(std::time::Instant::now() - Duration::from_secs(11));
+
+        // Mirrors the run loop's own check (see the main `run` method).
+        let expired = engine
+            .tune_started_at
+            .map(|s| crate::tx_protection::tune_expired(s.elapsed().as_millis() as i64, engine.tune_max_on_seconds))
+            .unwrap_or(false);
+        assert!(expired);
+        if expired {
+            engine.finalize_tx();
+        }
+        assert!(engine.tx_tune.is_none());
+        assert!(engine.tune_started_at.is_none());
+    }
+
+    #[test]
+    fn clear_on_band_change_rearms_cq_only_if_something_was_running() {
+        let mut engine = test_engine();
+        engine.clear_on_band_mode_change = true;
+        engine.qso.start_cq();
+        engine.handle(EngineCommand::SetBand(14_074_000));
+        assert_eq!(engine.qso.status().stage, crate::qso::TxStage::Cq);
+        assert!(engine.qso.active);
+    }
+
+    #[test]
+    fn clear_on_band_change_stays_idle_when_nothing_was_running() {
+        let mut engine = test_engine();
+        engine.clear_on_band_mode_change = true;
+        assert!(!engine.qso.active);
+        engine.handle(EngineCommand::SetBand(14_074_000));
+        assert!(!engine.qso.active, "must not start transmitting out of nowhere");
+    }
+
+    #[test]
+    fn clear_on_band_change_disabled_leaves_qso_untouched() {
+        let mut engine = test_engine();
+        engine.clear_on_band_mode_change = false;
+        engine.qso.answer(&DecodedMessage { call_from: "K1ABC".into(), ..Default::default() });
+        let target_before = engine.qso.status().target.clone();
+        engine.handle(EngineCommand::SetBand(14_074_000));
+        assert_eq!(engine.qso.status().target, target_before, "setting is off -- must not touch the QSO");
+    }
+
+    #[test]
+    fn clear_decode_list_event_serializes_with_a_data_field() {
+        // EngineEvent uses #[serde(tag = "type", content = "data")] -- but a
+        // *unit* variant (no payload, unlike every other EngineEvent member)
+        // serializes with no "data" key at all, not "data":null. Confirmed
+        // here so the TS side's EngineEvent type matches precisely.
+        let json = serde_json::to_string(&EngineEvent::ClearDecodeList).unwrap();
+        assert_eq!(json, r#"{"type":"clear_decode_list"}"#);
+    }
+
+    #[test]
+    fn tx_watchdog_and_max_73_sends_commands_persist_into_qso() {
+        let mut engine = test_engine();
+        engine.handle(EngineCommand::SetTxWatchdog(5));
+        engine.handle(EngineCommand::SetMax73Sends(2));
+        assert_eq!(engine.qso.no_reply_limit, 5);
+        assert_eq!(engine.qso.max_73_sends, 2);
     }
 }
