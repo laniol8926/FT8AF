@@ -69,7 +69,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { background: var(--tx); border-color: var(--tx); color: #fff; }
 button:disabled { opacity: 0.5; cursor: default; }
 
-select, input {
+select, input, textarea {
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
@@ -77,6 +77,7 @@ select, input {
   padding: 6px 8px;
   font-size: 13px;
 }
+textarea { font-family: inherit; resize: vertical; width: 100%; }
 
 /* Scoped test: only the Rig control "Display name" field, targeted by its
    placeholder text (no JSX/rebuild needed) -- not touching the global
@@ -580,6 +581,120 @@ select option {
 .tx-volume-value { font-size: 12px; font-weight: 600; color: var(--muted); width: 36px; text-align: right; flex: none; }
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* Settings landing page + category drill-down (replaces the old single
+   .grid2 scroll -- see settings/SettingsPrimitives.tsx). */
+.settings-landing { display: flex; flex-direction: column; gap: 4px; max-width: 560px; }
+.settings-section-header {
+  color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; margin: 14px 0 2px;
+}
+.settings-section-header:first-child { margin-top: 0; }
+.settings-row {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-md);
+}
+.settings-row.clickable { cursor: pointer; }
+.settings-row.clickable:hover { background: var(--panel-2); }
+.settings-row.disabled { opacity: 0.5; }
+.settings-row-text { flex: 1; min-width: 0; }
+.settings-row-label { font-size: 13px; color: var(--text); }
+.settings-row-desc { font-size: 11px; margin-top: 2px; }
+.settings-row-value { font-size: 12px; }
+.settings-row-chevron { color: var(--muted); font-size: 18px; }
+
+/* Pill toggle switch for a SettingsRow's `toggle` prop -- matches Android's
+   Material Switch closely enough (amber-filled track + thumb when on). */
+.settings-toggle { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
+.settings-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+.settings-toggle-track {
+  position: absolute; inset: 0; background: var(--panel-3); border: 1px solid var(--border);
+  border-radius: 999px; cursor: pointer; transition: background 0.15s, border-color 0.15s;
+}
+.settings-toggle-track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  background: var(--muted); border-radius: 50%; transition: transform 0.15s, background 0.15s;
+}
+.settings-toggle input:checked + .settings-toggle-track { background: var(--accent-soft); border-color: var(--border-amber); }
+.settings-toggle input:checked + .settings-toggle-track::after { transform: translateX(16px); background: var(--accent); }
+
+/* Category list: Android shows one flat card (no per-category group headers),
+   rows divided by a hairline rather than each row being its own bordered box. */
+.settings-category-list { display: flex; flex-direction: column; }
+.settings-category-list .settings-row {
+  background: transparent; border: none; border-radius: 0; padding: 12px 12px;
+}
+.settings-category-list .settings-row + .settings-row { border-top: 1px solid var(--border-subtle); }
+.settings-category-card { padding: 4px 8px; }
+
+/* Inline segmented control inside a SettingsRow (Receive/Transmit Audio
+   Channel) -- a full-width 3-way (or N-way) button group under the label/
+   description, applying live with no dialog. */
+.settings-row-segmented { flex-direction: column; align-items: stretch; }
+.settings-segment-group { display: flex; gap: 8px; margin-top: 8px; }
+.settings-segment {
+  flex: 1; padding: 10px 8px; border-radius: var(--radius-pill); border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--muted); font-weight: 600; cursor: pointer; text-align: center;
+}
+.settings-segment.active { background: var(--accent-soft); border-color: var(--border-amber); color: var(--accent); }
+.settings-segment:disabled { opacity: 0.5; cursor: default; }
+
+/* ListPickerDialog -- modal single-select list (Rig Model, Baud Rate, Audio
+   Input/Output, etc). Reuses the existing .modal/.modal-header/.modal-close
+   shell. */
+.list-picker-dialog { display: flex; flex-direction: column; gap: 10px; max-height: 80vh; }
+.list-picker-search {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 8px 10px; font-size: 13px;
+}
+.list-picker-options { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.list-picker-option {
+  display: flex; align-items: center; justify-content: space-between; padding: 10px 10px;
+  border-radius: var(--radius-sm); cursor: pointer; color: var(--text); font-size: 13px;
+}
+.list-picker-option:hover { background: var(--panel-2); }
+.list-picker-option.active { color: var(--accent); background: var(--accent-soft); }
+.list-picker-check { color: var(--accent); }
+
+/* About dialog links (FAQ & Support). */
+.about-dialog { width: 420px; }
+.about-link { color: var(--accent); font-size: 13px; cursor: pointer; margin-top: 2px; }
+.about-link:hover { text-decoration: underline; }
+
+/* Operator identity card -- amber-tinted, matches Android's OperatorCard
+   (gradient background, amber border, avatar + callsign/grid + rig/antenna/
+   power mini-stats), since the user asked for the landing page's initial
+   look to match the real app screenshot exactly. */
+.operator-card {
+  display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--accent-soft), rgba(255, 175, 94, 0.04));
+  border: 1px solid var(--border-amber); cursor: pointer;
+}
+.operator-card:hover { background: linear-gradient(135deg, var(--accent-soft), rgba(255, 175, 94, 0.08)); }
+.operator-card-top { display: flex; align-items: center; gap: 12px; }
+.operator-avatar {
+  flex: none; width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; background: var(--panel-3); border: 1px solid var(--border-amber);
+  color: var(--accent); font-weight: 700; font-size: 18px;
+}
+.operator-identity { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.operator-callsign { font-size: 22px; font-weight: 700; letter-spacing: 0.02em; color: var(--text); }
+.operator-grid { font-size: 13px; color: var(--muted); }
+.operator-tap-hint { font-size: 11px; color: var(--text-faint); }
+.operator-divider { border: none; border-top: 1px solid var(--border-amber); margin: 0; }
+.operator-stats { display: flex; justify-content: space-evenly; }
+.operator-stat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.operator-stat-label { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+.operator-stat-value { font-size: 12px; font-weight: 500; color: var(--muted); }
+.settings-detail { display: flex; flex-direction: column; gap: 12px; max-width: 560px; }
+.settings-detail-header { display: flex; align-items: center; gap: 10px; }
+.settings-detail-header h3 { margin: 0; font-size: 15px; color: var(--text); }
+.settings-back {
+  width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--panel-2);
+  color: var(--text); font-size: 16px; cursor: pointer;
+}
+.settings-detail-body { display: flex; flex-direction: column; gap: 12px; }
 .muted { color: var(--muted); }
 
 /* Logbook tab: inline search/filter/export controls + edit dialog. */

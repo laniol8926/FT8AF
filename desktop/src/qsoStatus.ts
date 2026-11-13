@@ -46,7 +46,18 @@ export interface QsoStatusFlags {
   isWorked: boolean;
 }
 
-const HIGHLIGHT_DEFAULTS = {
+export interface HighlightConfig {
+  dxcc: boolean;
+  zone: boolean;
+  state: boolean;
+  grid: boolean;
+  prefix: boolean;
+  band: boolean;
+  worked: boolean;
+  pota: boolean;
+}
+
+export const HIGHLIGHT_DEFAULTS: HighlightConfig = {
   dxcc: true,
   zone: true,
   state: false,
@@ -57,17 +68,21 @@ const HIGHLIGHT_DEFAULTS = {
   pota: true,
 };
 
-/** Highest-priority applicable status, or null for a plain (unremarkable) message. */
-export function resolveQsoStatus(f: QsoStatusFlags): QsoStatus | null {
+/** Highest-priority applicable status, or null for a plain (unremarkable)
+ *  message. `highlights` defaults to Android's own defaults (matching every
+ *  existing call site's prior unconfigurable behavior exactly); Settings ->
+ *  Decode & Filters -> Decode Highlights passes the operator's real,
+ *  persisted choice once loaded (see `App.tsx`'s `highlightConfig` state). */
+export function resolveQsoStatus(f: QsoStatusFlags, highlights: HighlightConfig = HIGHLIGHT_DEFAULTS): QsoStatus | null {
   if (f.isToMe) return "pending";
-  if (HIGHLIGHT_DEFAULTS.pota && f.isPota) return "pota";
-  if (HIGHLIGHT_DEFAULTS.dxcc && f.isNewDxcc) return "new_dxcc";
-  if (HIGHLIGHT_DEFAULTS.zone && f.isNewZone) return "new_zone";
-  if (HIGHLIGHT_DEFAULTS.state && f.isNewState) return "new_state";
-  if (HIGHLIGHT_DEFAULTS.grid && f.isNewGrid) return "new_grid";
-  if (HIGHLIGHT_DEFAULTS.prefix && f.isNewPrefix) return "new_prefix";
-  if (HIGHLIGHT_DEFAULTS.band && f.isWorkedOtherBand) return "new_band";
-  if (HIGHLIGHT_DEFAULTS.worked && f.isWorked) return "worked";
+  if (highlights.pota && f.isPota) return "pota";
+  if (highlights.dxcc && f.isNewDxcc) return "new_dxcc";
+  if (highlights.zone && f.isNewZone) return "new_zone";
+  if (highlights.state && f.isNewState) return "new_state";
+  if (highlights.grid && f.isNewGrid) return "new_grid";
+  if (highlights.prefix && f.isNewPrefix) return "new_prefix";
+  if (highlights.band && f.isWorkedOtherBand) return "new_band";
+  if (highlights.worked && f.isWorked) return "worked";
   if (f.isCq) return "cq";
   return null;
 }

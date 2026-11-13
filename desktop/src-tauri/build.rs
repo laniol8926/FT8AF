@@ -87,6 +87,16 @@ fn main() {
     println!("cargo:rerun-if-changed=src/build_support.rs");
     println!("cargo:rerun-if-changed=hamlib");
 
+    // Build timestamp for Settings -> About's "Build <date>" row (Android's
+    // own `settings_build_date_format`/`GeneralVariables.BUILD_DATE`). Pure
+    // `std::time`, no extra build-dependency -- formatted at runtime in
+    // main.rs with the `chrono` the main crate already depends on.
+    let build_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    println!("cargo:rustc-env=FT8AF_BUILD_TIMESTAMP={build_timestamp}");
+
     // Generate the Tauri build context (reads tauri.conf.json).
     tauri_build::build();
 }

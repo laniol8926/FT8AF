@@ -1,6 +1,7 @@
 //! Cross-platform audio I/O (cpal): device enumeration, continuous 12 kHz
 //! capture into a slot buffer, and TX waveform playback.
 
+pub mod channel_select;
 pub mod devices;
 pub mod input;
 pub mod output;

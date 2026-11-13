@@ -32,6 +32,46 @@ pub enum RigBackend {
     G106,
 }
 
+/// How PTT is keyed for the Hamlib backend -- ported from the Android fork's
+/// own `ControlMode` (VOX/CAT/RTS/DTR; its BLUETOOTH and the commented-out
+/// NETWORK variant have no desktop equivalent and aren't ported). Maps
+/// directly onto Hamlib's own `ptt_type` conf token (confirmed against
+/// `rigctl --help`: "RIG"/"DTR"/"RTS"/"PARALLEL"/"CM108"/"GPIO"/"GPION"/
+/// "NONE" are the only accepted values) -- RTS/DTR still use the Hamlib
+/// connection for CAT frequency control, only the PTT signal itself moves to
+/// the serial line, matching Android's own doc comment on its RTS/DTR
+/// constants ("CI-V commands are still effective"). VOX asserts no PTT
+/// signal at all (`ptt_type=NONE`); the radio's own VOX circuit keys from TX
+/// audio. Only meaningful for `RigBackend::Hamlib` -- FLrig manages its own
+/// PTT internally, and G106 has a fixed CAT-PTT serial protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RigControlMode {
+    Vox,
+    Cat,
+    Rts,
+    Dtr,
+}
+
+impl RigControlMode {
+    /// The Hamlib `ptt_type` conf value for this mode.
+    fn hamlib_ptt_type(self) -> &'static str {
+        match self {
+            RigControlMode::Vox => "NONE",
+            RigControlMode::Cat => "RIG",
+            RigControlMode::Rts => "RTS",
+            RigControlMode::Dtr => "DTR",
+        }
+    }
+}
+
+fn default_control_mode() -> RigControlMode {
+    // Deliberately CAT, not Android's VOX default: this is the one Hamlib
+    // already drove implicitly before `control_mode` existed, so an existing
+    // saved config (no "control_mode" key yet) keeps working PTT unchanged.
+    RigControlMode::Cat
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RigConfig {
     #[serde(default = "default_backend")]
@@ -42,6 +82,9 @@ pub struct RigConfig {
     pub port: String,
     #[serde(default = "default_baud")]
     pub baud: u32,
+    /// How PTT is keyed -- Hamlib backend only, see [`RigControlMode`].
+    #[serde(default = "default_control_mode")]
+    pub control_mode: RigControlMode,
 
     // --- flrig backend ---
     #[serde(default = "default_flrig_host")]
@@ -710,6 +753,7 @@ impl Hamlib {
             set_conf(&fns, rig, "rig_pathname", &cfg.port);
             set_conf(&fns, rig, "serial_speed", &cfg.baud.to_string());
         }
+        set_conf(&fns, rig, "ptt_type", cfg.control_mode.hamlib_ptt_type());
 
         let rc = unsafe { (fns.rig_open)(rig) };
         if rc != 0 {
@@ -842,6 +886,29 @@ mod tests {
         assert!(!needs_cat_tone_tx(RigBackend::Flrig, QRPLABS_QMX_HAMLIB_MODEL));
         assert!(!needs_cat_tone_tx(RigBackend::None, QRPLABS_QMX_HAMLIB_MODEL));
         assert!(!needs_cat_tone_tx(RigBackend::Hamlib, 1036));
+    }
+
+    #[test]
+    fn control_mode_maps_to_the_exact_hamlib_ptt_type_tokens() {
+        // Confirmed against `rigctl --help`'s --ptt-type list: only these
+        // exact (case-sensitive) strings are accepted Hamlib conf values.
+        assert_eq!(RigControlMode::Vox.hamlib_ptt_type(), "NONE");
+        assert_eq!(RigControlMode::Cat.hamlib_ptt_type(), "RIG");
+        assert_eq!(RigControlMode::Rts.hamlib_ptt_type(), "RTS");
+        assert_eq!(RigControlMode::Dtr.hamlib_ptt_type(), "DTR");
+    }
+
+    #[test]
+    fn control_mode_json_round_trips_lowercase_matching_androids_own_naming() {
+        for (mode, json) in [
+            (RigControlMode::Vox, "\"vox\""),
+            (RigControlMode::Cat, "\"cat\""),
+            (RigControlMode::Rts, "\"rts\""),
+            (RigControlMode::Dtr, "\"dtr\""),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), json);
+            assert_eq!(serde_json::from_str::<RigControlMode>(json).unwrap(), mode);
+        }
     }
 
     #[derive(Default)]

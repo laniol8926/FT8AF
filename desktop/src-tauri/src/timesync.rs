@@ -10,8 +10,10 @@
 
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::db::Db;
 use crate::engine::EngineCommand;
 use crate::util;
 
@@ -68,10 +70,23 @@ pub fn query_offset_ms(server: &str) -> anyhow::Result<i64> {
     Ok(((t2 - t1) + (t3 - t4)) / 2)
 }
 
-/// Try each server in turn; return the first successful offset.
-pub fn query_offset_ms_multi() -> anyhow::Result<i64> {
+/// Which servers to try, in order: the operator's configured primary first if
+/// set (Android's own `ntpServer` config key -- Settings -> Time Sync), then
+/// the built-in pool. Pure and unit-tested separately from the real network
+/// I/O in `query_offset_ms`/`query_offset_ms_multi`.
+fn server_order(primary: Option<&str>) -> Vec<&str> {
+    let mut order = Vec::new();
+    if let Some(p) = primary.filter(|p| !p.is_empty()) {
+        order.push(p);
+    }
+    order.extend_from_slice(SERVERS);
+    order
+}
+
+/// Try each server in `server_order`; return the first successful offset.
+pub fn query_offset_ms_multi(primary: Option<&str>) -> anyhow::Result<i64> {
     let mut last_err = None;
-    for srv in SERVERS {
+    for srv in server_order(primary) {
         match query_offset_ms(srv) {
             Ok(off) => return Ok(off),
             Err(e) => last_err = Some(e),
@@ -88,13 +103,30 @@ fn ntp_ts_to_unix_ms(b: &[u8]) -> i64 {
     (secs - NTP_UNIX_DELTA) * 1000 + ms_frac
 }
 
-/// Spawn the background sync loop: sync on startup, then every hour (with a short
-/// retry back-off while offline). Pushes results into the engine via `SetClockOffset`.
-pub fn spawn_loop(tx: Sender<EngineCommand>) {
+/// Whether the periodic background NTP resync should run right now --
+/// Android's own `disciplineClockFromNtp` (default on; `"0"` turns it off so
+/// a manual correction, Settings -> Time Sync's own stepper, sticks instead
+/// of being overwritten by the next hourly sync). The one-shot "Sync now"
+/// button (`spawn_once`) ignores this -- an explicit request always runs.
+fn ntp_discipline_enabled(db: &Db) -> bool {
+    db.get_config("disciplineClockFromNtp").as_deref() != Some("0")
+}
+
+/// Spawn the background sync loop: sync on startup, then every hour (with a
+/// short retry back-off while offline or while discipline is turned off).
+/// Pushes results into the engine via `SetClockOffset`. Re-reads the
+/// configured server and the on/off toggle from `db` fresh every cycle, so
+/// changing either in Settings takes effect on the next tick without a
+/// restart.
+pub fn spawn_loop(tx: Sender<EngineCommand>, db: Arc<Db>) {
     std::thread::Builder::new()
         .name("ft8af-timesync".into())
         .spawn(move || loop {
-            match query_offset_ms_multi() {
+            if !ntp_discipline_enabled(&db) {
+                std::thread::sleep(RETRY_INTERVAL);
+                continue;
+            }
+            match query_offset_ms_multi(db.get_config("ntpServer").as_deref()) {
                 Ok(off) => {
                     if tx.send(EngineCommand::SetClockOffset(off)).is_err() {
                         return; // engine gone
@@ -108,13 +140,48 @@ pub fn spawn_loop(tx: Sender<EngineCommand>) {
 }
 
 /// Fire a one-shot sync (for a manual "Resync" button) without blocking the caller.
-pub fn spawn_once(tx: Sender<EngineCommand>) {
+pub fn spawn_once(tx: Sender<EngineCommand>, ntp_server: Option<String>) {
     std::thread::Builder::new()
         .name("ft8af-timesync-once".into())
         .spawn(move || {
-            if let Ok(off) = query_offset_ms_multi() {
+            if let Ok(off) = query_offset_ms_multi(ntp_server.as_deref()) {
                 let _ = tx.send(EngineCommand::SetClockOffset(off));
             }
         })
         .expect("spawn one-shot timesync thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_order_puts_a_configured_primary_first() {
+        assert_eq!(server_order(Some("ntp.example.org")), vec!["ntp.example.org", "time.cloudflare.com", "time.google.com", "pool.ntp.org"]);
+    }
+
+    #[test]
+    fn server_order_falls_back_to_the_built_in_pool_when_unset() {
+        assert_eq!(server_order(None), SERVERS.to_vec());
+    }
+
+    #[test]
+    fn server_order_treats_an_empty_string_as_unset() {
+        assert_eq!(server_order(Some("")), SERVERS.to_vec());
+    }
+
+    #[test]
+    fn ntp_discipline_is_on_by_default() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        assert!(ntp_discipline_enabled(&db));
+    }
+
+    #[test]
+    fn ntp_discipline_turns_off_only_on_an_explicit_zero() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        db.set_config("disciplineClockFromNtp", "0").unwrap();
+        assert!(!ntp_discipline_enabled(&db));
+        db.set_config("disciplineClockFromNtp", "1").unwrap();
+        assert!(ntp_discipline_enabled(&db));
+    }
 }

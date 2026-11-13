@@ -153,6 +153,21 @@ fn select_rig(state: State<AppState>, config: RigConfig) {
 }
 
 #[tauri::command]
+fn set_rx_audio_channel(state: State<AppState>, channel: i32) {
+    state.engine.send(EngineCommand::SetRxAudioChannel(channel));
+}
+
+#[tauri::command]
+fn set_tx_audio_channel(state: State<AppState>, channel: i32) {
+    state.engine.send(EngineCommand::SetTxAudioChannel(channel));
+}
+
+#[tauri::command]
+fn set_qmx_cat_tones(state: State<AppState>, enabled: bool) {
+    state.engine.send(EngineCommand::SetQmxCatTones(enabled));
+}
+
+#[tauri::command]
 fn disconnect_rig(state: State<AppState>) {
     state.engine.send(EngineCommand::DisconnectRig);
 }
@@ -165,6 +180,17 @@ fn refresh_status(state: State<AppState>) {
 #[tauri::command]
 fn resync_time(state: State<AppState>) {
     state.engine.send(EngineCommand::ResyncTime);
+}
+
+/// Settings -> Time Sync's manual clock-correction stepper, for offline
+/// operating when NTP can't reach a server (Android's own
+/// `timeCorrectionMs`/`UtcTimer.delay`) -- reuses the exact same
+/// `SetClockOffset` command/code path an NTP sync success already uses,
+/// since both are "establish this offset as current truth" with identical
+/// semantics; a manual value is just another source for it.
+#[tauri::command]
+fn set_clock_offset(state: State<AppState>, offset_ms: i64) {
+    state.engine.send(EngineCommand::SetClockOffset(offset_ms));
 }
 
 #[tauri::command]
@@ -554,6 +580,49 @@ fn all_config(state: State<AppState>) -> Vec<(String, String)> {
     state.db.all_config()
 }
 
+#[derive(serde::Serialize)]
+struct AppInfo {
+    version: String,
+    build_date: String,
+}
+
+/// Settings -> About's version/build-date row -- `CARGO_PKG_VERSION` (CI-
+/// stamped from the release tag, see `ci/stamp-version.mjs`) and a build
+/// timestamp `build.rs` embeds at compile time (see its own comment),
+/// formatted here since `chrono` isn't a build-dependency.
+/// Open a URL in the system's default browser/mail client, for Settings ->
+/// About's website/community/author links and "Report a Bug"'s GitHub-issue/
+/// email actions. A narrow `http(s)`/`mailto` scheme allowlist, not a
+/// general-purpose "run anything" command -- the string is operator-visible
+/// UI text (link targets this file defines or a mailto: this module builds),
+/// not untrusted network input, but the allowlist costs nothing and rules
+/// out e.g. a `file://` or shell-metacharacter surprise. Shells out to the
+/// platform opener directly (`xdg-open`/`open`/`start`) rather than adding
+/// `tauri-plugin-opener` as a dependency for three links.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:")) {
+        return Err("refusing to open a non-http(s)/mailto URL".into());
+    }
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&url).spawn()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&url).spawn()
+    };
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_app_info() -> AppInfo {
+    let ts: i64 = env!("FT8AF_BUILD_TIMESTAMP").parse().unwrap_or(0);
+    let build_date = chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    AppInfo { version: env!("CARGO_PKG_VERSION").to_string(), build_date }
+}
+
 // --- optional OS location -> grid (issue #471) ------------------------------
 
 /// Resolve the operator grid from the OS location service. Opt-in only: refuses
@@ -881,10 +950,14 @@ fn main() {
             set_rx_gain,
             set_input_device,
             set_output_device,
+            set_rx_audio_channel,
+            set_tx_audio_channel,
+            set_qmx_cat_tones,
             select_rig,
             disconnect_rig,
             refresh_status,
             resync_time,
+            set_clock_offset,
             start_cq,
             answer,
             set_stage,
@@ -918,6 +991,8 @@ fn main() {
             get_config,
             set_config,
             all_config,
+            get_app_info,
+            open_external,
             set_waterfall_config,
             set_wf_display_hz,
             set_wf_denoise,

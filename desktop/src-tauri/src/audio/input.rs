@@ -10,6 +10,7 @@ use cpal::{FromSample, Sample, SampleFormat};
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 
+use super::channel_select;
 use super::devices::find_input_device;
 use super::resample::MonoResampler;
 use super::slot::SlotAccumulator;
@@ -39,6 +40,7 @@ impl AudioInput {
         device_name: Option<&str>,
         accum: Arc<SlotAccumulator>,
         initial_gain: f32,
+        channel: i32,
     ) -> anyhow::Result<AudioInput> {
         let device = find_input_device(device_name)
             .ok_or_else(|| anyhow::anyhow!("no input audio device available"))?;
@@ -67,7 +69,7 @@ impl AudioInput {
                 let gain = gain.clone();
                 device.build_input_stream(
                     &config,
-                    move |data: &[f32], _| push_mono(data, channels, &mut prod, &gain),
+                    move |data: &[f32], _| push_mono(data, channels, channel, &mut prod, &gain),
                     err_fn,
                     None,
                 )?
@@ -76,7 +78,7 @@ impl AudioInput {
                 let gain = gain.clone();
                 device.build_input_stream(
                     &config,
-                    move |data: &[i16], _| push_mono(data, channels, &mut prod, &gain),
+                    move |data: &[i16], _| push_mono(data, channels, channel, &mut prod, &gain),
                     err_fn,
                     None,
                 )?
@@ -85,7 +87,7 @@ impl AudioInput {
                 let gain = gain.clone();
                 device.build_input_stream(
                     &config,
-                    move |data: &[u16], _| push_mono(data, channels, &mut prod, &gain),
+                    move |data: &[u16], _| push_mono(data, channels, channel, &mut prod, &gain),
                     err_fn,
                     None,
                 )?
@@ -139,8 +141,11 @@ impl Drop for AudioInput {
 /// push into the ring producer. `gain` is read fresh per sample (a relaxed
 /// atomic load is cheap, and this runs on the realtime audio thread, so no
 /// locking) -- lets the gain slider feel immediate rather than only taking
-/// effect on the next buffer.
-fn push_mono<T, P>(data: &[T], channels: usize, prod: &mut P, gain: &AtomicU32)
+/// effect on the next buffer. `channel` (see [`channel_select`]) picks which
+/// channel(s) a multi-channel frame folds from -- a mono device (`channels
+/// == 1`) always just reads its one channel, regardless of `channel`, since
+/// there is nothing else to select from.
+fn push_mono<T, P>(data: &[T], channels: usize, channel: i32, prod: &mut P, gain: &AtomicU32)
 where
     T: Sample,
     f32: FromSample<T>,
@@ -171,27 +176,42 @@ where
         }
         return;
     }
+    let sel = channel_select::clamp(channel);
     for frame in data.chunks_exact(channels) {
-        let mut acc = 0.0f32;
-        for &s in frame {
-            acc += f32::from_sample(s);
-        }
-        let _ = prod.try_push(limit((acc / channels as f32) * g));
+        let raw = match sel {
+            channel_select::LEFT => f32::from_sample(frame[0]),
+            channel_select::RIGHT => f32::from_sample(frame[1]),
+            _ => {
+                let mut acc = 0.0f32;
+                for &s in frame {
+                    acc += f32::from_sample(s);
+                }
+                acc / channels as f32
+            }
+        };
+        let _ = prod.try_push(limit(raw * g));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::push_mono;
+    use crate::audio::channel_select;
     use ringbuf::traits::{Consumer, Split};
     use ringbuf::HeapRb;
     use std::sync::atomic::AtomicU32;
 
-    /// Run `push_mono` over `data` at the given gain and collect what landed.
+    /// Run `push_mono` over `data` at the given gain (channel selection
+    /// [`channel_select::BOTH`]) and collect what landed.
     fn pushed(data: &[f32], channels: usize, gain: f32) -> Vec<f32> {
+        pushed_channel(data, channels, channel_select::BOTH, gain)
+    }
+
+    /// Like [`pushed`], with an explicit channel selection.
+    fn pushed_channel(data: &[f32], channels: usize, channel: i32, gain: f32) -> Vec<f32> {
         let rb = HeapRb::<f32>::new(data.len().max(1) + 1);
         let (mut prod, mut cons) = rb.split();
-        push_mono(data, channels, &mut prod, &AtomicU32::new(gain.to_bits()));
+        push_mono(data, channels, channel, &mut prod, &AtomicU32::new(gain.to_bits()));
         cons.pop_iter().collect()
     }
 
@@ -239,5 +259,26 @@ mod tests {
         let got = pushed(&[0.2, 0.4, 0.9], 2, 1.0);
         assert_eq!(got.len(), 1);
         assert!((got[0] - 0.3).abs() < 1e-6, "got {got:?}");
+    }
+
+    #[test]
+    fn left_selection_reads_only_the_left_channel() {
+        // Two stereo frames: left channel is 0.4 then -1.0, right is ignored.
+        let got = pushed_channel(&[0.4, 0.8, -1.0, 0.0], 2, channel_select::LEFT, 1.0);
+        assert_eq!(got, vec![0.4, -1.0]);
+    }
+
+    #[test]
+    fn right_selection_reads_only_the_right_channel() {
+        let got = pushed_channel(&[0.4, 0.8, -1.0, 0.0], 2, channel_select::RIGHT, 1.0);
+        assert_eq!(got, vec![0.8, 0.0]);
+    }
+
+    #[test]
+    fn channel_selection_is_a_no_op_on_a_mono_device() {
+        // Only one channel exists, so LEFT/RIGHT behave exactly like BOTH.
+        let hot = [0.5, -0.25];
+        assert_eq!(pushed_channel(&hot, 1, channel_select::LEFT, 1.0), hot.to_vec());
+        assert_eq!(pushed_channel(&hot, 1, channel_select::RIGHT, 1.0), hot.to_vec());
     }
 }

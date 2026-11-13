@@ -75,6 +75,12 @@ export interface RigStatusEvent {
   model: string;
   frequency_hz: number;
   ptt: boolean;
+  /** TX-audio-channel/CAT-tones values actually in effect right now (after
+   *  auto-detect), not the raw config -- use these to display current state,
+   *  the raw `txAudioChannel`/`qmxCatTones` config only reflects an explicit
+   *  override. */
+  tx_via_cat_tones: boolean;
+  tx_audio_channel: number;
 }
 
 export interface ClockSyncEvent {
@@ -128,6 +134,11 @@ export interface QsoRecord {
   synced_cloudlog?: boolean;
   /** Already uploaded to QRZ.com's logbook. Read-only: see synced_cloudlog. */
   synced_qrz?: boolean;
+  /** Transmit power in watts at QSO completion (ADIF TX_PWR) -- the
+   *  operator's `powerWatts` Station setting at that moment, same free-text
+   *  field as Android's own QSLTable.tx_pwr. Optional here for the same
+   *  reason as synced_cloudlog/synced_qrz: always present when read back. */
+  tx_pwr?: string;
 }
 
 /** Result of an ADIF import: see the Rust `Db::import_adif` doc comment for
@@ -264,6 +275,12 @@ export interface OsLocation {
   grid: string;
 }
 
+/** Settings -> About's version/build-date row. */
+export interface AppInfo {
+  version: string;
+  build_date: string;
+}
+
 /** Waterfall FFT window (developer setting, issue #428). */
 export type WfWindow = "rect" | "hann" | "hamming" | "blackman" | "blackman_harris";
 
@@ -289,10 +306,14 @@ export const WF_DEFAULT_DISPLAY_HZ = 3_500;
 
 export type RigBackend = "none" | "flrig" | "hamlib" | "g106";
 
+/** How PTT is keyed for the Hamlib backend -- see `rig.rs`'s `RigControlMode`. */
+export type RigControlMode = "vox" | "cat" | "rts" | "dtr";
+
 export interface RigConfig {
   backend: RigBackend;
   port: string;
   baud: number;
+  control_mode: RigControlMode;
   flrig_host: string;
   flrig_port: number;
   hamlib_model: number;
@@ -346,10 +367,17 @@ export const api = {
   setRxGain: (gain: number) => invoke("set_rx_gain", { gain }),
   setInputDevice: (name: string | null) => invoke("set_input_device", { name }),
   setOutputDevice: (name: string | null) => invoke("set_output_device", { name }),
+  /** RX/TX audio channel selection (0=Mix/Both, 1=Left, 2=Right) -- see
+   *  src-tauri/src/audio/channel_select.rs. */
+  setRxAudioChannel: (channel: number) => invoke("set_rx_audio_channel", { channel }),
+  setTxAudioChannel: (channel: number) => invoke("set_tx_audio_channel", { channel }),
+  setQmxCatTones: (enabled: boolean) => invoke("set_qmx_cat_tones", { enabled }),
   selectRig: (config: RigConfig) => invoke("select_rig", { config }),
   disconnectRig: () => invoke("disconnect_rig"),
   refreshStatus: () => invoke("refresh_status"),
   resyncTime: () => invoke("resync_time"),
+  /** Manual clock-correction stepper for offline operating (Settings -> Time Sync). */
+  setClockOffset: (offsetMs: number) => invoke("set_clock_offset", { offsetMs }),
 
   startCq: () => invoke("start_cq"),
   answer: (args: { call_from: string; grid: string; snr: number }) =>
@@ -442,6 +470,11 @@ export const api = {
   getConfig: (key: string) => invoke<string | null>("get_config", { key }),
   setConfig: (key: string, value: string) => invoke("set_config", { key, value }),
   allConfig: () => invoke<[string, string][]>("all_config"),
+
+  /** Settings -> About's version/build-date row. */
+  getAppInfo: () => invoke<AppInfo>("get_app_info"),
+  /** Open a URL in the system default browser/mail client (http(s)/mailto only). */
+  openExternal: (url: string) => invoke<void>("open_external", { url }),
 
   /** Resolve the operator grid from the OS location service (opt-in, issue #471).
    * Rejects unless `location_service_enabled` is on. */

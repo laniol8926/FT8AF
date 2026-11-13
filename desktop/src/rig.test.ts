@@ -21,6 +21,7 @@ function cfg(overrides: Partial<RigConfig> = {}): RigConfig {
     backend: "none",
     port: "",
     baud: 38400,
+    control_mode: "cat",
     flrig_host: "127.0.0.1",
     flrig_port: 12345,
     hamlib_model: 1,

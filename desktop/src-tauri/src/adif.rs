@@ -255,6 +255,7 @@ pub fn adif_record_to_qso(fields: &HashMap<String, String>) -> Option<QsoRecord>
         synced_cloudlog: flag("APP_FT8AF_SYNCED_CLOUDLOG"),
         synced_qrz: flag("QRZCOM_QSO_UPLOAD_STATUS")
             || fields.get("APP_QRZLOG_LOGID").is_some_and(|v| !v.trim().is_empty()),
+        tx_pwr: get("TX_PWR"),
     })
 }
 

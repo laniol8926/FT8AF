@@ -15,16 +15,13 @@ import {
   onImportProgress,
   onFccGridProgress,
   onFccGridDone,
-  type AudioDevice,
   type BandInfo,
   type BestDx,
   type ClockSyncEvent,
-  type CustomBand,
   type CycleTick,
   type EngineEvent,
   type FccSeedProgress,
   type FccSeedSummary,
-  type HamlibRig,
   type ImportProgress,
   type ImportSummary,
   type InputLevelEvent,
@@ -32,14 +29,9 @@ import {
   type OperatingMode,
   type PskReporterSpot,
   type QsoRecord,
-  type RigConfig,
   type RigStatusEvent,
-  type SerialPortInfo,
   type TxStateEvent,
-  type UdpConfig,
   type UiMessage,
-  type WaterfallConfig,
-  type WfWindow,
   WF_DEFAULT_DISPLAY_HZ,
   WF_MIN_DISPLAY_HZ,
   WF_MAX_DISPLAY_HZ,
@@ -73,9 +65,11 @@ import {
   type QsoEditForm,
   type WacProgress,
 } from "./logbook";
-import { applySelection, configToSelection, rigName, rigOptions } from "./rig";
 import { debounce } from "./debounce";
-import { audioDeviceLabel } from "./audioDevice";
+import { filterEnabledBands } from "./bandFilter";
+import { parsePerBandLevels, recordPerBandLevel, resolvePerBandLevel, serializePerBandLevels } from "./perBandLevels";
+import { SettingsScreen } from "./settings/SettingsScreen";
+import { BandModePicker, MODE_LABEL } from "./bandModePicker";
 import {
   countRepliesTo,
   gridToLatLon,
@@ -83,14 +77,17 @@ import {
   isPotaCq,
   maidenheadDistanceKm,
   selectHuntCandidate,
-  HUNT_PRIORITIES,
   type HuntCandidate,
   type HuntPriority,
 } from "./hunt";
 import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
 import { formatDecodeDt, formatDecodeFreq, isDecodeDtNotable } from "./decodeRow";
 import { wpxPrefixOf } from "./wpxPrefix";
-import { resolveQsoStatus, QSO_STATUS_META } from "./qsoStatus";
+import { resolveQsoStatus, QSO_STATUS_META, HIGHLIGHT_DEFAULTS, type HighlightConfig } from "./qsoStatus";
+import {
+  parseWorkedMode, parseWorkedScope, isWorkedByScope, shouldHideWorked,
+  parseCallList, isBlocked, matchesWatchlist, type WorkedMode, type WorkedScope,
+} from "./decodeFilters";
 import { collapseByStation, nextSortMode, SORT_MODE_LABEL, SORT_MODE_TITLE, type DecodeSortMode } from "./decodeSort";
 import { EquirectViewport, minScaleForLatitude, scalePanForZoom, type Viewport } from "./mapViewport";
 import { AzimuthalViewport } from "./azimuthalViewport";
@@ -281,6 +278,89 @@ export default function App() {
   const [rigLabel, setRigLabel] = useState(""); // optional display-name override
   const [bands, setBands] = useState<BandInfo[]>([]);
   const [dialHz, setDialHz] = useState<number>(14074000);
+  // Enabled-bands filter + per-band RX/TX gain memory (Settings -> Radio &
+  // Audio), ported from the Android fork -- see bandFilter.ts/perBandLevels.ts.
+  // Kept here (not local to SettingsScreen) since both `bands`' own
+  // population (listBandsForMode call sites below) and `onBand` (the actual
+  // band-change handler) need them; `refreshAudioBandConfig` is handed down
+  // to Settings so it can ask this state to catch up after a change,
+  // avoiding fine-grained per-field callback props for 5 config keys.
+  const [excludedBandsCsv, setExcludedBandsCsv] = useState("");
+  const [perBandInputEnabled, setPerBandInputEnabled] = useState(false);
+  const [perBandOutputEnabled, setPerBandOutputEnabled] = useState(false);
+  const [perBandInputLevels, setPerBandInputLevels] = useState<Record<string, number>>({});
+  const [perBandOutputLevels, setPerBandOutputLevels] = useState<Record<string, number>>({});
+  // Android's own `showTxVolumeSlider` (default true) -- gates the TxBar
+  // drawer's inline TX-volume row below, toggled from Settings.
+  const [showVolumeSlider, setShowVolumeSlider] = useState(true);
+  function refreshAudioBandConfig() {
+    api.getConfig("excludedBands").then((v) => setExcludedBandsCsv(v ?? ""));
+    api.getConfig("perBandInputLevel").then((v) => setPerBandInputEnabled(v === "1"));
+    api.getConfig("perBandOutputLevel").then((v) => setPerBandOutputEnabled(v === "1"));
+    api.getConfig("perBandInputLevels").then((v) => setPerBandInputLevels(parsePerBandLevels(v)));
+    api.getConfig("perBandOutputLevels").then((v) => setPerBandOutputLevels(parsePerBandLevels(v)));
+    api.getConfig("showTxVolumeSlider").then((v) => setShowVolumeSlider(v !== "0"));
+  }
+  useEffect(refreshAudioBandConfig, []);
+
+  // Decode & Filters (Settings -> Decode & Filters, ported from Android's
+  // DecodeFilterSettings.kt): decode-list highlight toggles, worked-station
+  // handling, the callsign blocklist, two of the six Decode Filters toggles
+  // that don't need continent-of-operator data desktop doesn't derive yet
+  // (filterDxOnly/filterByContinent/respectDirectionalCQ/filterDirectionalCQ
+  // stay Settings-UI stubs for that reason), and the Needed-DX watchlist +
+  // alerts. Same "one refresh function, handed down to Settings" shape as
+  // refreshAudioBandConfig above, for the same reason (avoids ~20 individual
+  // callback props).
+  const [highlightConfig, setHighlightConfig] = useState<HighlightConfig>(HIGHLIGHT_DEFAULTS);
+  const [workedMode, setWorkedModeState] = useState<WorkedMode>("highlight");
+  const [workedScope, setWorkedScopeState] = useState<WorkedScope>("on_band");
+  const [workedSameMode, setWorkedSameModeState] = useState(false);
+  const [workedListCsv, setWorkedListCsv] = useState("");
+  const [blockedExact, setBlockedExact] = useState("");
+  const [blockedPrefixes, setBlockedPrefixes] = useState("");
+  const [blockedKeywords, setBlockedKeywords] = useState("");
+  const [filterShowOnlyCQ, setFilterShowOnlyCQ] = useState(false);
+  const [filterNeededOnly, setFilterNeededOnly] = useState(false);
+  const [watchCallsigns, setWatchCallsigns] = useState("");
+  const [alertNewDxcc, setAlertNewDxcc] = useState(false);
+  const [alertNewState, setAlertNewState] = useState(false);
+  const [alertOnCqReply, setAlertOnCqReply] = useState(false);
+  const [alertOnQsoComplete, setAlertOnQsoComplete] = useState(false);
+  function refreshDecodeFilterConfig() {
+    Promise.all([
+      api.getConfig("highlightNewDxcc"), api.getConfig("highlightNewZone"),
+      api.getConfig("highlightNewState"), api.getConfig("highlightNewGrid"),
+      api.getConfig("highlightNewPrefix"), api.getConfig("highlightNewBand"),
+      api.getConfig("highlightWorked"), api.getConfig("highlightPota"),
+    ]).then(([dxcc, zone, state, grid, prefix, band, worked, pota]) => {
+      setHighlightConfig({
+        dxcc: dxcc !== null ? dxcc !== "0" : HIGHLIGHT_DEFAULTS.dxcc,
+        zone: zone !== null ? zone !== "0" : HIGHLIGHT_DEFAULTS.zone,
+        state: state !== null ? state !== "0" : HIGHLIGHT_DEFAULTS.state,
+        grid: grid !== null ? grid !== "0" : HIGHLIGHT_DEFAULTS.grid,
+        prefix: prefix !== null ? prefix !== "0" : HIGHLIGHT_DEFAULTS.prefix,
+        band: band !== null ? band !== "0" : HIGHLIGHT_DEFAULTS.band,
+        worked: worked !== null ? worked !== "0" : HIGHLIGHT_DEFAULTS.worked,
+        pota: pota !== null ? pota !== "0" : HIGHLIGHT_DEFAULTS.pota,
+      });
+    });
+    api.getConfig("workedStationMode").then((v) => setWorkedModeState(parseWorkedMode(v)));
+    api.getConfig("workedStationScope").then((v) => setWorkedScopeState(parseWorkedScope(v)));
+    api.getConfig("workedSameMode").then((v) => setWorkedSameModeState(v === "1"));
+    api.getConfig("workedStationList").then((v) => setWorkedListCsv(v ?? ""));
+    api.getConfig("blockedExactCallsigns").then((v) => setBlockedExact(v ?? ""));
+    api.getConfig("excludedCallsigns").then((v) => setBlockedPrefixes(v ?? ""));
+    api.getConfig("blockedKeywords").then((v) => setBlockedKeywords(v ?? ""));
+    api.getConfig("filterShowOnlyCQ").then((v) => setFilterShowOnlyCQ(v === "1"));
+    api.getConfig("filterNeededOnly").then((v) => setFilterNeededOnly(v === "1"));
+    api.getConfig("watchCallsigns").then((v) => setWatchCallsigns(v ?? ""));
+    api.getConfig("alertNewDxcc").then((v) => setAlertNewDxcc(v === "1"));
+    api.getConfig("alertNewState").then((v) => setAlertNewState(v === "1"));
+    api.getConfig("alertOnCqReply").then((v) => setAlertOnCqReply(v === "1"));
+    api.getConfig("alertOnQsoComplete").then((v) => setAlertOnQsoComplete(v === "1"));
+  }
+  useEffect(refreshDecodeFilterConfig, []);
   // Operating mode (FT8/FT4), matching Android's Band & Mode selector --
   // shared by TopBar's title picker and the More panel's Band & Mode card
   // (see BandModePicker), same as Android reuses one bandModeLabel in both
@@ -529,6 +609,20 @@ export default function App() {
   workedCallsRef.current = workedCalls;
   const workedGridsRef = useRef(workedGrids);
   workedGridsRef.current = workedGrids;
+  // Needed-DX Alerts (Settings -> Decode & Filters) reads these inside the
+  // same mount-frozen handleEvent -- same reason as the refs above.
+  const workedDxccPrefixesRef = useRef(workedDxccPrefixes);
+  workedDxccPrefixesRef.current = workedDxccPrefixes;
+  const workedStatesRef = useRef(workedStates);
+  workedStatesRef.current = workedStates;
+  const watchCallsignsRef = useRef(watchCallsigns);
+  watchCallsignsRef.current = watchCallsigns;
+  const alertNewDxccRef = useRef(alertNewDxcc);
+  alertNewDxccRef.current = alertNewDxcc;
+  const alertNewStateRef = useRef(alertNewState);
+  alertNewStateRef.current = alertNewState;
+  const alertOnCqReplyRef = useRef(alertOnCqReply);
+  alertOnCqReplyRef.current = alertOnCqReply;
   const myGridRef = useRef(myGrid);
   myGridRef.current = myGrid;
   const huntEnabledRef = useRef(huntEnabled);
@@ -603,7 +697,7 @@ export default function App() {
       // follow mode, so it fetches directly instead of depending on a
       // separate effect whose dependency-change timing turned out to be
       // fragile in practice.
-      api.listBandsForMode(mode).then(setBands);
+      api.listBandsForMode(mode).then((b) => setBands(filterEnabledBands(b, excludedBandsCsv)));
     });
     api.getConfig("wf_display_hz").then((v) => {
       const hz = v == null ? NaN : parseFloat(v);
@@ -671,6 +765,7 @@ export default function App() {
           });
           if (showMessagesRef.current) drawSignalLabels(e.data);
           runHunt(e.data);
+          fireDecodeAlerts(e.data);
         }
         break;
       case "cycle":
@@ -753,6 +848,42 @@ export default function App() {
     api.answer({ call_from: target.call_from, grid: target.grid, snr: target.snr });
   }
 
+  // Needed-DX Alerts (Settings -> Decode & Filters), ported from Android's
+  // own alertNewDxcc/alertNewState/alertOnCqReply + callsign watchlist --
+  // Android's own description is "Sound + vibrate + notify"; desktop has
+  // neither a notification nor an audio-alert system yet, so this surfaces
+  // through the existing status line instead (same real estate `onStatus`
+  // already uses for "QSO logged"/rig-connect messages) rather than faking
+  // a sound. Checks the raw incoming batch, not the post-dedup `fresh` list
+  // (that's computed inside `setMessages`'s own updater and not available
+  // here) -- the dedup safety net only ever trims a rare duplicate engine
+  // event, so this can very occasionally re-fire for the same decode rather
+  // than silently never firing for a real one. First match per message wins
+  // (one status line per decode, not a pile of them).
+  function fireDecodeAlerts(batch: UiMessage[]) {
+    const watch = parseCallList(watchCallsignsRef.current);
+    const dxccPrefixes = workedDxccPrefixesRef.current;
+    const states = workedStatesRef.current;
+    for (const m of batch) {
+      if (watch.length > 0 && matchesWatchlist(m.call_from, watch)) {
+        setStatus(`Watchlist: ${m.call_from} decoded`);
+        continue;
+      }
+      if (alertOnCqReplyRef.current && m.to_me) {
+        setStatus(`${m.call_from} is calling you`);
+        continue;
+      }
+      if (!m.is_cq) continue;
+      if (alertNewDxccRef.current && m.dxcc_prefix != null && !dxccPrefixes.has(m.dxcc_prefix)) {
+        setStatus(`New DXCC: ${m.call_from}`);
+        continue;
+      }
+      if (alertNewStateRef.current && m.state != null && !states.has(m.state)) {
+        setStatus(`New state: ${m.call_from} (${m.state})`);
+      }
+    }
+  }
+
   // Decode starts itself once the operator has done the two things it
   // actually needs -- a callsign and a configured rig -- instead of making
   // "Start decode" a button someone has to remember to press every launch
@@ -764,7 +895,7 @@ export default function App() {
   // over an async channel, so re-reading `getConfig` immediately after would
   // race the write). A no-op once already decoding, so it's safe to call
   // repeatedly.
-  async function maybeAutoStartDecode(known?: { call: string; rigBackend: string }) {
+  async function maybeAutoStartDecode(known?: { call?: string; rigBackend?: string }) {
     if (decodingRef.current) return;
     const call = known?.call ?? (await api.getConfig("my_call"));
     if (!call) return;
@@ -786,9 +917,32 @@ export default function App() {
     setDecoding(true);
   }
 
+  // Per-band RX/TX gain memory (Settings -> Radio & Audio), ported from the
+  // Android fork: record the outgoing band's current gain (if memory is on
+  // and the band resolves), then recall the incoming band's saved gain (if
+  // any) -- see perBandLevels.ts for the pure save/recall logic this wraps.
   function onBand(hz: number) {
+    const fromBand = bands.find((b) => b.dial_hz === dialHz)?.name ?? null;
+    const toBand = bands.find((b) => b.dial_hz === hz)?.name ?? null;
+
+    const nextInputLevels = recordPerBandLevel(perBandInputEnabled, fromBand, inputGain, perBandInputLevels, 100);
+    if (nextInputLevels) {
+      setPerBandInputLevels(nextInputLevels);
+      api.setConfig("perBandInputLevels", serializePerBandLevels(nextInputLevels));
+    }
+    const nextOutputLevels = recordPerBandLevel(perBandOutputEnabled, fromBand, txGain, perBandOutputLevels, 100);
+    if (nextOutputLevels) {
+      setPerBandOutputLevels(nextOutputLevels);
+      api.setConfig("perBandOutputLevels", serializePerBandLevels(nextOutputLevels));
+    }
+
     setDialHz(hz);
     api.setBand(hz);
+
+    const restoredInput = resolvePerBandLevel(perBandInputEnabled, toBand, perBandInputLevels, inputGain);
+    if (restoredInput != null) onInputGain(restoredInput);
+    const restoredOutput = resolvePerBandLevel(perBandOutputEnabled, toBand, perBandOutputLevels, txGain);
+    if (restoredOutput != null) onTxGain(restoredOutput);
   }
 
   // Shared by DecodeScreen's own WaterfallStatusStrip and the standalone
@@ -832,7 +986,7 @@ export default function App() {
     // this function runs -- an effect only re-fires on a value change, so it
     // would miss a case where the optimistic setOperatingModeState above
     // already happened to match realMode.
-    api.listBandsForMode(realMode).then(setBands);
+    api.listBandsForMode(realMode).then((b) => setBands(filterEnabledBands(b, excludedBandsCsv)));
   }
 
   // Shared with Settings -> Audio and the More panel's TX-volume row (Android
@@ -842,8 +996,47 @@ export default function App() {
     setTxGain(v);
     debouncedSetTxGain(v);
   }
+  // Named (not inlined in Settings' own JSX props) so `onBand`'s per-band
+  // recall can call it too.
+  function onInputGain(v: number) {
+    setInputGain(v);
+    debouncedSetRxGain(v);
+  }
 
-  const visible = messages.filter((m) => {
+  // Settings -> Decode & Filters' persisted defaults -- applied ahead of the
+  // manual pill filter below (both are real, independent filters, matching
+  // Android: a Settings-level default plus a transient per-session pill).
+  const workedListSet = new Set(parseCallList(workedListCsv));
+  const blocklist = {
+    exact: parseCallList(blockedExact),
+    prefixes: parseCallList(blockedPrefixes),
+    keywords: parseCallList(blockedKeywords),
+  };
+  const persistentlyVisible = messages.filter((m) => {
+    if (isBlocked(m.call_from, m.text, blocklist)) return false;
+    if (filterShowOnlyCQ && !m.is_cq) return false;
+    // "Needed Only" (Decode Filters) -- same not-yet-worked semantics as the
+    // "Needed" pill below (see that filter's own comment): desktop has no
+    // live QSL-confirmed set the way Android's description implies.
+    if (filterNeededOnly && workedCalls.has(m.call_from.toUpperCase())) return false;
+    // "Worked Stations" is Android's master enable for the whole mode/scope
+    // system below -- off means no highlight AND no hide, not just no color.
+    if (highlightConfig.worked && shouldHideWorked(
+      workedMode,
+      isWorkedByScope(workedScope, {
+        onBand: workedCalls.has(m.call_from.toUpperCase()),
+        anyBand: workedCallsAnyBand.has(m.call_from.toUpperCase()),
+        // No date-scoped "worked today" set exists yet -- falls back to
+        // "worked at all" (errs toward hiding, not toward showing a station
+        // that should be hidden) until the backend tracks it.
+        today: workedCallsAnyBand.has(m.call_from.toUpperCase()),
+        inList: workedListSet.has(m.call_from.toUpperCase()),
+      }),
+    )) return false;
+    return true;
+  });
+
+  const visible = persistentlyVisible.filter((m) => {
     switch (filter) {
       case "all": return true;
       case "cq": return m.is_cq;
@@ -975,6 +1168,7 @@ export default function App() {
             workedDxccPrefixes={workedDxccPrefixes}
             workedCqZones={workedCqZones}
             workedStates={workedStates}
+            highlightConfig={highlightConfig}
             txFreq={txFreq}
             onSelectFreq={(hz) => {
               setTxFreq(hz);
@@ -1025,6 +1219,48 @@ export default function App() {
               api.setConfig("rig_label", v);
             }}
             onBandsChanged={setBands}
+            operatingMode={operatingMode}
+            rig={rig}
+            bands={bands}
+            dialHz={dialHz}
+            onBand={onBand}
+            onMode={onMode}
+            showVolumeSlider={showVolumeSlider}
+            onShowVolumeSlider={(v) => {
+              setShowVolumeSlider(v);
+              api.setConfig("showTxVolumeSlider", v ? "1" : "0");
+            }}
+            onAudioBandConfigChanged={refreshAudioBandConfig}
+            highlightConfig={highlightConfig}
+            onHighlightConfig={setHighlightConfig}
+            workedMode={workedMode}
+            onWorkedMode={setWorkedModeState}
+            workedScope={workedScope}
+            onWorkedScope={setWorkedScopeState}
+            workedSameMode={workedSameMode}
+            onWorkedSameMode={setWorkedSameModeState}
+            workedListCsv={workedListCsv}
+            onWorkedListCsv={setWorkedListCsv}
+            blockedExact={blockedExact}
+            onBlockedExact={setBlockedExact}
+            blockedPrefixes={blockedPrefixes}
+            onBlockedPrefixes={setBlockedPrefixes}
+            blockedKeywords={blockedKeywords}
+            onBlockedKeywords={setBlockedKeywords}
+            filterShowOnlyCQ={filterShowOnlyCQ}
+            onFilterShowOnlyCQ={setFilterShowOnlyCQ}
+            filterNeededOnly={filterNeededOnly}
+            onFilterNeededOnly={setFilterNeededOnly}
+            watchCallsigns={watchCallsigns}
+            onWatchCallsigns={setWatchCallsigns}
+            alertNewDxcc={alertNewDxcc}
+            onAlertNewDxcc={setAlertNewDxcc}
+            alertNewState={alertNewState}
+            onAlertNewState={setAlertNewState}
+            alertOnCqReply={alertOnCqReply}
+            onAlertOnCqReply={setAlertOnCqReply}
+            alertOnQsoComplete={alertOnQsoComplete}
+            onAlertOnQsoComplete={setAlertOnQsoComplete}
             huntPriority={huntPriority}
             onHuntPriority={setHuntPriority}
             huntAvoidPileups={huntAvoidPileups}
@@ -1038,10 +1274,7 @@ export default function App() {
               api.setConfig("hunt_min_snr", v == null ? "" : String(v));
             }}
             inputGain={inputGain}
-            onInputGain={(v) => {
-              setInputGain(v);
-              debouncedSetRxGain(v);
-            }}
+            onInputGain={onInputGain}
             txGain={txGain}
             onTxGain={onTxGain}
             displayHz={displayHz}
@@ -1072,6 +1305,7 @@ export default function App() {
           onToggleTune={() => (txState?.tuning ? api.stopTune() : api.startTune())}
           txGain={txGain}
           onTxGain={onTxGain}
+          showVolumeSlider={showVolumeSlider}
         />
       )}
       <TabBar
@@ -2246,19 +2480,11 @@ function TabBar({
   );
 }
 
-const MODE_LABEL: Record<OperatingMode, string> = { ft8: "FT8", ft4: "FT4", ft2: "FT2" };
 // TX/RX cycle length in ms per mode -- matches Rust's Mode::cycle_ms()
 // (mode.rs). Drives the countdown/progress-bar timing below; the waterfall
 // itself needs no separate fix -- its rows are pushed by the backend's own
 // per-mode wf_boundary_row cadence, not computed from a cycle length here.
 const MODE_CYCLE_MS: Record<OperatingMode, number> = { ft8: 15_000, ft4: 7_500, ft2: 3_750 };
-// Cycle-time subtext shown on each mode tile in BandModeSheet, matching
-// Android's BandModeSheet.kt (formatSlotSeconds: 15000->"15s", 7500->"7.5s",
-// 3750->"3.75s").
-const MODE_CYCLE_LABEL: Record<OperatingMode, string> = {
-  ft8: "15s", ft4: "7.5s", ft2: "3.75s",
-};
-
 // Resolve a persisted `operating_mode` config string ("FT8"/"FT4"/"FT2", any
 // case) the same way Rust's Mode::from_config does -- shared by the startup
 // config-load effect and onMode's post-switch re-read, so both can never
@@ -2268,126 +2494,6 @@ function modeFromConfigStr(v: string | null | undefined): OperatingMode {
   if (u === "FT4") return "ft4";
   if (u === "FT2") return "ft2";
   return "ft8";
-}
-
-// Shared Band & Mode control, used identically by TopBar's title (the
-// upper-left picker) and the More panel's Band & Mode card -- matching
-// Android, which reuses one bandModeLabel construction in both the title
-// row and the TxStrip/drawer rows rather than keeping two independently-
-// built pickers that could drift apart. `variant` only changes layout/sizing
-// (a big borderless title vs. a bordered labeled card); both open the same
-// BandModeSheet. Matches Android's actual BandModeSheet.kt design (a bottom
-// sheet: a 3-way mode toggle with cycle times, over a band list with a
-// checkmark on the current selection) rather than inline toggle buttons --
-// mode selection lives in this one sheet, not as separate buttons next to
-// the label.
-function BandModePicker(props: {
-  variant: "title" | "card";
-  bands: BandInfo[];
-  dialHz: number;
-  onBand: (hz: number) => void;
-  mode: OperatingMode;
-  onMode: (m: OperatingMode) => void;
-}) {
-  const { variant, bands, dialHz, onBand, mode, onMode } = props;
-  const [open, setOpen] = useState(false);
-  const band = bands.find((b) => b.dial_hz === dialHz);
-  const card = variant === "card";
-  return (
-    <>
-      <div
-        className={"band-mode-picker" + (card ? " band-mode-picker-card" : "")}
-        onClick={() => setOpen(true)}
-        role="button"
-        tabIndex={0}
-      >
-        {card && <span className="band-picker-row-label">BAND & MODE</span>}
-        <div className="band-picker">
-          <span className="band-picker-label">
-            {card ? `${(dialHz / 1e6).toFixed(3)} MHz · ` : ""}
-            {band ? band.name : "--"} · {MODE_LABEL[mode]}
-          </span>
-          <span className="chevron">⌄</span>
-        </div>
-      </div>
-      {open && (
-        <BandModeSheet
-          bands={bands}
-          dialHz={dialHz}
-          onBand={(hz) => { onBand(hz); setOpen(false); }}
-          mode={mode}
-          onMode={onMode}
-          onClose={() => setOpen(false)}
-        />
-      )}
-    </>
-  );
-}
-
-// The "Band & mode" bottom sheet, matching Android's BandModeSheet.kt: a
-// 3-way mode toggle (FT8/FT4/FT2, each with its cycle time) over a band
-// list, each row showing name + dial frequency with a checkmark on the
-// current selection. All three tiles are selectable -- FT2 decode works the
-// same way FT4's does (desktop's FFI links the shared ft8_lib monitor/
-// decoder directly rather than going through Android's JNI wrappers, so it
-// only needed the third `ftx_protocol_t` constant plumbed through, see
-// mode.rs). FT2 has no encoder anywhere (confirmed against ft8af.app, which
-// only ever claims decode for it: "decodes in milliseconds — now across
-// three modes") -- engine.rs's start_transmit refuses to key up in FT2
-// regardless of what the UI allows, and TopBar/TxBar grey out Call CQ/Tune
-// while operatingMode is "ft2" to make that receive-only state visible
-// rather than silently failing on click. Android's band rows also carry a
-// short descriptive subtitle ("Local, evenings", "Daytime, worldwide") that
-// desktop's BandInfo has no data for -- omitted rather than inventing text
-// that might not match Android's actual wording.
-function BandModeSheet(props: {
-  bands: BandInfo[];
-  dialHz: number;
-  onBand: (hz: number) => void;
-  mode: OperatingMode;
-  onMode: (m: OperatingMode) => void;
-  onClose: () => void;
-}) {
-  const { bands, dialHz, onBand, mode, onMode, onClose } = props;
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal band-mode-sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3>Band &amp; Mode</h3>
-          <button className="modal-close" aria-label="Close" onClick={onClose}>✕</button>
-        </div>
-        <div className="mode-tile-row">
-          {(["ft8", "ft4", "ft2"] as const).map((m) => (
-            <button
-              key={m}
-              className={"mode-tile" + (mode === m ? " active" : "")}
-              title={m === "ft2" ? "FT2: receive-only, matching ft8af.app (no FT2 TX anywhere)" : undefined}
-              onClick={() => onMode(m as OperatingMode)}
-            >
-              <span className="mode-tile-name">{m.toUpperCase()}</span>
-              <span className="mode-tile-cycle">{MODE_CYCLE_LABEL[m]}</span>
-            </button>
-          ))}
-        </div>
-        <div className="band-sheet-list">
-          {bands.map((b) => {
-            const active = b.dial_hz === dialHz;
-            return (
-              <div
-                key={b.dial_hz}
-                className={"band-sheet-row" + (active ? " active" : "")}
-                onClick={() => onBand(b.dial_hz)}
-              >
-                <span className="band-sheet-name">{b.custom ? "★ " : ""}{b.name}</span>
-                <span className="band-sheet-freq">{(b.dial_hz / 1e6).toFixed(3)} MHz</span>
-                {active && <span className="band-sheet-check">✓</span>}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function TopBar(props: {
@@ -3169,6 +3275,7 @@ function DecodeScreen(props: {
   workedDxccPrefixes: Set<string>;
   workedCqZones: Set<number>;
   workedStates: Set<string>;
+  highlightConfig: HighlightConfig;
   txFreq: number;
   onSelectFreq: (hz: number) => void;
   onAnswer: (m: UiMessage) => void;
@@ -3184,7 +3291,8 @@ function DecodeScreen(props: {
   const {
     rightPane, messages, sortMode, myGrid, myCall, dialHz, txTarget, operatingMode, filter, setFilter,
     workedCalls, workedCallsAnyBand, workedGrids,
-    workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, txFreq, onSelectFreq, onAnswer,
+    workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, highlightConfig,
+    txFreq, onSelectFreq, onAnswer,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
   } = props;
 
@@ -3263,7 +3371,7 @@ function DecodeScreen(props: {
                 isNewPrefix: prefix != null && !workedPrefixes.has(prefix),
                 isWorkedOtherBand: !worked && workedCallsAnyBand.has(callUpper),
                 isWorked: worked,
-              });
+              }, highlightConfig);
               return (
                 <Fragment key={i}>
                   {newBlock && (
@@ -4477,987 +4585,6 @@ function EditQsoDialog(props: {
   );
 }
 
-// Waterfall FFT developer-knob option lists (issue #428). Single source of
-// truth for both the <select> options and validation of persisted config —
-// raw config strings are untrusted (hand-edited DB, older builds), so
-// anything outside these lists falls back to the defaults.
-const WF_WINDOWS: WfWindow[] = ["rect", "hann", "hamming", "blackman", "blackman_harris"];
-const WF_WINDOW_LABELS: Record<WfWindow, string> = {
-  rect: "Rectangular (none)",
-  hann: "Hann (default)",
-  hamming: "Hamming",
-  blackman: "Blackman",
-  blackman_harris: "Blackman-Harris",
-};
-const WF_FFT_SIZES = [512, 1024, 2048, 4096, 8192];
-const WF_AVG_OPTIONS = [1, 2, 3, 4, 6, 8, 12, 16];
-
-// Add/edit/delete operator-defined dial frequencies (issue #470). Custom dials
-// persist in the config store and are merged into the band picker (shown with a
-// ★). Editing is re-adding at the same dial frequency; the backend upserts.
-function CustomBandsPanel(props: {
-  onStatus: (s: string) => void;
-  onBandsChanged: (bands: BandInfo[]) => void;
-}) {
-  const { onStatus, onBandsChanged } = props;
-  const [custom, setCustom] = useState<CustomBand[]>([]);
-  const [name, setName] = useState("");
-  const [freq, setFreq] = useState("");
-  const [error, setError] = useState("");
-
-  function refresh() {
-    api.listCustomBands().then(setCustom);
-  }
-  useEffect(refresh, []);
-
-  async function add() {
-    setError("");
-    try {
-      const merged = await api.addCustomBand(freq, name);
-      onBandsChanged(merged);
-      refresh();
-      onStatus(`Custom band saved: ${name || "(band)"} ${freq} Hz`);
-      setName("");
-      setFreq("");
-    } catch (e) {
-      // The Rust command rejects bad input (non-numeric / out of range) with a
-      // human-readable message; show it inline rather than as a toast.
-      setError(String(e));
-    }
-  }
-
-  async function edit(b: CustomBand) {
-    setName(b.name);
-    setFreq(String(b.dial_hz));
-    setError("");
-  }
-
-  async function remove(dialHz: number) {
-    const merged = await api.deleteCustomBand(dialHz);
-    onBandsChanged(merged);
-    refresh();
-  }
-
-  return (
-    <div className="panel">
-      <h3>Custom dial frequencies</h3>
-      <div className="col">
-        <div className="muted">
-          Add off-plan dials (e.g. DXpedition frequencies) in whole Hz. They
-          appear in the band picker marked with a ★ and persist across restarts.
-        </div>
-        <div className="row">
-          <div className="field">
-            <label>Label (optional)</label>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. 3B9 DX"
-              style={{ width: 120 }}
-            />
-          </div>
-          <div className="field">
-            <label>Dial frequency (Hz)</label>
-            <input
-              value={freq}
-              onChange={(e) => setFreq(e.target.value)}
-              placeholder="e.g. 14090000"
-              style={{ width: 130 }}
-            />
-          </div>
-          <button className="primary" onClick={add}>Add / update</button>
-        </div>
-        {error && <span style={{ color: "var(--tx)" }}>⚠ {error}</span>}
-        {custom.length === 0 ? (
-          <span className="muted">No custom dials yet.</span>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Label</th>
-                <th>Dial (MHz)</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {custom.map((b) => (
-                <tr key={b.dial_hz}>
-                  <td>{b.name}</td>
-                  <td style={{ fontVariantNumeric: "tabular-nums" }}>
-                    {(b.dial_hz / 1e6).toFixed(6)}
-                  </td>
-                  <td>
-                    <button onClick={() => edit(b)} title="Load into the form to edit">
-                      ✎
-                    </button>
-                    <button onClick={() => remove(b.dial_hz)} title="Delete">
-                      ✕
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Row count for the callsign/grid cache (fcc_grid.rs, schema v7) + a manual
-// re-run button, matching CustomBandsPanel's own local-state/refresh
-// pattern. The seed's live progress/completion dialog itself is driven by
-// App()'s own passive event listener (not this panel), so it shows up
-// correctly regardless of whether this screen is even open when a seed
-// (first-run or manual) is running.
-function CallsignGridPanel(props: { onUpdate: () => void; busy: boolean }) {
-  const { onUpdate, busy } = props;
-  const [count, setCount] = useState<number | null>(null);
-
-  function refresh() {
-    api.callsignQthCount().then(setCount);
-  }
-  useEffect(refresh, []);
-  // Pick up the row count once a seed (either trigger) finishes.
-  useEffect(() => {
-    if (!busy) refresh();
-  }, [busy]);
-
-  return (
-    <div className="panel">
-      <h3>US callsign/grid table</h3>
-      <div className="col">
-        <div className="muted">
-          Seeds the Map screen's callsign-to-grid lookup from the FCC
-          amateur-license database (~200MB download, cross-referenced
-          against a bundled ZIP-code table) — the first-run download also
-          happens automatically once, and otherwise fills in from decodes
-          and the logbook as you operate. The FCC data changes weekly.
-        </div>
-        <div className="row">
-          <span>
-            {count == null
-              ? "Checking…"
-              : `${count.toLocaleString()} station${count === 1 ? "" : "s"} known`}
-          </span>
-          <button className="primary" onClick={onUpdate} disabled={busy}>
-            {busy ? "Updating…" : "Update now"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SettingsScreen(props: {
-  onStatus: (s: string) => void;
-  clock: ClockSyncEvent | null;
-  /** Re-checks whether decode can now auto-start (callsign + rig configured)
-   *  -- called right after saving the station or connecting a rig, with the
-   *  values just submitted (not yet reflected in persisted config), so
-   *  finishing setup starts decoding immediately. See maybeAutoStartDecode. */
-  onSettingsSaved: (known: { call: string; rigBackend: string }) => void;
-  onRigLabel: (v: string) => void;
-  onBandsChanged: (bands: BandInfo[]) => void;
-  huntPriority: HuntPriority;
-  onHuntPriority: (p: HuntPriority) => void;
-  huntAvoidPileups: boolean;
-  onHuntAvoidPileups: (v: boolean) => void;
-  huntMinSnr: number | null;
-  onHuntMinSnr: (v: number | null) => void;
-  inputGain: number;
-  onInputGain: (v: number) => void;
-  txGain: number;
-  onTxGain: (v: number) => void;
-  /** Shared with the Decode waterfall strip's own Width control (same
-   *  top-level state in App()) so a change made here is immediately live
-   *  on the waterfall, not just on next reload -- see WaterfallStatusStrip's
-   *  doc comment for why this one value is lifted instead of locally fetched. */
-  displayHz: number;
-  onDisplayHz: (hz: number) => void;
-  /** Re-runs the FCC/Census grid-table seed (fcc_grid.rs) -- the same
-   *  function the backend's first-run auto-start kicks off; this just gives
-   *  the operator a manual way to refresh it later (the FCC data changes
-   *  weekly). The live dialog is driven by App()'s own passive event
-   *  listener, not by this call directly -- see that listener's comment. */
-  onUpdateGridTable: () => void;
-  /** Whether a grid-table seed (either trigger) is currently running, to
-   *  grey out the button instead of letting the operator start a second
-   *  one concurrently. */
-  gridSeedBusy: boolean;
-}) {
-  const {
-    onStatus, clock, onSettingsSaved, onRigLabel, onBandsChanged,
-    huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
-    inputGain, onInputGain, txGain, onTxGain, displayHz, onDisplayHz,
-    onUpdateGridTable, gridSeedBusy,
-  } = props;
-  const [call, setCall] = useState("");
-  const [rigLabel, setRigLabel] = useState("");
-  const [grid, setGrid] = useState("");
-  // OS location service (opt-in, issue #471). Disabled by default: the button
-  // only appears once locEnabled is on, and nothing requests location until the
-  // user presses it.
-  const [locEnabled, setLocEnabled] = useState(false);
-  const [locating, setLocating] = useState(false);
-  const [locError, setLocError] = useState<string | null>(null);
-  const [inputs, setInputs] = useState<AudioDevice[]>([]);
-  const [outputs, setOutputs] = useState<AudioDevice[]>([]);
-  const [ports, setPorts] = useState<SerialPortInfo[]>([]);
-  const [hamlibRigs, setHamlibRigs] = useState<HamlibRig[]>([]);
-  const [input, setInput] = useState("");
-  const [output, setOutput] = useState("");
-  const [baseFreq, setBaseFreq] = useState(1500);
-  // Live-waterfall FFT developer knobs (issue #428). Defaults mirror
-  // WfConfig::default() on the Rust side: hann / 2048 / 6. display_hz and
-  // denoise round-trip here (kept synced from the displayHz prop, and
-  // denoise read once from config below) even with no dedicated edit control
-  // for either *in this object* -- Width has its own field below bound to
-  // the shared displayHz prop instead, and NR has no Settings UI at all
-  // (Android doesn't duplicate it there either) -- purely so a save here
-  // (window/fft_size/avg) can't silently clobber either one via the
-  // full-object SetWaterfallConfig path.
-  const [wfCfg, setWfCfg] = useState<WaterfallConfig>({
-    window: "hann",
-    fft_size: 2048,
-    avg: 6,
-    display_hz: displayHz,
-    denoise: false,
-  });
-  // Keep wfCfg.display_hz mirroring the shared prop so a window/fft_size/avg
-  // save always sends the live Width, even if it changed via the waterfall
-  // strip's own control (or Settings' own field below) since this mounted.
-  useEffect(() => {
-    setWfCfg((prev) => ({ ...prev, display_hz: displayHz }));
-  }, [displayHz]);
-  // WSJT-X UDP interface (outbound broadcast + inbound requests). Defaults match
-  // WSJT-X: disabled, 127.0.0.1:2237. Rust persists the udp_* keys.
-  const [udp, setUdp] = useState<UdpConfig>({
-    enabled: false,
-    host: "127.0.0.1",
-    port: 2237,
-    accept_requests: false,
-  });
-  const [rigCfg, setRigCfg] = useState<RigConfig>({
-    backend: "none",
-    port: "",
-    baud: 38400,
-    flrig_host: "127.0.0.1",
-    flrig_port: 12345,
-    hamlib_model: 1,
-    hamlib_network: false,
-    hamlib_address: "127.0.0.1:4992",
-  });
-
-  useEffect(() => {
-    api.listAudioInputs().then(setInputs);
-    api.listAudioOutputs().then(setOutputs);
-    api.listSerialPorts().then(setPorts);
-    api.listHamlibRigs().then(setHamlibRigs);
-    api.getConfig("my_call").then((v) => v && setCall(v));
-    api.getConfig("my_grid").then((v) => v && setGrid(v));
-    // Restore the opt-in flag; only the exact string "true" enables it, so a
-    // missing/garbage value keeps the feature off.
-    api.getConfig("location_service_enabled").then((v) => setLocEnabled(v === "true"));
-    api.getConfig("input_device").then((v) => v && setInput(v));
-    api.getConfig("output_device").then((v) => v && setOutput(v));
-    api.getConfig("base_freq").then((v) => v && setBaseFreq(parseInt(v, 10)));
-    api.getConfig("rig_config").then((v) => {
-      if (v) {
-        try {
-          // Normalize the persisted config through the selector mapping so a
-          // legacy/removed backend (e.g. "serial") falls back to "none" while
-          // keeping the connection fields — otherwise it would reach the Rust
-          // side (serde error) and render "Connecting undefined".
-          const parsed = JSON.parse(v) as RigConfig;
-          setRigCfg(applySelection(parsed, configToSelection(parsed)));
-        } catch {
-          /* ignore malformed saved config */
-        }
-      }
-    });
-    api.getConfig("rig_label").then((v) => v && setRigLabel(v));
-    // Restore persisted waterfall knobs (written by the engine on change),
-    // keeping only values from the option lists — an unknown window string or
-    // NaN size would leave the <select>s blank and push an invalid config
-    // back through applyWfCfg. display_hz is NOT fetched here -- it's kept
-    // synced from the shared displayHz prop (see the effect above) rather
-    // than independently re-fetched, so this panel and the waterfall strip
-    // can never show two different "current" values for the same setting.
-    Promise.all([
-      api.getConfig("wf_window"),
-      api.getConfig("wf_fft_size"),
-      api.getConfig("wf_avg"),
-      api.getConfig("wf_denoise"),
-    ]).then(([w, size, avg, denoiseStr]) => {
-      const fftSize = parseInt(size ?? "", 10);
-      const avgN = parseInt(avg ?? "", 10);
-      setWfCfg((prev) => ({
-        window: WF_WINDOWS.includes(w as WfWindow) ? (w as WfWindow) : prev.window,
-        fft_size: WF_FFT_SIZES.includes(fftSize) ? fftSize : prev.fft_size,
-        avg: WF_AVG_OPTIONS.includes(avgN) ? avgN : prev.avg,
-        display_hz: prev.display_hz,
-        denoise: denoiseStr === "true",
-      }));
-    });
-  }, []);
-
-  function applyWfCfg(next: WaterfallConfig) {
-    setWfCfg(next);
-    api.setWaterfallConfig(next);
-  }
-
-  // Load the persisted WSJT-X UDP settings on mount (only the exact string
-  // "true" enables a flag, so a missing/garbage value stays off).
-  useEffect(() => {
-    Promise.all([
-      api.getConfig("udp_enabled"),
-      api.getConfig("udp_host"),
-      api.getConfig("udp_port"),
-      api.getConfig("udp_accept_requests"),
-    ]).then(([en, host, port, accept]) => {
-      const p = parseInt(port ?? "", 10);
-      setUdp((prev) => ({
-        enabled: en === "true",
-        host: host && host.length > 0 ? host : prev.host,
-        port: Number.isFinite(p) && p > 0 && p <= 65535 ? p : prev.port,
-        accept_requests: accept === "true",
-      }));
-    });
-  }, []);
-
-  // Push UDP settings to the backend (which persists + rebinds live).
-  function applyUdp(next: UdpConfig) {
-    // Normalize before persisting. The port input uses parseInt(...) || 0, so clearing the
-    // field yields 0 (NaN/out-of-range are possible too); fall back to the default 2237 so
-    // we never persist a port the backend rejects or that can't deliver. Default an empty
-    // host to loopback. Write the corrected config back to state so the field reflects it.
-    const port =
-      Number.isFinite(next.port) && next.port > 0 && next.port <= 65535 ? next.port : 2237;
-    const host = next.host.trim().length > 0 ? next.host.trim() : "127.0.0.1";
-    const cfg: UdpConfig = { ...next, host, port };
-    setUdp(cfg);
-    api.setUdpConfig(cfg);
-    onStatus(
-      cfg.enabled
-        ? `WSJT-X UDP → ${cfg.host}:${cfg.port}${cfg.accept_requests ? " (accepting requests)" : ""}`
-        : "WSJT-X UDP off",
-    );
-  }
-
-  const refreshPorts = () => api.listSerialPorts().then(setPorts);
-
-  // Re-enumerate serial ports whenever the serial-connection fields become
-  // visible. Ports were previously read only once at mount, so a rig attached
-  // after launch — or a Hamlib radio picked before its serial port was chosen —
-  // showed an empty/stale list. Selecting a serial-connected Hamlib radio now
-  // re-scans, so /dev/ttyACM0 (a QMX/QDX) appears without a workaround.
-  const showsPortList =
-    rigCfg.backend === "g106" ||
-    (rigCfg.backend === "hamlib" && !rigCfg.hamlib_network);
-  useEffect(() => {
-    if (showsPortList) refreshPorts();
-  }, [showsPortList]);
-
-  function saveStation() {
-    api.setStation(call, grid);
-    onStatus(`Station set: ${call} ${grid}`);
-    onSettingsSaved({ call, rigBackend: rigCfg.backend });
-  }
-
-  // Persist the opt-in flag. Turning it off never runs location code again; it
-  // does not itself request location (only the button does), so no permission
-  // prompt appears here.
-  function toggleLocEnabled(on: boolean) {
-    setLocEnabled(on);
-    setLocError(null);
-    api.setConfig("location_service_enabled", on ? "true" : "false");
-  }
-
-  // One-shot on demand: query the OS location service and fill the (still
-  // editable) Grid field. This press is what triggers the OS permission prompt.
-  async function useMyLocation() {
-    setLocating(true);
-    setLocError(null);
-    try {
-      // The checkbox persists this flag asynchronously; the button only appears
-      // once locEnabled is true, so re-assert and AWAIT the write here before
-      // querying. Otherwise "enable then immediately click" can reach the backend
-      // gate before the flag is committed, and get_os_location would reject.
-      await api.setConfig("location_service_enabled", "true");
-      const loc = await api.getOsLocation();
-      setGrid(loc.grid);
-      onStatus(`Location set grid to ${loc.grid}`);
-    } catch (e) {
-      // The manual field is left untouched on failure.
-      setLocError(typeof e === "string" ? e : String(e));
-    } finally {
-      setLocating(false);
-    }
-  }
-
-  return (
-    <div className="grid2">
-      <div className="panel">
-        <h3>Station</h3>
-        <div className="col">
-          <div className="field">
-            <label>Callsign</label>
-            <input value={call} onChange={(e) => setCall(e.target.value.toUpperCase())} placeholder="K0XYZ" />
-          </div>
-          <div className="field">
-            <label>Grid (Maidenhead)</label>
-            <div className="row">
-              <input value={grid} onChange={(e) => setGrid(e.target.value.toUpperCase())} placeholder="EN37" />
-              {locEnabled && (
-                <button
-                  type="button"
-                  onClick={useMyLocation}
-                  disabled={locating}
-                  title="Fill the grid from your computer's location service"
-                >
-                  {locating ? "Locating…" : "📍 Use my location"}
-                </button>
-              )}
-            </div>
-            {locError && (
-              <span className="muted" style={{ display: "block", marginTop: 4, color: "var(--tx)" }}>
-                ⚠ {locError}
-              </span>
-            )}
-          </div>
-          <div className="field">
-            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={locEnabled}
-                onChange={(e) => toggleLocEnabled(e.target.checked)}
-                style={{ width: "auto" }}
-              />
-              Use OS location service
-            </label>
-            <span className="muted" style={{ display: "block", marginTop: 4 }}>
-              Off by default. When on, a “Use my location” button appears above to
-              fill your grid from the operating system’s location service (asks for
-              permission the first time). Coarse, city-level accuracy — a 6-char
-              subsquare, ~2.5 × 5 km. Linux uses GeoClue; Windows uses the system
-              geolocator; on macOS enter your grid manually for now.
-            </span>
-          </div>
-          <button className="primary" onClick={saveStation}>Save station</button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3>Hunt</h3>
-        <div className="col">
-          <div className="muted">
-            When Hunt is on (toggle it from the top bar), the app auto-answers
-            the best eligible CQ each cycle instead of waiting for a manual
-            click — never while already in a QSO. These options control which
-            CQ counts as "best." Ported from the Android app's own Hunt engine;
-            two of its priorities aren't available here yet (DXCC entity
-            lookup, and POTA "new park" ranking need data this app doesn't
-            fetch yet).
-          </div>
-          <div className="field">
-            <label>Priority</label>
-            <select value={huntPriority} onChange={(e) => onHuntPriority(e.target.value as HuntPriority)}>
-              {HUNT_PRIORITIES.map((p) => (
-                <option key={p} value={p}>
-                  {p === "latest" ? "Latest (most recent decode)"
-                    : p === "strongest" ? "Strongest signal"
-                    : p === "weakest" ? "Weakest signal"
-                    : p === "farthest" ? "Farthest station"
-                    : p === "pota_first" ? "POTA activators first"
-                    : "New grid first"}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={huntAvoidPileups}
-                onChange={(e) => onHuntAvoidPileups(e.target.checked)}
-                style={{ width: "auto" }}
-              />
-              Avoid pileups when a pileup-free CQ is available
-            </label>
-          </div>
-          <div className="field">
-            <label>Minimum SNR (dB) — blank disables the floor</label>
-            <input
-              value={huntMinSnr == null ? "" : String(huntMinSnr)}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                if (v === "") { onHuntMinSnr(null); return; }
-                const n = parseInt(v, 10);
-                if (!Number.isNaN(n)) onHuntMinSnr(n);
-              }}
-              placeholder="e.g. -15"
-              style={{ width: 80 }}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3>Time sync</h3>
-        <div className="col">
-          <div className="muted">
-            FT8 needs the clock within ~1 s of UTC. The app syncs to NTP on its own —
-            no external time software, and your system clock is left untouched.
-          </div>
-          <div className="field">
-            <label>Clock offset from UTC</label>
-            <div>
-              {clock?.synced
-                ? `${fmtOffset(clock.offset_ms)} (${clock.offset_ms} ms)`
-                : "waiting for first sync…"}
-            </div>
-          </div>
-          <div className="field">
-            <label>Receive timing</label>
-            <div>
-              {clock ? "Fixed to UTC slots (auto-calibration disabled)" : "—"}
-              <span className="muted" style={{ display: "block", marginTop: 4 }}>
-                Decoded DT is informational and cannot move later capture windows.
-              </span>
-            </div>
-          </div>
-          <button
-            onClick={() => {
-              api.resyncTime();
-              onStatus("Re-syncing clock to NTP…");
-            }}
-          >
-            Sync now
-          </button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3>Audio</h3>
-        <div className="col">
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <span className="muted" style={{ fontSize: 12 }}>
-              Plugged in a device after opening Settings? Re-scan below.
-            </span>
-            <button
-              onClick={() => {
-                api.listAudioInputs().then(setInputs);
-                api.listAudioOutputs().then(setOutputs);
-              }}
-            >
-              ↻ Refresh audio devices
-            </button>
-          </div>
-          <div className="field">
-            <label>Input device (RX)</label>
-            <select
-              id="audio-input-select"
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                api.setInputDevice(e.target.value || null);
-              }}
-            >
-              <option value="">System default</option>
-              {inputs.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {audioDeviceLabel(d)} {d.is_default ? "(default)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label>Output device (TX)</label>
-            <select
-              id="audio-output-select"
-              value={output}
-              onChange={(e) => {
-                setOutput(e.target.value);
-                api.setOutputDevice(e.target.value || null);
-              }}
-            >
-              <option value="">System default</option>
-              {outputs.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {audioDeviceLabel(d)} {d.is_default ? "(default)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label>TX audio offset: {baseFreq} Hz</label>
-            <input
-              type="range"
-              min={200}
-              max={2800}
-              step={1}
-              value={baseFreq}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 10);
-                setBaseFreq(v);
-                api.setBaseFreq(v);
-              }}
-            />
-          </div>
-          <div className="field">
-            <label>RX input gain: {inputGain}%</label>
-            <input
-              type="range"
-              aria-label="RX input gain, percent"
-              min={0}
-              max={100}
-              step={1}
-              value={inputGain}
-              onChange={(e) => onInputGain(parseInt(e.target.value, 10))}
-            />
-            <span className="muted" style={{ fontSize: 12 }}>
-              Post-ADC software trim — some bands are noisier than others.
-            </span>
-          </div>
-          <div className="field">
-            <label>TX output level (drive): {txGain}%</label>
-            <input
-              type="range"
-              aria-label="TX output level (drive), percent"
-              min={0}
-              max={100}
-              step={1}
-              value={txGain}
-              onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
-            />
-            <span className="muted" style={{ fontSize: 12 }}>
-              Lower until ALC stops pinning.
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3>Rig control</h3>
-        <div className="col">
-          <div className="field">
-            <label>Display name (optional)</label>
-            <input
-              value={rigLabel}
-              onChange={(e) => {
-                setRigLabel(e.target.value);
-                onRigLabel(e.target.value);
-              }}
-              placeholder="e.g. Flex 6400"
-            />
-            <span className="muted" style={{ display: "block", marginTop: 4 }}>
-              Shown in the top bar instead of the CAT model. Useful when connecting
-              a radio through an emulator (e.g. a Flex via SmartSDR CAT reports as
-              Kenwood TS-2000). Leave blank to show the detected model.
-            </span>
-          </div>
-          <div className="field">
-            <label>Rig {hamlibRigs.length > 0 ? `(${hamlibRigs.length} radios)` : ""}</label>
-            <select
-              id="rig-backend-select"
-              value={configToSelection(rigCfg)}
-              onChange={(e) => setRigCfg(applySelection(rigCfg, e.target.value))}
-            >
-              {rigOptions(hamlibRigs).map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            {hamlibRigs.length === 0 && (
-              <span className="muted" style={{ display: "block", marginTop: 4 }}>
-                The built-in choices remain available, but Hamlib radios are not listed —
-                the Hamlib library didn't load, so
-                no radios could be enumerated. Install Hamlib and put{" "}
-                <code>hamlib-4.dll</code> / <code>libhamlib</code> next to the app or
-                on PATH, then reopen.
-              </span>
-            )}
-          </div>
-
-          {rigCfg.backend === "g106" && (
-            <div className="row">
-              <div className="field">
-                <label>DE-19 serial port</label>
-                <div className="row">
-                  <select
-                    id="rig-serial-port-select"
-                    value={rigCfg.port}
-                    onChange={(e) => setRigCfg({ ...rigCfg, port: e.target.value })}
-                  >
-                    <option value="">(select port)</option>
-                    {ports.map((p) => (
-                      <option key={p.name} value={p.name}>
-                        {p.name} ({p.kind})
-                      </option>
-                    ))}
-                  </select>
-                  <button type="button" title="Re-scan serial ports" onClick={refreshPorts}>
-                    ↻
-                  </button>
-                </div>
-              </div>
-              <div className="field">
-                <label>Baud</label>
-                <input value="19200" readOnly style={{ width: 80 }} />
-              </div>
-            </div>
-          )}
-
-          {rigCfg.backend === "hamlib" && (
-            <>
-              <div className="field">
-                <label>Connection</label>
-                <select
-                  id="rig-connection-select"
-                  value={rigCfg.hamlib_network ? "network" : "serial"}
-                  onChange={(e) => setRigCfg({ ...rigCfg, hamlib_network: e.target.value === "network" })}
-                >
-                  <option value="serial">Serial port (COM)</option>
-                  <option value="network">Network (TCP host:port)</option>
-                </select>
-              </div>
-
-              {rigCfg.hamlib_network ? (
-                <div className="field">
-                  <label>Network address (host:port)</label>
-                  <input
-                    value={rigCfg.hamlib_address}
-                    onChange={(e) => setRigCfg({ ...rigCfg, hamlib_address: e.target.value })}
-                    placeholder="127.0.0.1:4992"
-                    style={{ width: 180 }}
-                  />
-                  <span className="muted" style={{ display: "block", marginTop: 4 }}>
-                    Native FlexRadio 6xxx model: <code>&lt;radio-IP&gt;:4992</code>. For
-                    SmartSDR CAT's TCP port, use model <b>Kenwood TS-2000</b> +{" "}
-                    <code>127.0.0.1:&lt;cat-port&gt;</code> (e.g. 5002). Use 127.0.0.1, not
-                    localhost.
-                  </span>
-                </div>
-              ) : (
-                <div className="row">
-                  <div className="field">
-                    <label>Serial port</label>
-                    <div className="row">
-                      <select id="rig-serial-port-select" value={rigCfg.port} onChange={(e) => setRigCfg({ ...rigCfg, port: e.target.value })}>
-                        <option value="">(none — e.g. Dummy)</option>
-                        {ports.map((p) => (
-                          <option key={p.name} value={p.name}>
-                            {p.name} ({p.kind})
-                          </option>
-                        ))}
-                      </select>
-                      <button type="button" title="Re-scan serial ports" onClick={refreshPorts}>
-                        ↻
-                      </button>
-                    </div>
-                  </div>
-                  <div className="field">
-                    <label>Baud</label>
-                    <select
-                      id="rig-baud-select"
-                      value={rigCfg.baud}
-                      onChange={(e) => setRigCfg({ ...rigCfg, baud: parseInt(e.target.value, 10) })}
-                    >
-                      {[4800, 9600, 19200, 38400, 57600, 115200].map((b) => (
-                        <option key={b} value={b}>{b}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-
-          {rigCfg.backend === "flrig" && (
-            <div className="row">
-              <div className="field">
-                <label>FLrig host</label>
-                <input
-                  value={rigCfg.flrig_host}
-                  onChange={(e) => setRigCfg({ ...rigCfg, flrig_host: e.target.value })}
-                  style={{ width: 130 }}
-                />
-              </div>
-              <div className="field">
-                <label>Port</label>
-                <input
-                  value={rigCfg.flrig_port}
-                  onChange={(e) =>
-                    setRigCfg({ ...rigCfg, flrig_port: parseInt(e.target.value, 10) || 12345 })
-                  }
-                  style={{ width: 80 }}
-                />
-              </div>
-            </div>
-          )}
-
-          <button
-            className="primary"
-            onClick={() => {
-              api.selectRig(rigCfg);
-              const detail =
-                rigCfg.backend === "flrig"
-                  ? ` (${rigCfg.flrig_host}:${rigCfg.flrig_port})`
-                  : rigCfg.backend === "g106"
-                  ? ` (${rigCfg.port || "no port"} at 19200 baud)`
-                  : rigCfg.backend === "hamlib"
-                  ? ` (${rigCfg.hamlib_network ? rigCfg.hamlib_address : rigCfg.port || "no port"})`
-                  : "";
-              onStatus(`Connecting ${rigName(rigCfg, hamlibRigs)}${detail}`);
-              onSettingsSaved({ call, rigBackend: rigCfg.backend });
-            }}
-          >
-            Connect rig
-          </button>
-          <button
-            onClick={() => {
-              api.disconnectRig();
-              onStatus("Rig disconnected");
-            }}
-          >
-            Disconnect
-          </button>
-        </div>
-      </div>
-
-      <CustomBandsPanel onStatus={onStatus} onBandsChanged={onBandsChanged} />
-
-      <CallsignGridPanel onUpdate={onUpdateGridTable} busy={gridSeedBusy} />
-
-      <div className="panel">
-        <h3>Developer — waterfall FFT</h3>
-        <div className="col">
-          <div className="muted">
-            Spectrum/waterfall rendering experiments (issue #428) — affects the
-            display only, never decoding. Defaults: Hann, 2048, 6 averages.
-          </div>
-          <div className="field">
-            <label>Spectrum width: {Math.round(displayHz)} Hz</label>
-            <input
-              type="range"
-              aria-label="Spectrum width, Hz"
-              min={WF_MIN_DISPLAY_HZ}
-              max={WF_MAX_DISPLAY_HZ}
-              step={100}
-              value={displayHz}
-              onChange={(e) => onDisplayHz(parseInt(e.target.value, 10))}
-            />
-            <span className="muted" style={{ fontSize: 12 }}>
-              Same setting as the Width control on the Decode waterfall strip.
-            </span>
-          </div>
-          <div className="field">
-            <label>Window function</label>
-            <select
-              id="wf-window-select"
-              value={wfCfg.window}
-              onChange={(e) => applyWfCfg({ ...wfCfg, window: e.target.value as WfWindow })}
-            >
-              {WF_WINDOWS.map((w) => (
-                <option key={w} value={w}>
-                  {WF_WINDOW_LABELS[w]}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label>FFT size</label>
-            <select
-              id="wf-fft-size-select"
-              value={wfCfg.fft_size}
-              onChange={(e) => applyWfCfg({ ...wfCfg, fft_size: parseInt(e.target.value, 10) })}
-            >
-              {WF_FFT_SIZES.map((n) => (
-                <option key={n} value={n}>
-                  {n} — {(12000 / n).toFixed(1)} Hz/bin{n === 2048 ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <label>Averaging (Welch segments per row)</label>
-            <select
-              id="wf-avg-select"
-              value={wfCfg.avg}
-              onChange={(e) => applyWfCfg({ ...wfCfg, avg: parseInt(e.target.value, 10) })}
-            >
-              {WF_AVG_OPTIONS.map((n) => (
-                <option key={n} value={n}>
-                  {n}{n === 6 ? " (default)" : n === 1 ? " (off)" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3>WSJT-X UDP</h3>
-        <div className="col">
-          <div className="muted">
-            Broadcast decodes, status and logged QSOs over UDP in the WSJT-X
-            protocol so companion apps (GridTracker, JTAlert, N1MM+, Log4OM) can
-            plot and log them. Default target 127.0.0.1:2237.
-          </div>
-          <div className="field">
-            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={udp.enabled}
-                onChange={(e) => applyUdp({ ...udp, enabled: e.target.checked })}
-                style={{ width: "auto" }}
-              />
-              Enable UDP broadcast
-            </label>
-          </div>
-          <div className="field">
-            <label>Server address (host)</label>
-            <input
-              type="text"
-              value={udp.host}
-              disabled={!udp.enabled}
-              onChange={(e) => setUdp({ ...udp, host: e.target.value })}
-              onBlur={() => applyUdp(udp)}
-              placeholder="127.0.0.1"
-            />
-          </div>
-          <div className="field">
-            <label>Server port</label>
-            <input
-              type="number"
-              min={1}
-              max={65535}
-              value={udp.port}
-              disabled={!udp.enabled}
-              onChange={(e) => setUdp({ ...udp, port: parseInt(e.target.value, 10) || 0 })}
-              onBlur={() => applyUdp(udp)}
-              placeholder="2237"
-            />
-          </div>
-          <div className="field">
-            <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <input
-                type="checkbox"
-                checked={udp.accept_requests}
-                disabled={!udp.enabled}
-                onChange={(e) => applyUdp({ ...udp, accept_requests: e.target.checked })}
-                style={{ width: "auto" }}
-              />
-              Accept UDP requests (let companion apps reply/halt/free-text)
-            </label>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // Opened from the tab bar's "More" button, matching Android's
 // operate-controls drawer toggle. Call CQ/STOP and Hunt stay on TopBar
@@ -5500,10 +4627,11 @@ function TxBar(props: {
   onToggleTune: () => void;
   txGain: number;
   onTxGain: (v: number) => void;
+  showVolumeSlider: boolean;
 }) {
   const {
     txState, onSetTxPeriod, bands, dialHz, onBand, operatingMode, onMode,
-    onToggleTune, txGain, onTxGain,
+    onToggleTune, txGain, onTxGain, showVolumeSlider,
   } = props;
   const preferredParity = txState?.preferred_tx_parity ?? null;
   const tuning = txState?.tuning ?? false;
@@ -5571,37 +4699,41 @@ function TxBar(props: {
 
       {/* Row 3 -- TX volume, matching Android's TxVolumeRow (-/slider/+).
           Shares the same handler as Settings -> Audio's TX output level
-          slider -- Android only ever shows this one control (in the
-          drawer); desktop also keeps it in Settings for discoverability. */}
-      <div className="txbar-row">
-        <div className="tx-volume-control">
-          <button
-            className="tx-volume-step"
-            aria-label="Decrease TX volume"
-            onClick={() => onTxGain(Math.max(0, txGain - 5))}
-          >
-            −
-          </button>
-          <input
-            type="range"
-            aria-label="TX output level (drive), percent"
-            min={0}
-            max={100}
-            step={1}
-            value={txGain}
-            onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
-            className="tx-volume-slider"
-          />
-          <button
-            className="tx-volume-step"
-            aria-label="Increase TX volume"
-            onClick={() => onTxGain(Math.min(100, txGain + 5))}
-          >
-            +
-          </button>
-          <span className="tx-volume-value">{txGain}%</span>
+          slider. Gated behind Settings -> Radio & Audio's "Show Volume
+          Slider" toggle (Android's own `showTxVolumeSlider`, default true)
+          -- real functional parity, not just display: Android lets the
+          operator hide this row to reclaim screen space. */}
+      {showVolumeSlider && (
+        <div className="txbar-row">
+          <div className="tx-volume-control">
+            <button
+              className="tx-volume-step"
+              aria-label="Decrease TX volume"
+              onClick={() => onTxGain(Math.max(0, txGain - 5))}
+            >
+              −
+            </button>
+            <input
+              type="range"
+              aria-label="TX output level (drive), percent"
+              min={0}
+              max={100}
+              step={1}
+              value={txGain}
+              onChange={(e) => onTxGain(parseInt(e.target.value, 10))}
+              className="tx-volume-slider"
+            />
+            <button
+              className="tx-volume-step"
+              aria-label="Increase TX volume"
+              onClick={() => onTxGain(Math.min(100, txGain + 5))}
+            >
+              +
+            </button>
+            <span className="tx-volume-value">{txGain}%</span>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

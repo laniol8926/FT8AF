@@ -81,6 +81,50 @@ fn clamp_rx_gain(g: f32) -> f32 {
     g.clamp(0.0, 1.0)
 }
 
+/// Format a wattage for the `powerWatts` config value -- ported from the
+/// Android fork's `GeneralVariables.formatWatts` exactly: rounded to tenths,
+/// with a trailing ".0" dropped (`4.5`, `12.4`, `100` not `100.0`). Keeping
+/// the identical format (not just the identical config key) matters for a
+/// future settings-import between the two apps.
+fn format_watts(watts: f32) -> String {
+    let tenths = (watts * 10.0).round() / 10.0;
+    if tenths == tenths.trunc() {
+        format!("{}", tenths as i64)
+    } else {
+        format!("{tenths:.1}")
+    }
+}
+
+/// The TX audio channel to use for a newly selected rig: the operator's
+/// sticky override if they've ever set one (`txAudioChannel`), else the
+/// QMX-based auto-default (`LEFT` for a detected QMX, `BOTH` otherwise) --
+/// see [`crate::rig::needs_left_channel_tx_audio`]. Pure and unit-tested
+/// directly, separately from `select_rig` (which has a live rig connection
+/// to make and no reason to be exercised just for this).
+fn resolve_tx_audio_channel(override_: Option<i32>, backend: crate::rig::RigBackend, hamlib_model: i32) -> i32 {
+    override_.unwrap_or_else(|| {
+        if crate::rig::needs_left_channel_tx_audio(backend, hamlib_model) {
+            crate::audio::channel_select::LEFT
+        } else {
+            crate::audio::channel_select::BOTH
+        }
+    })
+}
+
+/// Whether to turn QMX CAT tones on and persist that choice for a newly
+/// selected rig -- ported from Android's own `shouldDefaultQmxCatTonesOn`
+/// exactly, which is a **one-time latch**, not a per-connection auto-detect
+/// like [`resolve_tx_audio_channel`]: the real Android description reads
+/// "Turned on automatically the first time a QMX connects." The first time
+/// ever a QMX is selected with no saved `qmxCatTones` row, this turns on and
+/// *writes* the config row (see `select_rig`'s use of this); from then on
+/// `cat_tones_config_key_exists` is permanently true, so this never fires
+/// again even across switching away from and back to a QMX, and an explicit
+/// operator "off" is never overridden either.
+fn should_default_qmx_cat_tones_on(rig_is_qmx: bool, cat_tones_config_key_exists: bool) -> bool {
+    rig_is_qmx && !cat_tones_config_key_exists
+}
+
 /// The TX audio offset (Hz) to adopt for an inbound WSJT-X Reply's requested
 /// `df`, or `None` to keep the current offset. Bounds the untrusted UDP value to
 /// the usable audio passband; a `0` (unspecified) or out-of-band `df` is ignored
@@ -356,6 +400,27 @@ pub enum EngineCommand {
     SetRxGain(f32),
     SetInputDevice(Option<String>),
     SetOutputDevice(Option<String>),
+    /// Explicit RX channel-selection override (see
+    /// [`crate::audio::channel_select`]), persisted under Android's own
+    /// `rxAudioChannel` config key. Unlike TX, there is no QMX-based
+    /// auto-default here (Android has none either) -- this always takes the
+    /// value as given. Restarts capture if already decoding, same as
+    /// `SetInputDevice`.
+    SetRxAudioChannel(i32),
+    /// Explicit TX channel-selection override (`txAudioChannel`), matching
+    /// Android's own plain 3-way picker (no "reset to auto" option -- once
+    /// set, it's just a persisted preference like any other). Applies
+    /// immediately to the next transmission; does not require a rig
+    /// reconnect. The *unset* (`None`/key-absent) state that falls back to
+    /// the QMX auto-default is reached only by never calling this at all
+    /// (see `tx_audio_channel_override`'s own doc comment) -- there is
+    /// deliberately no "clear" command, since Android's UI has no such
+    /// option either.
+    SetTxAudioChannel(i32),
+    /// Explicit QMX-CAT-tones override (`qmxCatTones`), matching Android's
+    /// own plain boolean toggle -- same "no clear command" shape as
+    /// `SetTxAudioChannel` above.
+    SetQmxCatTones(bool),
     SelectRig(RigConfig),
     /// Drop the live rig connection for this session (CAT/PTT released). Leaves
     /// the saved rig config intact so Connect — or the next launch — reconnects.
@@ -462,6 +527,15 @@ pub struct RigStatusEvent {
     pub model: String,
     pub frequency_hz: u64,
     pub ptt: bool,
+    /// The TX-audio-channel/CAT-tones values actually in effect right now
+    /// (post `resolve_tx_audio_channel`/`resolve_qmx_cat_tones`) -- NOT the
+    /// raw `txAudioChannel`/`qmxCatTones` config, which stays unset while an
+    /// operator is relying on auto-detect. The Settings UI reads these (not
+    /// the config key) so its checkbox/dropdown reflects what a detected QMX
+    /// is actually doing, instead of always showing the override-unset
+    /// default until the operator explicitly overrides it.
+    pub tx_via_cat_tones: bool,
+    pub tx_audio_channel: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -560,7 +634,7 @@ pub fn spawn(db: Arc<Db>) -> (EngineHandle, Receiver<EngineEvent>) {
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
     // Background NTP time sync: corrects the app's clock without admin rights or
     // external software. Feeds offsets back through the command channel.
-    crate::timesync::spawn_loop(cmd_tx.clone());
+    crate::timesync::spawn_loop(cmd_tx.clone(), db.clone());
     let engine_cmd_tx = cmd_tx.clone();
     std::thread::Builder::new()
         .name("ft8af-engine".into())
@@ -665,15 +739,39 @@ struct Engine {
     tx_audio_hz: i32,
     /// TX output level (0.0–1.0) applied to the waveform before playback.
     tx_gain: f32,
-    /// Whether the connected rig needs TX audio confined to the left channel
-    /// to fully drive its modulator (currently just the QRP Labs QMX -- see
-    /// [`crate::rig::needs_left_channel_tx_audio`]). Recomputed on every
-    /// `select_rig`.
-    tx_left_channel_only: bool,
+    /// Which channel TX audio goes out on (see
+    /// [`crate::audio::channel_select`]) -- resolved on every `select_rig`
+    /// as `tx_audio_channel_override.unwrap_or_else(auto-detect)`, where
+    /// auto-detect is `LEFT` for a QMX (see
+    /// [`crate::rig::needs_left_channel_tx_audio`]) and `BOTH` otherwise.
+    tx_audio_channel: i32,
+    /// Sticky explicit override for `tx_audio_channel`, persisted under
+    /// Android's own `txAudioChannel` config key -- `None` means "never set,
+    /// use the QMX-based auto-default every `select_rig`" (re-resolved fresh
+    /// on each connect, never written to config -- ported from Android's own
+    /// `applyTxChannelDefaultForRig`/`defaultTxChannelForRig`, whose own doc
+    /// comment says this is deliberate: switching to another rig goes back
+    /// to `BOTH` instead of leaving it on a left-only TX never asked for).
+    /// Set via `EngineCommand::SetTxAudioChannel`.
+    tx_audio_channel_override: Option<i32>,
+    /// Which channel RX audio is captured from. No QMX-based auto-default
+    /// (Android has none for RX either) -- just a persisted preference, set
+    /// via `EngineCommand::SetRxAudioChannel` under the `rxAudioChannel` key.
+    rx_audio_channel: i32,
     /// Whether TX should go out as CAT tone commands instead of audio at all
     /// (currently just the QRP Labs QMX -- see
-    /// [`crate::rig::needs_cat_tone_tx`]). Recomputed on every `select_rig`.
+    /// [`crate::rig::needs_cat_tone_tx`]). `qmx_cat_tones_override.unwrap_or(false)`,
+    /// refreshed each `select_rig` (see `should_default_qmx_cat_tones_on`).
     tx_via_cat_tones: bool,
+    /// Sticky preference for `tx_via_cat_tones`, persisted under Android's
+    /// own `qmxCatTones` config key -- unlike `tx_audio_channel_override`,
+    /// this is a **one-time latch**, not a per-connection auto-default:
+    /// ported from Android's own `applyCatTonesDefaultForRig`/
+    /// `shouldDefaultQmxCatTonesOn`, the first time ever a QMX connects with
+    /// this key unset, `select_rig` turns it on *and writes the config row*,
+    /// so it never auto-resets again even across switching away from and
+    /// back to a QMX. Set via `EngineCommand::SetQmxCatTones`.
+    qmx_cat_tones_override: Option<bool>,
     /// Whether the connected rig answers the `SW;`/`PC;` SWR/power meter
     /// queries (currently just the QRP Labs QMX -- see
     /// [`crate::rig::supports_meter_query`]). Recomputed on every
@@ -795,6 +893,20 @@ impl Engine {
             .and_then(|s| s.parse::<f32>().ok())
             .map(clamp_rx_gain)
             .unwrap_or(DEFAULT_RX_GAIN);
+        // Sticky overrides (Android's own `txAudioChannel`/`qmxCatTones` key
+        // names/encoding -- see audio::channel_select's doc comment): absent
+        // key means "never set," preserved as `None` so `select_rig` keeps
+        // falling back to the QMX auto-detect exactly as before this existed.
+        let tx_audio_channel_override: Option<i32> = db
+            .get_config("txAudioChannel")
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .map(crate::audio::channel_select::clamp);
+        let qmx_cat_tones_override: Option<bool> =
+            db.get_config("qmxCatTones").map(|s| s == "1");
+        // No auto-default for RX (Android has none either) -- just a plain
+        // persisted preference, defaulting to BOTH like every build before
+        // this feature existed.
+        let rx_audio_channel = crate::audio::channel_select::parse(db.get_config("rxAudioChannel").as_deref());
         // Restore the last NTP offset so DT is roughly right immediately, before
         // the first fresh sync of this session lands. Treated as already-synced.
         let saved_offset: Option<i64> = db.get_config("clock_offset_ms").and_then(|s| s.parse().ok());
@@ -858,8 +970,11 @@ impl Engine {
             dial_hz,
             tx_audio_hz,
             tx_gain,
-            tx_left_channel_only: false,
+            tx_audio_channel: crate::audio::channel_select::BOTH,
+            tx_audio_channel_override,
+            rx_audio_channel,
             tx_via_cat_tones: false,
+            qmx_cat_tones_override,
             rig_supports_meters: false,
             tx_cat: None,
             tx_tune: None,
@@ -1099,7 +1214,12 @@ impl Engine {
         self.publish_decodes(&decoded);
         self.broadcast_decodes(&decoded);
 
-        if let Some(QsoOutcome::Completed(record)) = self.qso.process_rx(&decoded) {
+        if let Some(QsoOutcome::Completed(mut record)) = self.qso.process_rx(&decoded) {
+            // The operator's current power setting at the moment the QSO
+            // completes (ADIF TX_PWR) -- matches Android's own
+            // QSLTable.tx_pwr. `qso.rs` builds the record without DB/config
+            // access (deliberately kept pure), so this is filled in here.
+            record.tx_pwr = self.db.get_config("powerWatts").unwrap_or_default();
             match self.db.insert_qso(&record) {
                 Ok(_) => {
                     self.broadcast_qso(&record);
@@ -1276,7 +1396,7 @@ impl Engine {
             self.output_device.as_deref(),
             &signal,
             self.tx_gain,
-            self.tx_left_channel_only,
+            self.tx_audio_channel,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -1371,7 +1491,7 @@ impl Engine {
                 self.output_device.as_deref(),
                 self.tx_audio_hz as f32,
                 self.tx_gain,
-                self.tx_left_channel_only,
+                self.tx_audio_channel,
             ) {
                 Ok(h) => self.tx_tune = Some(TuneHandle::Audio(h)),
                 Err(e) => {
@@ -1457,6 +1577,19 @@ impl Engine {
     /// `rig_supports_meters`, checked by callers). Emits a `Meter` event only
     /// if at least one of the two queries returned a valid reading; a failed
     /// or unparseable reply just means no event this call, not an error.
+    ///
+    /// A valid power reading also updates the operator's `powerWatts`
+    /// Station setting -- ported from the Android fork's
+    /// `updateOperatorPowerFromRig`/`persistOperatorPowerIfChanged`: for a
+    /// radio whose power meter this app reads (just the QMX today), the
+    /// configured power follows the rig's own measurement instead of
+    /// standing at whatever the operator once typed in Settings. Desktop
+    /// polls once per over (right here, just before key-up) rather than
+    /// continuously while keyed, so there is no separate "unkey" moment to
+    /// defer the save to -- this reading *is* that moment, and comparing
+    /// against the persisted value (via `set_power_watts_if_changed`)
+    /// provides the same "don't rewrite on every over if the reading is
+    /// stable" dedup Android's own save-on-unkey gets from a different angle.
     fn poll_meters(&mut self) {
         let Some(rig) = self.rig.as_mut() else { return };
         let swr = rig
@@ -1469,6 +1602,14 @@ impl Engine {
             .and_then(|r| qmx_meters::parse_power_watts(&r));
         if swr.is_some() || power.is_some() {
             self.emit(EngineEvent::Meter(MeterEvent { swr_ratio: swr, power_watts: power }));
+        }
+        if let Some(watts) = power {
+            if watts > 0.0 {
+                let text = format_watts(watts);
+                if self.db.get_config("powerWatts").as_deref() != Some(text.as_str()) {
+                    let _ = self.db.set_config("powerWatts", &text);
+                }
+            }
         }
     }
 
@@ -1709,6 +1850,8 @@ impl Engine {
             model,
             frequency_hz: self.dial_hz,
             ptt: self.ptt,
+            tx_via_cat_tones: self.tx_via_cat_tones,
+            tx_audio_channel: self.tx_audio_channel,
         }));
     }
 
@@ -1846,6 +1989,26 @@ impl Engine {
                 self.output_device = name.clone();
                 let _ = self.db.set_config("output_device", name.as_deref().unwrap_or(""));
             }
+            EngineCommand::SetRxAudioChannel(channel) => {
+                self.rx_audio_channel = crate::audio::channel_select::clamp(channel);
+                let _ = self.db.set_config("rxAudioChannel", &self.rx_audio_channel.to_string());
+                if self.decoding {
+                    self.start_decode(); // restart capture with the new selection
+                }
+            }
+            EngineCommand::SetTxAudioChannel(channel) => {
+                let v = crate::audio::channel_select::clamp(channel);
+                self.tx_audio_channel_override = Some(v);
+                let _ = self.db.set_config("txAudioChannel", &v.to_string());
+                self.tx_audio_channel = v; // apply immediately, no reconnect needed
+                self.publish_rig_status();
+            }
+            EngineCommand::SetQmxCatTones(enabled) => {
+                self.qmx_cat_tones_override = Some(enabled);
+                let _ = self.db.set_config("qmxCatTones", if enabled { "1" } else { "0" });
+                self.tx_via_cat_tones = enabled; // apply immediately, no reconnect needed
+                self.publish_rig_status();
+            }
             EngineCommand::SelectRig(cfg) => {
                 if let Ok(json) = serde_json::to_string(&cfg) {
                     let _ = self.db.set_config("rig_config", &json);
@@ -1942,14 +2105,14 @@ impl Engine {
                 self.publish_clock_sync();
             }
             EngineCommand::ResyncTime => {
-                crate::timesync::spawn_once(self.cmd_tx.clone());
+                crate::timesync::spawn_once(self.cmd_tx.clone(), self.db.get_config("ntpServer"));
             }
             EngineCommand::Shutdown => {}
         }
     }
 
     fn start_decode(&mut self) {
-        match AudioInput::start(self.input_device.as_deref(), self.accum.clone(), self.rx_gain) {
+        match AudioInput::start(self.input_device.as_deref(), self.accum.clone(), self.rx_gain, self.rx_audio_channel) {
             Ok(input) => {
                 self.emit(EngineEvent::Info(format!(
                     "capturing from '{}' @ {} Hz",
@@ -1968,8 +2131,18 @@ impl Engine {
         // the old one is still open makes the new handshake time out. Dropping
         // here runs the old rig's close/cleanup before we reconnect.
         self.rig = None;
-        self.tx_left_channel_only = crate::rig::needs_left_channel_tx_audio(cfg.backend, cfg.hamlib_model);
-        self.tx_via_cat_tones = crate::rig::needs_cat_tone_tx(cfg.backend, cfg.hamlib_model);
+        self.tx_audio_channel = resolve_tx_audio_channel(self.tx_audio_channel_override, cfg.backend, cfg.hamlib_model);
+        if should_default_qmx_cat_tones_on(
+            crate::rig::needs_cat_tone_tx(cfg.backend, cfg.hamlib_model),
+            self.qmx_cat_tones_override.is_some(),
+        ) {
+            self.qmx_cat_tones_override = Some(true);
+            let _ = self.db.set_config("qmxCatTones", "1");
+            self.emit(EngineEvent::Info(
+                "QMX: turned on CAT tones (first connect, no prior user choice)".into(),
+            ));
+        }
+        self.tx_via_cat_tones = self.qmx_cat_tones_override.unwrap_or(false);
         self.rig_supports_meters = crate::rig::supports_meter_query(cfg.backend, cfg.hamlib_model);
         match RigConnection::connect(&cfg) {
             Ok(mut rig) => {
@@ -1984,7 +2157,7 @@ impl Engine {
                     self.emit(EngineEvent::Info(
                         "QMX: TX via CAT tone commands (no audio) for full drive".into(),
                     ));
-                } else if self.tx_left_channel_only {
+                } else if self.tx_audio_channel != crate::audio::channel_select::BOTH {
                     self.emit(EngineEvent::Info(
                         "QMX: TX audio confined to the left channel for full drive".into(),
                     ));
@@ -2002,16 +2175,85 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_rx_gain, clamp_tx_gain, reply_tx_audio_hz, rms_dbfs, should_refresh_ptt,
+        clamp_rx_gain, clamp_tx_gain, format_watts, reply_tx_audio_hz, rms_dbfs,
+        should_default_qmx_cat_tones_on, should_refresh_ptt, resolve_tx_audio_channel,
         waterfall_row_due, wf_boundary_row, Engine, EngineCommand, TuneHandle, CLIP_PEAK,
         DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ,
         MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
+    use crate::audio::channel_select;
     use crate::db::Db;
     use crate::dsp::DecodedMessage;
     use crate::mode::Mode;
+    use crate::rig::{RigBackend, QRPLABS_QMX_HAMLIB_MODEL};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn tx_audio_channel_auto_detects_left_for_a_qmx_when_unset() {
+        assert_eq!(
+            resolve_tx_audio_channel(None, RigBackend::Hamlib, QRPLABS_QMX_HAMLIB_MODEL),
+            channel_select::LEFT
+        );
+    }
+
+    #[test]
+    fn tx_audio_channel_auto_detects_both_for_a_non_qmx_when_unset() {
+        assert_eq!(resolve_tx_audio_channel(None, RigBackend::Flrig, 0), channel_select::BOTH);
+        assert_eq!(resolve_tx_audio_channel(None, RigBackend::Hamlib, 1), channel_select::BOTH);
+    }
+
+    #[test]
+    fn tx_audio_channel_override_wins_regardless_of_rig_type() {
+        // Forces RIGHT even for a detected QMX, and forces BOTH even though
+        // that's already the non-QMX default (proves the override is
+        // actually consulted, not just coincidentally matching auto-detect).
+        assert_eq!(
+            resolve_tx_audio_channel(Some(channel_select::RIGHT), RigBackend::Hamlib, QRPLABS_QMX_HAMLIB_MODEL),
+            channel_select::RIGHT
+        );
+        assert_eq!(
+            resolve_tx_audio_channel(Some(channel_select::BOTH), RigBackend::Flrig, 0),
+            channel_select::BOTH
+        );
+    }
+
+    #[test]
+    fn qmx_cat_tones_default_on_the_first_time_a_qmx_connects() {
+        assert!(should_default_qmx_cat_tones_on(true, false));
+    }
+
+    #[test]
+    fn qmx_cat_tones_never_defaults_for_a_non_qmx() {
+        assert!(!should_default_qmx_cat_tones_on(false, false));
+    }
+
+    #[test]
+    fn qmx_cat_tones_never_redefaults_once_a_choice_is_saved() {
+        // Covers both an explicit "on" and an explicit "off" -- once the
+        // config row exists at all, this never fires again, even for a QMX.
+        assert!(!should_default_qmx_cat_tones_on(true, true));
+    }
+
+    #[test]
+    fn format_watts_drops_a_trailing_zero_tenth() {
+        assert_eq!(format_watts(5.0), "5");
+        assert_eq!(format_watts(100.0), "100");
+    }
+
+    #[test]
+    fn format_watts_keeps_a_real_tenth() {
+        assert_eq!(format_watts(4.5), "4.5");
+        assert_eq!(format_watts(12.4), "12.4");
+    }
+
+    #[test]
+    fn format_watts_rounds_to_the_nearest_tenth() {
+        // The QMX's PC; reply is already in tenths, but float noise (e.g. from
+        // an upstream *0.1 conversion) must not leak extra decimal places in.
+        assert_eq!(format_watts(4.449), "4.4");
+        assert_eq!(format_watts(4.46), "4.5");
+    }
 
     #[test]
     fn ptt_keepalive_only_runs_for_keyed_radios_that_require_it() {

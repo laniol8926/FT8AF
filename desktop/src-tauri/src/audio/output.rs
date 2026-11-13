@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 
+use super::channel_select;
 use super::devices::find_output_device;
 use super::resample::resample_buffer;
 use crate::dsp::SAMPLE_RATE;
@@ -117,23 +118,39 @@ fn apply_gain_and_clip(data: &mut [f32], gain: f32) {
 
 /// Write one output frame (one sample per channel) from a mono `sample`.
 ///
-/// When `left_channel_only` is false (the historical default), the same
-/// sample fans out to every channel. When true -- needed to fully drive the
-/// QRP Labs QMX's modulator, see [`crate::rig::needs_left_channel_tx_audio`]
-/// -- only channel 0 carries the signal and every other channel is silenced,
-/// instead of leaving the mono-to-stereo upmix to the USB Audio Class device.
-/// A mono (`frame.len() == 1`) device has no second channel to silence, so
-/// the flag has no effect there.
-fn write_frame<T: SizedSample + FromSample<f32>>(frame: &mut [T], sample: f32, left_channel_only: bool) {
-    if left_channel_only && frame.len() > 1 {
-        frame[0] = T::from_sample(sample);
-        for s in &mut frame[1..] {
-            *s = T::from_sample(0.0f32);
-        }
-    } else {
+/// `channel` (see [`channel_select`]) picks which channel carries the
+/// signal. [`channel_select::BOTH`] (the historical default) fans the same
+/// sample out to every channel. [`channel_select::LEFT`]/[`RIGHT`] --
+/// `LEFT` needed to fully drive the QRP Labs QMX's modulator, see
+/// [`crate::rig::needs_left_channel_tx_audio`] -- confine the signal to one
+/// channel and silence every other, instead of leaving the mono-to-stereo
+/// upmix to the USB Audio Class device. A mono (`frame.len() == 1`) device
+/// has no second channel to silence, so the selection has no effect there.
+fn write_frame<T: SizedSample + FromSample<f32>>(frame: &mut [T], sample: f32, channel: i32) {
+    if frame.len() <= 1 {
         let v = T::from_sample(sample);
         for s in frame.iter_mut() {
             *s = v;
+        }
+        return;
+    }
+    match channel_select::clamp(channel) {
+        channel_select::LEFT => {
+            frame[0] = T::from_sample(sample);
+            for s in &mut frame[1..] {
+                *s = T::from_sample(0.0f32);
+            }
+        }
+        channel_select::RIGHT => {
+            for (i, s) in frame.iter_mut().enumerate() {
+                *s = T::from_sample(if i == 1 { sample } else { 0.0f32 });
+            }
+        }
+        _ => {
+            let v = T::from_sample(sample);
+            for s in frame.iter_mut() {
+                *s = v;
+            }
         }
     }
 }
@@ -141,13 +158,13 @@ fn write_frame<T: SizedSample + FromSample<f32>>(frame: &mut [T], sample: f32, l
 /// Render a 12 kHz mono buffer for `device_name`, applying `gain`, and build the
 /// (paused) output stream. Does NOT key audio — call [`PreparedTx::start`] to
 /// begin. This is the slow phase (device open + full-buffer resample); run it
-/// before raising PTT. `left_channel_only` confines the signal to channel 0 on
-/// a multi-channel device (see [`write_frame`]).
+/// before raising PTT. `channel` (see [`channel_select`]) picks which channel
+/// carries the signal on a multi-channel device (see [`write_frame`]).
 pub fn prepare(
     device_name: Option<&str>,
     samples_12k: &[f32],
     gain: f32,
-    left_channel_only: bool,
+    channel: i32,
 ) -> anyhow::Result<PreparedTx> {
     let device = find_output_device(device_name)
         .ok_or_else(|| anyhow::anyhow!("no output audio device available"))?;
@@ -168,9 +185,9 @@ pub fn prepare(
     let err_fn = |e| log::error!("audio output stream error: {e}");
 
     let stream = match sample_format {
-        SampleFormat::F32 => build_output::<f32>(&device, &config, channels, &buffer, &cursor, &done, &abort, left_channel_only, err_fn)?,
-        SampleFormat::I16 => build_output::<i16>(&device, &config, channels, &buffer, &cursor, &done, &abort, left_channel_only, err_fn)?,
-        SampleFormat::U16 => build_output::<u16>(&device, &config, channels, &buffer, &cursor, &done, &abort, left_channel_only, err_fn)?,
+        SampleFormat::F32 => build_output::<f32>(&device, &config, channels, &buffer, &cursor, &done, &abort, channel, err_fn)?,
+        SampleFormat::I16 => build_output::<i16>(&device, &config, channels, &buffer, &cursor, &done, &abort, channel, err_fn)?,
+        SampleFormat::U16 => build_output::<u16>(&device, &config, channels, &buffer, &cursor, &done, &abort, channel, err_fn)?,
         other => anyhow::bail!("unsupported output sample format: {other:?}"),
     };
 
@@ -194,7 +211,7 @@ fn build_output<T>(
     cursor: &Arc<AtomicUsize>,
     done: &Arc<AtomicBool>,
     abort: &Arc<AtomicBool>,
-    left_channel_only: bool,
+    channel: i32,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> anyhow::Result<cpal::Stream>
 where
@@ -222,7 +239,7 @@ where
                     done.store(true, Ordering::Relaxed);
                     0.0
                 };
-                write_frame(frame, sample, left_channel_only);
+                write_frame(frame, sample, channel);
             }
         },
         err_fn,
@@ -242,7 +259,7 @@ pub struct TunePlayback {
 
 /// Build and immediately start a continuous steady-tone output stream at
 /// `tone_hz`, for antenna tuning (no FT8 message, no auto-release).
-/// `gain`/`left_channel_only` mirror [`prepare`]'s. Synthesized directly at
+/// `gain`/`channel` mirror [`prepare`]'s. Synthesized directly at
 /// the device's own sample rate -- no resampling, unlike the FT8 waveform
 /// path, since there's no fixed-rate source to match -- and trimmed to a
 /// whole number of tone cycles so the loop point has no phase discontinuity
@@ -251,7 +268,7 @@ pub fn prepare_tune(
     device_name: Option<&str>,
     tone_hz: f32,
     gain: f32,
-    left_channel_only: bool,
+    channel: i32,
 ) -> anyhow::Result<TunePlayback> {
     let device = find_output_device(device_name)
         .ok_or_else(|| anyhow::anyhow!("no output audio device available"))?;
@@ -269,13 +286,13 @@ pub fn prepare_tune(
     let err_fn = |e| log::error!("audio output stream error: {e}");
     let stream = match sample_format {
         SampleFormat::F32 => {
-            build_tune_output::<f32>(&device, &config, channels, &buffer, &cursor, left_channel_only, err_fn)?
+            build_tune_output::<f32>(&device, &config, channels, &buffer, &cursor, channel, err_fn)?
         }
         SampleFormat::I16 => {
-            build_tune_output::<i16>(&device, &config, channels, &buffer, &cursor, left_channel_only, err_fn)?
+            build_tune_output::<i16>(&device, &config, channels, &buffer, &cursor, channel, err_fn)?
         }
         SampleFormat::U16 => {
-            build_tune_output::<u16>(&device, &config, channels, &buffer, &cursor, left_channel_only, err_fn)?
+            build_tune_output::<u16>(&device, &config, channels, &buffer, &cursor, channel, err_fn)?
         }
         other => anyhow::bail!("unsupported output sample format: {other:?}"),
     };
@@ -302,7 +319,7 @@ fn build_tune_output<T>(
     channels: usize,
     buffer: &Arc<Vec<f32>>,
     cursor: &Arc<AtomicUsize>,
-    left_channel_only: bool,
+    channel: i32,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> anyhow::Result<cpal::Stream>
 where
@@ -317,7 +334,7 @@ where
                 let idx = cursor.load(Ordering::Relaxed);
                 let sample = buffer[idx];
                 cursor.store((idx + 1) % buffer.len(), Ordering::Relaxed);
-                write_frame(frame, sample, left_channel_only);
+                write_frame(frame, sample, channel);
             }
         },
         err_fn,
@@ -360,22 +377,31 @@ mod tests {
     #[test]
     fn write_frame_fans_to_every_channel_by_default() {
         let mut frame = [0.0f32, 0.0, 0.0];
-        write_frame(&mut frame, 0.5, false);
+        write_frame(&mut frame, 0.5, channel_select::BOTH);
         assert_eq!(frame, [0.5, 0.5, 0.5]);
     }
 
     #[test]
     fn write_frame_confines_to_left_channel_when_requested() {
         let mut frame = [0.0f32, 0.0, 0.0];
-        write_frame(&mut frame, 0.5, true);
+        write_frame(&mut frame, 0.5, channel_select::LEFT);
         assert_eq!(frame, [0.5, 0.0, 0.0]);
     }
 
     #[test]
-    fn write_frame_left_channel_only_is_a_no_op_on_mono() {
+    fn write_frame_confines_to_right_channel_when_requested() {
+        let mut frame = [0.0f32, 0.0, 0.0];
+        write_frame(&mut frame, 0.5, channel_select::RIGHT);
+        assert_eq!(frame, [0.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn write_frame_channel_selection_is_a_no_op_on_mono() {
         // No second channel to silence -- behaves the same as the fan-out path.
         let mut frame = [0.0f32];
-        write_frame(&mut frame, 0.5, true);
+        write_frame(&mut frame, 0.5, channel_select::LEFT);
+        assert_eq!(frame, [0.5]);
+        write_frame(&mut frame, 0.5, channel_select::RIGHT);
         assert_eq!(frame, [0.5]);
     }
 

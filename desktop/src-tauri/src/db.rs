@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 9;
 
 /// One logged QSO. Field names follow ADIF.
 ///
@@ -88,6 +88,13 @@ pub struct QsoRecord {
     /// Already uploaded to QRZ.com's logbook. Read-only here — see `synced_cloudlog`.
     #[serde(default)]
     pub synced_qrz: bool,
+    /// Transmit power in watts at QSO completion (ADIF `TX_PWR`), matching
+    /// Android's own `QSLTable.tx_pwr` (v23 there). A plain string, not a
+    /// number, same as Android -- it's just whatever the operator's
+    /// `powerWatts` Station setting held at that moment (free text on
+    /// desktop, same as Android), not a validated numeric field.
+    #[serde(default)]
+    pub tx_pwr: String,
 }
 
 fn default_mode() -> String {
@@ -100,7 +107,7 @@ fn default_mode() -> String {
 const QSO_SELECT_COLUMNS: &str = "id, call, gridsquare, mode, rst_sent, rst_rcvd, qso_date, \
     time_on, qso_date_off, time_off, band, freq, station_callsign, my_gridsquare, comment, \
     qsl_rcvd, qsl_sent, lotw_sent, lotw_rcvd, eqsl_sent, eqsl_rcvd, qrz_qsl, state, country, \
-    synced_cloudlog, synced_qrz";
+    synced_cloudlog, synced_qrz, tx_pwr";
 
 /// The `logbookPlace` (State/place column) value as a SQL expression: country
 /// when it's non-US, else the logged state (falling back to the country
@@ -445,6 +452,26 @@ impl Db {
                 );",
             )?;
         }
+        if version < 8 {
+            // v8: Hunt watchlist, matching Android's own `followCallsigns`
+            // table exactly (found while auditing the Android fork's DB
+            // schema for anything Settings-related desktop was missing --
+            // it's its own dedicated table there, not a config row). No
+            // Settings/Hunt UI reads or writes this yet (Transmission/Hunt
+            // settings aren't built on desktop as of this migration); added
+            // now so that feature's own migration doesn't have to.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS follow_callsigns (callsign TEXT PRIMARY KEY);",
+            )?;
+        }
+        if version < 9 {
+            // v9: TX power at QSO completion (ADIF TX_PWR), matching
+            // Android's own `QSLTable.tx_pwr` -- the operator's `powerWatts`
+            // Station setting (which a QMX keeps live-updated from its own
+            // measured output, see `engine.rs`'s `poll_meters`) gets copied
+            // into the log the moment a QSO completes.
+            conn.execute_batch("ALTER TABLE qso_log ADD COLUMN tx_pwr TEXT;")?;
+        }
         conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
         Ok(())
     }
@@ -520,9 +547,9 @@ impl Db {
                  qso_date_off, time_off, band, freq, station_callsign,
                  my_gridsquare, comment, qsl_rcvd, qsl_sent, lotw_sent, lotw_rcvd,
                  eqsl_sent, eqsl_rcvd, qrz_qsl, state, country,
-                 synced_cloudlog, synced_qrz, created_at)
+                 synced_cloudlog, synced_qrz, tx_pwr, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                     ?19,?20,?21,?22,?23,?24,?25,?26)
+                     ?19,?20,?21,?22,?23,?24,?25,?26,?27)
              ON CONFLICT(call, qso_date, time_on, mode) DO UPDATE SET
                 gridsquare=excluded.gridsquare, rst_sent=excluded.rst_sent,
                 rst_rcvd=excluded.rst_rcvd, qso_date_off=excluded.qso_date_off,
@@ -533,7 +560,8 @@ impl Db {
                 lotw_sent=excluded.lotw_sent, lotw_rcvd=excluded.lotw_rcvd,
                 eqsl_sent=excluded.eqsl_sent, eqsl_rcvd=excluded.eqsl_rcvd,
                 qrz_qsl=excluded.qrz_qsl, state=excluded.state, country=excluded.country,
-                synced_cloudlog=excluded.synced_cloudlog, synced_qrz=excluded.synced_qrz",
+                synced_cloudlog=excluded.synced_cloudlog, synced_qrz=excluded.synced_qrz,
+                tx_pwr=excluded.tx_pwr",
         )?
         .execute(params![
             r.call, r.gridsquare, r.mode, r.rst_sent, r.rst_rcvd, r.qso_date,
@@ -542,7 +570,7 @@ impl Db {
             r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
             r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64,
             r.state, r.country, r.synced_cloudlog as i64, r.synced_qrz as i64,
-            crate::util::now_unix_ms(),
+            r.tx_pwr, crate::util::now_unix_ms(),
         ])?;
         Ok(conn.last_insert_rowid())
     }
@@ -1446,6 +1474,44 @@ impl Db {
             )
             .ok()
     }
+
+    // --- Hunt watchlist (`follow_callsigns`, v8 -- see its migration's doc
+    // comment) -- no Settings/Hunt UI wired to these yet; added as the
+    // storage building block for that feature's own future implementation. ---
+
+    /// Every followed callsign, alphabetical (matches Android's own `select
+    /// callsign from followCallsigns order by callsign`).
+    pub fn list_follow_callsigns(&self) -> Vec<String> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare("SELECT callsign FROM follow_callsigns ORDER BY callsign") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |r| r.get(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Add a callsign to the Hunt watchlist (uppercased, trimmed; a no-op if
+    /// already present -- the table's own PRIMARY KEY dedups).
+    pub fn add_follow_callsign(&self, call: &str) {
+        let call = call.trim().to_ascii_uppercase();
+        if call.is_empty() {
+            return;
+        }
+        let _ = self.conn.lock().execute(
+            "INSERT OR IGNORE INTO follow_callsigns (callsign) VALUES (?1)",
+            params![call],
+        );
+    }
+
+    /// Remove a callsign from the Hunt watchlist.
+    pub fn remove_follow_callsign(&self, call: &str) {
+        let _ = self.conn.lock().execute(
+            "DELETE FROM follow_callsigns WHERE callsign = ?1",
+            params![call.trim().to_ascii_uppercase()],
+        );
+    }
 }
 
 /// Normalize a candidate grid locator to an uppercase grid4, or `None` if
@@ -1486,6 +1552,7 @@ fn row_to_qso(r: &rusqlite::Row) -> rusqlite::Result<QsoRecord> {
         country: r.get::<_, Option<String>>(23)?.unwrap_or_default(),
         synced_cloudlog: r.get::<_, Option<i64>>(24)?.unwrap_or(0) != 0,
         synced_qrz: r.get::<_, Option<i64>>(25)?.unwrap_or(0) != 0,
+        tx_pwr: r.get::<_, Option<String>>(26)?.unwrap_or_default(),
     })
 }
 
@@ -1512,6 +1579,7 @@ fn adif_qso_body(r: &QsoRecord) -> String {
     adif_opt(&mut out, "my_gridsquare", &r.my_gridsquare);
     adif_opt(&mut out, "state", &r.state);
     adif_opt(&mut out, "country", &r.country);
+    adif_opt(&mut out, "tx_pwr", &r.tx_pwr);
     out.push_str(&format!("<QSL_SENT:1>{} ", flag(r.qsl_sent)));
     out.push_str(&format!("<LOTW_QSL_SENT:1>{} ", flag(r.lotw_sent)));
     out.push_str(&format!("<LOTW_QSL_RCVD:1>{} ", flag(r.lotw_rcvd)));
@@ -1658,6 +1726,13 @@ fn merge_matched_qso(existing: &QsoRecord, imported: &QsoRecord) -> Option<QsoRe
     }
     if merged.country.is_empty() && !imported.country.is_empty() {
         merged.country = imported.country.clone();
+        changed = true;
+    }
+    // Mirrors Android's own backfill-only-if-blank UPDATE for TX_PWR on rows
+    // logged before this column existed (DatabaseOpr's "tx_pwr=? ... WHERE
+    // tx_pwr IS NULL OR tx_pwr=''").
+    if merged.tx_pwr.is_empty() && !imported.tx_pwr.is_empty() {
+        merged.tx_pwr = imported.tx_pwr.clone();
         changed = true;
     }
     if is_lotw_style_record(&merged) && !is_lotw_style_record(imported) {
@@ -3710,6 +3785,71 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v7_db_in_place_and_adds_follow_callsigns() {
+        let conn = Connection::open_in_memory().unwrap();
+        // A real database reaching v7 always has qso_log (created at v1) --
+        // the v9 migration below needs it to ALTER TABLE, so this minimal
+        // fixture needs at least the bare table to stay realistic.
+        conn.execute_batch("CREATE TABLE qso_log (id INTEGER PRIMARY KEY); PRAGMA user_version = 7;").unwrap();
+        let db = Db::from_conn(conn).unwrap();
+        assert!(db.list_follow_callsigns().is_empty());
+        db.add_follow_callsign("K1ABC");
+        assert_eq!(db.list_follow_callsigns(), vec!["K1ABC".to_string()]);
+    }
+
+    #[test]
+    fn migrates_v8_db_in_place_and_adds_tx_pwr() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE qso_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call TEXT NOT NULL, gridsquare TEXT, mode TEXT, rst_sent TEXT,
+                rst_rcvd TEXT, qso_date TEXT, time_on TEXT, qso_date_off TEXT,
+                time_off TEXT, band TEXT, freq TEXT, station_callsign TEXT,
+                my_gridsquare TEXT, comment TEXT, created_at INTEGER,
+                qsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                synced_cloudlog INTEGER NOT NULL DEFAULT 0,
+                synced_qrz INTEGER NOT NULL DEFAULT 0,
+                qsl_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_rcvd INTEGER NOT NULL DEFAULT 0,
+                eqsl_sent INTEGER NOT NULL DEFAULT 0,
+                eqsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                qrz_qsl INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT ''
+            );
+            INSERT INTO qso_log(call, mode, qso_date, time_on)
+                VALUES('K1ABC', 'FT8', '20260604', '120000');
+            PRAGMA user_version = 8;
+            "#,
+        )
+        .unwrap();
+        let db = Db::from_conn(conn).unwrap();
+        let qsos = db.list_qsos(10, 0);
+        assert_eq!(qsos.len(), 1, "existing rows must survive the migration");
+        assert_eq!(qsos[0].tx_pwr, "");
+    }
+
+    #[test]
+    fn tx_pwr_round_trips_through_insert_select_and_adif_export() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(),
+            mode: "FT8".into(),
+            qso_date: "20260604".into(),
+            time_on: "120000".into(),
+            tx_pwr: "5".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let qsos = db.list_qsos(10, 0);
+        assert_eq!(qsos[0].tx_pwr, "5");
+        assert!(db.export_adif().contains("<tx_pwr:1>5"));
+    }
+
+    #[test]
     fn upsert_callsign_qth_live_always_replaces() {
         let db = Db::open_in_memory().unwrap();
         db.upsert_callsign_qth_live("K1ABC", "FN42");
@@ -3772,6 +3912,28 @@ mod tests {
     fn qth_for_call_returns_none_for_an_unknown_callsign() {
         let db = Db::open_in_memory().unwrap();
         assert_eq!(db.qth_for_call("K1ABC"), None);
+    }
+
+    #[test]
+    fn follow_callsigns_add_list_remove_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.list_follow_callsigns().is_empty());
+
+        db.add_follow_callsign(" k1abc ");
+        db.add_follow_callsign("w1aw");
+        // Re-adding (even in a different case) is a no-op, not a duplicate.
+        db.add_follow_callsign("K1ABC");
+        assert_eq!(db.list_follow_callsigns(), vec!["K1ABC", "W1AW"]);
+
+        db.remove_follow_callsign("k1abc");
+        assert_eq!(db.list_follow_callsigns(), vec!["W1AW"]);
+    }
+
+    #[test]
+    fn follow_callsigns_ignores_a_blank_add() {
+        let db = Db::open_in_memory().unwrap();
+        db.add_follow_callsign("   ");
+        assert!(db.list_follow_callsigns().is_empty());
     }
 
     #[test]
