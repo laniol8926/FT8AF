@@ -1195,6 +1195,7 @@ dependencies = [
 name = "ft8af"
 version = "0.1.2"
 dependencies = [
+ "alsa",
  "anyhow",
  "cc",
  "chrono",

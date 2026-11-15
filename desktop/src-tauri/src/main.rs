@@ -582,6 +582,43 @@ fn apply_settings_backup(
     config: std::collections::BTreeMap<String, String>,
     follow_callsigns: Vec<String>,
 ) -> Result<(), String> {
+    // Android's own Control Mode setting is a flat `ctrMode` config key
+    // (its own int-coded `database.ControlMode`); desktop's equivalent
+    // lives *nested* inside the serialized `rig_config` blob's
+    // `control_mode` field, not as a standalone key of its own. Writing
+    // `ctrMode` verbatim via the loop below (same as every other key)
+    // would leave it an inert, unread row -- confirmed live: a real
+    // import that included `ctrMode=1` (CAT) never changed the rig's
+    // actual control mode, because nothing reads a bare "ctrMode" key.
+    // Translate it into the live `rig_config` blob here instead.
+    if let Some(ctr_mode) = config.get("ctrMode") {
+        if let Some(mode) = rig::control_mode_from_android_ctr_mode(ctr_mode) {
+            // "{}" rather than `RigConfig::default()` (no such derive) --
+            // every field already has its own `#[serde(default = ...)]`,
+            // so deserializing an empty object gives the same per-field
+            // fallbacks `rig_config` is loaded with everywhere else.
+            let mut cfg: RigConfig = state
+                .db
+                .get_config("rig_config")
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_else(|| serde_json::from_str("{}").expect("RigConfig fields all have serde defaults"));
+            cfg.control_mode = mode;
+            if let Ok(json) = serde_json::to_string(&cfg) {
+                let _ = state.db.set_config("rig_config", &json);
+            }
+        }
+    }
+    // Same translation gap, same fix shape: Android's manual clock
+    // correction is its own flat `timeCorrectionMs` key (applied to
+    // `UtcTimer.delay`); desktop's equivalent is `clock_offset_ms` (applied
+    // to `self.now()` the same way, same ±5000ms range -- see
+    // `timeCorrection.ts`'s `clampCorrectionMs`). Writing `timeCorrectionMs`
+    // verbatim via the loop below would leave it just as inert as `ctrMode`
+    // was.
+    if let Some(ms) = config.get("timeCorrectionMs").and_then(|s| s.trim().parse::<i64>().ok()) {
+        let clamped = ms.clamp(-5000, 5000);
+        let _ = state.db.set_config("clock_offset_ms", &clamped.to_string());
+    }
     for (k, v) in config {
         state.db.set_config(&k, &v).map_err(|e| e.to_string())?;
     }

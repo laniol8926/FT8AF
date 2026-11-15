@@ -58,6 +58,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"
 [target.'cfg(target_os = "linux")'.dependencies]
 # GeoClue 2 over D-Bus (system bus).
 zbus = "5"
+# Direct ALSA PCM-name listing for Settings' Audio Input/Output pickers --
+# see audio/devices.rs's linux_alsa module for why cpal's own enumeration
+# isn't enough here. Same version cpal itself already pulls in transitively
+# on this target, so this doesn't add a second copy.
+alsa = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows.Devices.Geolocation Geolocator + IAsyncOperation.

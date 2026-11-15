@@ -30,6 +30,7 @@ type Category = "radio" | "about" | "timesync" | "decodefilters" | "advanced" | 
  */
 export function SettingsScreen(props: {
   onStatus: (s: string) => void;
+  onNtpDisciplineChange: (on: boolean) => void;
   clock: ClockSyncEvent | null;
   onSettingsSaved: (known?: { call?: string; rigBackend?: string }) => void;
   onRigLabel: (v: string) => void;
@@ -93,7 +94,7 @@ export function SettingsScreen(props: {
   onDecodeDeep: (v: boolean) => void;
 }) {
   const {
-    onStatus, clock, onSettingsSaved, onRigLabel, onBandsChanged, operatingMode, rig,
+    onStatus, clock, onNtpDisciplineChange, onSettingsSaved, onRigLabel, onBandsChanged, operatingMode, rig,
     bands, dialHz, onBand, onMode, showVolumeSlider, onShowVolumeSlider,
     huntEnabled, onHuntEnabled,
     huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
@@ -202,7 +203,7 @@ export function SettingsScreen(props: {
   if (category === "timesync") {
     return (
       <SettingsDetailScaffold title="Time Sync" onBack={() => setCategory(null)}>
-        <TimeSyncSettings clock={clock} onStatus={onStatus} />
+        <TimeSyncSettings clock={clock} onStatus={onStatus} onNtpDisciplineChange={onNtpDisciplineChange} />
       </SettingsDetailScaffold>
     );
   }

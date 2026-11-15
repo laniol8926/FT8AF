@@ -259,6 +259,14 @@ export default function App() {
   const [txState, setTxState] = useState<TxStateEvent | null>(null);
   const [rig, setRig] = useState<RigStatusEvent | null>(null);
   const [clock, setClock] = useState<ClockSyncEvent | null>(null);
+  // Which automatic source (if any) is disciplining the clock right now --
+  // shown as a small badge on the sync pill, ported from Android's own
+  // ClockSync.kt (`clockSyncAutoBadge`). Desktop only ever has NTP live
+  // today (GPS discipline and self-sync-from-decode-DT both stay disclosed
+  // stubs -- see TimeSyncSettings.tsx's own doc comment), so this is just
+  // "NTP" or nothing (manual only), not the full GPS/NTP/AUTO tri-state
+  // Android's badge supports.
+  const [ntpDisciplineEnabled, setNtpDisciplineEnabled] = useState(true);
   const [decoding, setDecoding] = useState(false);
   const [audio, setAudio] = useState<InputLevelEvent | null>(null);
   const [, setStatus] = useState("");
@@ -744,6 +752,7 @@ export default function App() {
     api.getConfig("decode_sort_mode").then((v) => {
       if (v === "call" || v === "snr" || v === "dx" || v === "time") setSortMode(v);
     });
+    api.getConfig("disciplineClockFromNtp").then((v) => setNtpDisciplineEnabled(v !== "0"));
     api.getConfig("hunt_enabled").then((v) => setHuntEnabled(v === "true"));
     api.getConfig("hunt_priority").then((v) => setHuntPriorityState(huntPriorityFromConfig(v)));
     api.getConfig("hunt_avoid_pileups").then((v) => setHuntAvoidPileups(v === "true"));
@@ -1111,6 +1120,7 @@ export default function App() {
           rigLabel={rigLabel}
           txState={txState}
           clock={clock}
+          ntpDisciplineEnabled={ntpDisciplineEnabled}
           importBusy={!!importProgress}
           onUpload={() => setUploadSyncNotice(true)}
           onImport={startImportAdif}
@@ -1133,6 +1143,7 @@ export default function App() {
         }}
         rig={rig}
         clock={clock}
+        ntpDisciplineEnabled={ntpDisciplineEnabled}
         rigLabel={rigLabel}
         txState={txState}
         meter={meter}
@@ -1224,6 +1235,7 @@ export default function App() {
         {tab === "settings" && (
           <SettingsScreen
             onStatus={setStatus}
+            onNtpDisciplineChange={setNtpDisciplineEnabled}
             clock={clock}
             onSettingsSaved={maybeAutoStartDecode}
             onRigLabel={(v) => {
@@ -2529,6 +2541,7 @@ function TopBar(props: {
   onSaveFreeText: (text: string) => void;
   rig: RigStatusEvent | null;
   clock: ClockSyncEvent | null;
+  ntpDisciplineEnabled: boolean;
   rigLabel: string;
   txState: TxStateEvent | null;
   meter: { swr_ratio: number | null; power_watts: number | null } | null;
@@ -2545,7 +2558,7 @@ function TopBar(props: {
 }) {
   const {
     cycle, bands, dialHz, onBand, operatingMode, onMode, myCall, myGrid, savedFreeText, onSaveFreeText,
-    rig, clock, rigLabel, txState, meter,
+    rig, clock, ntpDisciplineEnabled, rigLabel, txState, meter,
     onCq, onStop, onFreeText, onToggleTune, huntEnabled, onToggleHunt,
     sortMode, onCycleSortMode, onClearDecodes, onRefresh,
   } = props;
@@ -2678,7 +2691,7 @@ function TopBar(props: {
         <button className="icon-button" title="Clear the decode list" onClick={onClearDecodes}>🗑</button>
       </div>
 
-      <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} />
+      <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} ntpDisciplineEnabled={ntpDisciplineEnabled} />
     </div>
     {cqOptionsOpen && (
       <CqOptionsModal
@@ -2753,15 +2766,16 @@ function RxTxRadioChips({
 /** The clock-sync badge + per-cycle countdown bar -- extracted out of
  *  TopBar for the same reason as RxTxRadioChips above. */
 function SyncRow({
-  clock, pct, secondsLeft,
+  clock, pct, secondsLeft, ntpDisciplineEnabled,
 }: {
   clock: ClockSyncEvent | null;
   pct: number;
   secondsLeft: number | null;
+  ntpDisciplineEnabled: boolean;
 }) {
   return (
     <div className="topbar-row sync-row">
-      <ClockSyncBadge clock={clock} />
+      <ClockSyncBadge clock={clock} ntpDisciplineEnabled={ntpDisciplineEnabled} />
       <div className="cycle-bar">
         <div style={{ width: `${pct}%` }} />
       </div>
@@ -2784,7 +2798,7 @@ function SyncRow({
  * Logbook tab only (not Map/Settings/POTA), matching this one screen.
  */
 function LogbookTopBar({
-  cycle, operatingMode, rig, rigLabel, txState, clock, importBusy, onUpload, onImport, onExport,
+  cycle, operatingMode, rig, rigLabel, txState, clock, ntpDisciplineEnabled, importBusy, onUpload, onImport, onExport,
 }: {
   cycle: CycleTick | null;
   operatingMode: OperatingMode;
@@ -2792,6 +2806,7 @@ function LogbookTopBar({
   rigLabel: string;
   txState: TxStateEvent | null;
   clock: ClockSyncEvent | null;
+  ntpDisciplineEnabled: boolean;
   importBusy: boolean;
   onUpload: () => void;
   onImport: () => void;
@@ -2839,7 +2854,7 @@ function LogbookTopBar({
           ↗
         </button>
       </div>
-      <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} />
+      <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} ntpDisciplineEnabled={ntpDisciplineEnabled} />
     </div>
   );
 }
@@ -3054,7 +3069,16 @@ function fmtOffset(ms: number): string {
 // Small clock-health indicator next to the UTC clock. Green when the offset is
 // tight enough for clean FT8 (<0.5 s), amber when it's getting risky, grey until
 // the first sync lands.
-function ClockSyncBadge({ clock }: { clock: ClockSyncEvent | null }) {
+function ClockSyncBadge({
+  clock,
+  ntpDisciplineEnabled,
+}: {
+  clock: ClockSyncEvent | null;
+  /** Which automatic source is disciplining the clock -- see its own
+   *  App.tsx state doc comment for why this is just "NTP or nothing" on
+   *  desktop today, unlike Android's full GPS/NTP/AUTO badge. */
+  ntpDisciplineEnabled: boolean;
+}) {
   if (!clock || !clock.synced) {
     return <span className="muted" title="Waiting for NTP time sync">sync …</span>;
   }
@@ -3063,9 +3087,10 @@ function ClockSyncBadge({ clock }: { clock: ClockSyncEvent | null }) {
   return (
     <span
       style={{ color, fontVariantNumeric: "tabular-nums" }}
-      title={`Clock offset from NTP: ${clock.offset_ms} ms (applied to decode timing, system clock untouched)`}
+      title={`Clock offset: ${clock.offset_ms} ms, from ${ntpDisciplineEnabled ? "NTP sync" : "your last manual correction"} (applied to decode timing, system clock untouched)`}
     >
       sync {fmtOffset(clock.offset_ms)}
+      {ntpDisciplineEnabled && <span className="sync-source-badge"> NTP</span>}
     </span>
   );
 }

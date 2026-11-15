@@ -55,6 +55,29 @@ const CONTROL_MODE_OPTIONS: { value: RigControlMode; label: string }[] = [
 ];
 const CONTROL_MODE_LABEL: Record<RigControlMode, string> = { vox: "VOX", cat: "CAT", rts: "RTS", dtr: "DTR" };
 
+/**
+ * Defaults for every `RigConfig` field, reused both as the initial
+ * `useState` value and to backfill a persisted `rig_config` blob on load
+ * (see that `useEffect`'s own comment). Rust's own deserialization already
+ * has `#[serde(default = ...)]` per field for exactly this reason -- a
+ * blob saved by an older build (or one hand-edited/corrupted) shouldn't
+ * blank out a field it predates -- but that only protects the *Rust* side
+ * (`serde_json::from_str`); the frontend's own `JSON.parse(v) as RigConfig`
+ * is an unchecked cast with no such fallback, so it needs its own copy of
+ * the same defaults.
+ */
+const DEFAULT_RIG_CONFIG: RigConfig = {
+  backend: "none",
+  port: "",
+  baud: 38400,
+  control_mode: "cat",
+  flrig_host: "127.0.0.1",
+  flrig_port: 12345,
+  hamlib_model: 1,
+  hamlib_network: false,
+  hamlib_address: "127.0.0.1:4992",
+};
+
 type OpenDialog =
   | null
   | "rigModel"
@@ -194,17 +217,7 @@ export function RadioAudioSettings({
     port: 2237,
     accept_requests: false,
   });
-  const [rigCfg, setRigCfg] = useState<RigConfig>({
-    backend: "none",
-    port: "",
-    baud: 38400,
-    control_mode: "cat",
-    flrig_host: "127.0.0.1",
-    flrig_port: 12345,
-    hamlib_model: 1,
-    hamlib_network: false,
-    hamlib_address: "127.0.0.1:4992",
-  });
+  const [rigCfg, setRigCfg] = useState<RigConfig>(DEFAULT_RIG_CONFIG);
 
   // Which row+dialog is currently open -- one flag covers every picker
   // below since only one can be open at a time (matches Android's own
@@ -314,7 +327,13 @@ export function RadioAudioSettings({
     api.getConfig("rig_config").then((v) => {
       if (v) {
         try {
-          const parsed = JSON.parse(v) as RigConfig;
+          // Backfill with DEFAULT_RIG_CONFIG first -- a blob saved before a
+          // field existed (confirmed live: a real persisted rig_config
+          // predating `control_mode` leaves it `undefined` after a plain
+          // cast, blanking the Control Mode row) must not leak `undefined`
+          // into state just because JSON.parse has no schema to fall back
+          // to, unlike Rust's own `#[serde(default)]` on the same struct.
+          const parsed = { ...DEFAULT_RIG_CONFIG, ...(JSON.parse(v) as Partial<RigConfig>) };
           setRigCfg(applySelection(parsed, configToSelection(parsed)));
         } catch {
           /* ignore malformed saved config */

@@ -72,6 +72,22 @@ fn default_control_mode() -> RigControlMode {
     RigControlMode::Cat
 }
 
+/// Maps Android's `database.ControlMode` int (its own `ctrMode` config key,
+/// e.g. from a settings-backup import) to the equivalent `RigControlMode`.
+/// `None` for a value with no desktop equivalent (`NETWORK=2`, unused even
+/// on Android; `BLUETOOTH=3`, no Bluetooth rig support here) or anything
+/// unparseable -- the caller leaves the existing `control_mode` alone in
+/// that case rather than guessing.
+pub fn control_mode_from_android_ctr_mode(ctr_mode: &str) -> Option<RigControlMode> {
+    match ctr_mode.trim().parse::<i32>() {
+        Ok(0) => Some(RigControlMode::Vox),
+        Ok(1) => Some(RigControlMode::Cat),
+        Ok(4) => Some(RigControlMode::Rts),
+        Ok(5) => Some(RigControlMode::Dtr),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RigConfig {
     #[serde(default = "default_backend")]
@@ -868,6 +884,23 @@ impl Drop for Hamlib {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn control_mode_from_android_ctr_mode_maps_known_values() {
+        assert_eq!(control_mode_from_android_ctr_mode("0"), Some(RigControlMode::Vox));
+        assert_eq!(control_mode_from_android_ctr_mode("1"), Some(RigControlMode::Cat));
+        assert_eq!(control_mode_from_android_ctr_mode("4"), Some(RigControlMode::Rts));
+        assert_eq!(control_mode_from_android_ctr_mode("5"), Some(RigControlMode::Dtr));
+    }
+
+    #[test]
+    fn control_mode_from_android_ctr_mode_none_for_no_desktop_equivalent_or_garbage() {
+        assert_eq!(control_mode_from_android_ctr_mode("2"), None); // NETWORK, unused even on Android
+        assert_eq!(control_mode_from_android_ctr_mode("3"), None); // BLUETOOTH, no desktop support
+        assert_eq!(control_mode_from_android_ctr_mode("99"), None);
+        assert_eq!(control_mode_from_android_ctr_mode(""), None);
+        assert_eq!(control_mode_from_android_ctr_mode("cat"), None);
+    }
 
     #[test]
     fn needs_left_channel_tx_audio_only_for_hamlib_qmx() {

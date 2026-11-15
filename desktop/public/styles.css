@@ -209,6 +209,7 @@ select option {
 
 /* DT/NTP sync row, below the title row. */
 .sync-row { gap: 10px; }
+.sync-source-badge { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.06em; vertical-align: middle; }
 .cycle-bar { flex: 1; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
 .cycle-bar > div { height: 100%; background: var(--accent); transition: width 0.2s linear; }
 .seq { font-variant-numeric: tabular-nums; }

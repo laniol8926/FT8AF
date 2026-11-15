@@ -26,7 +26,18 @@ import { SettingsRow } from "./SettingsPrimitives";
  *   standalone safety review, not a blind port alongside a dozen other
  *   settings screens in one pass.
  */
-export function TimeSyncSettings({ clock, onStatus }: { clock: ClockSyncEvent | null; onStatus: (s: string) => void }) {
+export function TimeSyncSettings({
+  clock,
+  onStatus,
+  onNtpDisciplineChange,
+}: {
+  clock: ClockSyncEvent | null;
+  onStatus: (s: string) => void;
+  /** Mirrors the toggle up to the TopBar's sync badge so it updates live,
+   *  without hoisting this whole screen's state -- see its own useEffect
+   *  mount-load for the initial value. */
+  onNtpDisciplineChange?: (on: boolean) => void;
+}) {
   const [correctionMs, setCorrectionMs] = useState(0);
   const [ntpDiscipline, setNtpDiscipline] = useState(true);
   const [ntpServer, setNtpServer] = useState("");
@@ -52,6 +63,7 @@ export function TimeSyncSettings({ clock, onStatus }: { clock: ClockSyncEvent | 
   function toggleNtpDiscipline(on: boolean) {
     setNtpDiscipline(on);
     api.setConfig("disciplineClockFromNtp", on ? "1" : "0");
+    onNtpDisciplineChange?.(on);
   }
 
   function applyNtpServer(v: string) {

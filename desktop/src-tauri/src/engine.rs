@@ -1172,10 +1172,30 @@ impl Engine {
         }
 
         // Reconnect the last-used rig on startup (non-fatal if it can't).
+        // Retries a few times, a beat apart, before giving up: a USB-serial
+        // rig's device node isn't always enumerated yet at the exact instant
+        // the app launches (confirmed live: a QMX reconnect lost this race
+        // once, leaving the rig silently "offline" with no further attempt
+        // until the operator noticed and pressed Connect manually in
+        // Settings) -- a single one-shot try had no way to recover from
+        // that. Each failed attempt still emits its own `select_rig` error
+        // (so the operator can see retries happening, not just silence),
+        // and a later success clears it the normal way via
+        // `publish_rig_status`.
         if let Some(json) = self.db.get_config("rig_config") {
             if let Ok(cfg) = serde_json::from_str::<RigConfig>(&json) {
                 if cfg.backend != crate::rig::RigBackend::None {
-                    self.select_rig(cfg);
+                    const STARTUP_RECONNECT_ATTEMPTS: u32 = 3;
+                    const STARTUP_RECONNECT_DELAY: Duration = Duration::from_millis(1500);
+                    for attempt in 1..=STARTUP_RECONNECT_ATTEMPTS {
+                        self.select_rig(cfg.clone());
+                        if self.rig.is_some() {
+                            break;
+                        }
+                        if attempt < STARTUP_RECONNECT_ATTEMPTS {
+                            std::thread::sleep(STARTUP_RECONNECT_DELAY);
+                        }
+                    }
                 }
             }
         }
@@ -2418,6 +2438,16 @@ impl Engine {
     }
 
     fn start_decode(&mut self) {
+        // Release any existing capture stream FIRST, before opening the next
+        // one. `self.input = Some(new)` alone would evaluate `AudioInput::
+        // start(...)` (the new open) before dropping the old `self.input` --
+        // on Linux, a direct-hardware PCM (no dmix/dsnoop) only accepts one
+        // open handle per direction, so switching from e.g. "default" to a
+        // named device routed to the *same* hardware (confirmed on a QMX:
+        // both "default" and "plughw:CARD=Transceiver,DEV=0" are the one USB
+        // audio interface) would otherwise find its own old stream still
+        // holding the hardware and fail to open the new one.
+        self.input = None;
         match AudioInput::start(self.input_device.as_deref(), self.accum.clone(), self.rx_gain, self.rx_audio_channel) {
             Ok(input) => {
                 self.emit(EngineEvent::Info(format!(
@@ -2427,7 +2457,13 @@ impl Engine {
                 self.input = Some(input);
                 self.decoding = true;
             }
-            Err(e) => self.emit(EngineEvent::Error(format!("audio start failed: {e}"))),
+            Err(e) => {
+                // self.input is already None (dropped above) -- reflect
+                // that honestly rather than leaving `decoding` true with
+                // no actual capture running.
+                self.decoding = false;
+                self.emit(EngineEvent::Error(format!("audio start failed: {e}")));
+            }
         }
     }
 
