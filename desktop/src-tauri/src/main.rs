@@ -240,6 +240,12 @@ fn set_clear_on_band_mode_change(state: State<AppState>, enabled: bool) {
     state.engine.send(EngineCommand::SetClearOnBandModeChange(enabled));
 }
 
+/// RX audio capture latency compensation (ms) -- see `rx_latency_adjusted_into_cycle_ms`'s doc comment.
+#[tauri::command]
+fn set_rx_latency_ms(state: State<AppState>, ms: i64) {
+    state.engine.send(EngineCommand::SetRxLatencyMs(ms));
+}
+
 #[tauri::command]
 fn refresh_status(state: State<AppState>) {
     state.engine.send(EngineCommand::RefreshStatus);
@@ -1135,6 +1141,7 @@ fn main() {
             set_max_73_sends,
             set_auto_cq_after_qso,
             set_clear_on_band_mode_change,
+            set_rx_latency_ms,
             refresh_status,
             resync_time,
             set_clock_offset,

@@ -12,6 +12,19 @@ import { SettingsRow } from "./SettingsPrimitives";
  * `timesync.rs`'s `ntp_discipline_enabled`/`server_order`), not just a
  * status readout.
  *
+ * **RX Audio Latency** is new: a real, measured per-rig USB-audio capture
+ * delay (confirmed live on a QMX: decode DT consistently 0.6-1.9s, never
+ * near 0 -- matches Android's own source comment "~1 s with the QMX on the
+ * motorola"). Android computes this value *automatically*, built on top of
+ * the self-sync-from-decode-DT machinery this port deliberately defers
+ * (see below) -- so unlike everything else on this screen, this one row is
+ * a manual control Android itself doesn't expose, built because the
+ * auto-calibration isn't available yet. `rxLatencyMs` is still Android's
+ * own key/semantics (`rx_latency_adjusted_into_cycle_ms` in engine.rs),
+ * and the operator sets it the same way Android's own doc comment
+ * describes tuning toward: "Adjust until the DT column on decoded
+ * stations centers near 0."
+ *
  * Two sections stay deliberate, disclosed stubs rather than ported:
  * - **GPS Clock Discipline**: real Android hardware feature (issue #373),
  *   not dropped as Android-only cruft -- the user has GPS hardware for the
@@ -41,11 +54,18 @@ export function TimeSyncSettings({
   const [correctionMs, setCorrectionMs] = useState(0);
   const [ntpDiscipline, setNtpDiscipline] = useState(true);
   const [ntpServer, setNtpServer] = useState("");
+  const [rxLatencyMs, setRxLatencyMs] = useState(0);
+  const [rxLatencyDraft, setRxLatencyDraft] = useState("0");
 
   useEffect(() => {
     api.getConfig("clock_offset_ms").then((v) => v && setCorrectionMs(clampCorrectionMs(parseInt(v, 10) || 0)));
     api.getConfig("disciplineClockFromNtp").then((v) => setNtpDiscipline(v !== "0"));
     api.getConfig("ntpServer").then((v) => setNtpServer(v ?? ""));
+    api.getConfig("rxLatencyMs").then((v) => {
+      const ms = v ? parseInt(v, 10) || 0 : 0;
+      setRxLatencyMs(ms);
+      setRxLatencyDraft(String(ms));
+    });
   }, []);
   // The engine's own clock_offset_ms is the live source of truth once a sync
   // lands (NTP or this screen's own manual apply) -- keep the readout honest
@@ -69,6 +89,14 @@ export function TimeSyncSettings({
   function applyNtpServer(v: string) {
     setNtpServer(v);
     api.setConfig("ntpServer", v.trim());
+  }
+
+  function applyRxLatency() {
+    const parsed = parseInt(rxLatencyDraft, 10);
+    const clamped = Number.isFinite(parsed) ? Math.max(0, Math.min(3000, parsed)) : rxLatencyMs;
+    setRxLatencyMs(clamped);
+    setRxLatencyDraft(String(clamped));
+    api.setRxLatencyMs(clamped);
   }
 
   return (
@@ -112,6 +140,38 @@ export function TimeSyncSettings({
               NTP clock discipline is controlling the clock — turn it off below to adjust manually.
             </div>
           )}
+        </div>
+      </div>
+
+      <div className="panel">
+        <h3>RX Audio Latency</h3>
+        <div className="col">
+          <div className="muted" style={{ fontSize: 12 }}>
+            Compensates for your rig's own USB-audio buffering delay -- a real,
+            measured, per-rig figure (around 1 s is typical for a QMX), separate
+            from clock sync above. Android calculates this automatically; desktop
+            doesn't have that auto-calibration yet, so set it by hand: watch the
+            decode list's DT column and raise this until DT centers near 0.0
+            instead of running consistently high.
+          </div>
+          <div className="field">
+            <label>Latency (ms)</label>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={3000}
+              step={10}
+              value={rxLatencyDraft}
+              onChange={(e) => setRxLatencyDraft(e.target.value)}
+              onBlur={applyRxLatency}
+              style={{ width: 100 }}
+            />
+            <span className="muted" style={{ display: "block", marginTop: 4, fontSize: 12 }}>
+              0-3000 ms, same range as Android's own value. 0 = no compensation
+              (desktop's behavior before this setting existed).
+            </span>
+          </div>
         </div>
       </div>
 

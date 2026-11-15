@@ -406,6 +406,10 @@ export const api = {
   setAutoCqAfterQso: (enabled: boolean) => invoke("set_auto_cq_after_qso", { enabled }),
   /** Settings -> Transmission's "Clear decodes on band/mode change". */
   setClearOnBandModeChange: (enabled: boolean) => invoke("set_clear_on_band_mode_change", { enabled }),
+  /** RX audio capture latency compensation (ms) -- Settings -> Time Sync's
+   *  "RX Audio Latency" (a manual stand-in for Android's own auto-calibrated
+   *  value; see TimeSyncSettings.tsx's doc comment). */
+  setRxLatencyMs: (ms: number) => invoke("set_rx_latency_ms", { ms }),
   refreshStatus: () => invoke("refresh_status"),
   resyncTime: () => invoke("resync_time"),
   /** Manual clock-correction stepper for offline operating (Settings -> Time Sync). */

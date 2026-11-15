@@ -20,7 +20,9 @@
   --accent-soft: rgba(255, 175, 94, 0.14);
   --signal: #5cd6e8;     /* Android signal (cyan) */
   --signal-soft: rgba(92, 214, 232, 0.14);
-  --target: #f472b6;     /* Android Target (pink) -- messages addressed to me */
+  --target: #f472b6;     /* Android Target (pink) -- the station you're currently calling */
+  --target-soft: rgba(244, 114, 182, 0.14);
+  --target-border: rgba(244, 114, 182, 0.28);
   --ok: #4ade80;         /* Android StatusConfirmed */
   --tx: #ef4444;         /* Android StatusBad */
   --yellow: #facc15;     /* Android StatusWarn */
@@ -396,6 +398,14 @@ select option {
 }
 .decode-row.cq { border-left-color: var(--accent); }
 .decode-row.tome { background: var(--signal-soft); }
+/* The station currently being called -- Android's own row-level
+   bg/border priority (tome > target > cq), matched by CSS cascade order
+   here: .tome's background above wins because .decode-row.tome and
+   .decode-row.target can both match a row's className, and .tome is
+   declared second... actually both selectors have equal specificity, so
+   the *later* rule in the file wins regardless of class order in the
+   element -- .tome stays below .target for exactly that reason. */
+.decode-row.target { background: var(--target-soft); border-left-color: var(--target); }
 .decode-row.clickable { cursor: pointer; }
 .decode-row.clickable:hover { background: var(--panel-2); }
 /* min-width:0 is required, not decorative: a flex item's default min-width
@@ -404,13 +414,29 @@ select option {
    long message push every column after it out of alignment, since each
    row's message is a different length. Confirmed live: the Freq/SNR/DT
    columns didn't line up row to row until this was added. */
-.decode-row-msg {
+.decode-row-msg-slot {
   width: 30ch; min-width: 0; flex: none;
+  display: flex; align-items: center; gap: 5px;
+}
+.decode-row-msg {
+  min-width: 0; flex: 1;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text);
 }
 /* Already-worked station (this band + mode): struck through in red, matching
    the Android app's worked-station highlighting. */
 .decode-row-msg.worked { text-decoration: line-through; color: var(--tx); opacity: 0.7; }
+/* Message text emphasis when this row is the station currently being
+   called -- Android's compactMessageEmphasis (to-you still wins, handled
+   by .decode-row-msg.tome below taking cascade priority the same way the
+   row-level colors do). */
+.decode-row-msg.target { color: var(--target); font-weight: 700; }
+.decode-row-msg.tome { color: var(--signal); font-weight: 700; }
+/* "→ CALLING" chip, matching Android's MessageLabel/DecodeRowLabelChip
+   exactly: 4px rounded corners, bold 9.5px text, 5px/1px padding. */
+.decode-row-calling-chip {
+  flex: none; border-radius: 4px; padding: 1px 5px; font-size: 9.5px; font-weight: 700;
+  letter-spacing: 0.06em; color: var(--target); background: var(--target-soft);
+}
 /* flex:none + min-width:0 on all three, same reason as .decode-row-msg just
    above: without them a flex item's default sizing can disagree with its
    own "width" (shrinking, or being measured by content rather than the box). */

@@ -82,6 +82,13 @@ fn clamp_rx_gain(g: f32) -> f32 {
     g.clamp(0.0, 1.0)
 }
 
+/// Matches Android's own `RX_LATENCY_MAX_MS` bound exactly.
+const RX_LATENCY_MAX_MS: i64 = 3000;
+
+fn clamp_rx_latency_ms(ms: i64) -> i64 {
+    ms.clamp(0, RX_LATENCY_MAX_MS)
+}
+
 /// Format a wattage for the `powerWatts` config value -- ported from the
 /// Android fork's `GeneralVariables.formatWatts` exactly: rounded to tenths,
 /// with a trailing ".0" dropped (`4.5`, `12.4`, `100` not `100.0`). Keeping
@@ -226,6 +233,25 @@ fn decode_dispatch_due(
         && !suspended
         && rx_slot_id != last_decoded_slot
         && into_rx_cycle_ms >= decode_at_ms
+}
+
+/// Shift `into_rx_cycle_ms` back by the configured RX audio latency, for
+/// both the early-decode trigger and the slot-extraction math -- ported
+/// from Android's `rxLatencyMs`/`FT8SignalListener.setRxLatencyMs`
+/// ("Each slot's recording starts this much after the boundary, so decode
+/// DTs read ~0 and the early pass doesn't cut off the end of every
+/// signal"). A real, measured, QMX-specific USB-audio buffering delay
+/// (confirmed in Android's own code comment: "~1 s with the QMX on the
+/// motorola"), not a bug in this app's own timing math -- the decoder's
+/// own symbol-sync detection is untouched; this only changes which
+/// captured samples get treated as "this slot's audio so far" and when
+/// that's considered a complete-enough waveform to decode early. Clamped
+/// at 0 (a configured value can't make the decoder see into the future)
+/// -- the upstream clamp to Android's own 0-3000ms range happens where the
+/// setting is applied/persisted, same as every other bounded setting in
+/// this file.
+fn rx_latency_adjusted_into_cycle_ms(into_rx_cycle_ms: i64, rx_latency_ms: i64) -> i64 {
+    (into_rx_cycle_ms - rx_latency_ms).max(0)
 }
 
 fn boundary_tx_ready(
@@ -505,6 +531,10 @@ pub enum EngineCommand {
     SetAutoCqAfterQso(bool),
     /// Settings -> Transmission's "Clear decodes on band/mode change".
     SetClearOnBandModeChange(bool),
+    /// RX audio capture latency compensation (ms) -- see
+    /// `rx_latency_adjusted_into_cycle_ms`'s doc comment. Clamped to
+    /// Android's own 0-3000ms range.
+    SetRxLatencyMs(i64),
     Shutdown,
 }
 
@@ -909,6 +939,15 @@ struct Engine {
     /// Settings -> Transmission's "Clear decodes on band/mode change" --
     /// see `EngineCommand::SetBand`/`switch_mode`.
     clear_on_band_mode_change: bool,
+    /// RX audio capture latency compensation (ms), Android's own
+    /// `rxLatencyMs` key -- see `rx_latency_adjusted_into_cycle_ms`'s doc
+    /// comment. Android computes this automatically (built on the
+    /// self-sync-from-decode-DT machinery, deferred on desktop pending its
+    /// own safety review); this is a manual value instead, a UI surface
+    /// Android itself doesn't have, built because the auto-calibration
+    /// isn't available yet. Default 0 -- unset, no shift, matches every
+    /// build before this setting existed.
+    rx_latency_ms: i64,
 }
 
 /// Whether the keepalive should resend PTT-on now. `since_last_on` is the
@@ -1082,6 +1121,11 @@ impl Engine {
             .unwrap_or(tx_gain);
         let clear_on_band_mode_change =
             db.get_config("clearOnBandModeChange").map(|s| s == "1").unwrap_or(true);
+        let rx_latency_ms = db
+            .get_config("rxLatencyMs")
+            .and_then(|s| s.parse().ok())
+            .map(clamp_rx_latency_ms)
+            .unwrap_or(0);
 
         let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol(), decode_deep);
 
@@ -1138,6 +1182,7 @@ impl Engine {
             tune_level_independent,
             tune_gain,
             clear_on_band_mode_change,
+            rx_latency_ms,
         }
     }
 
@@ -1306,7 +1351,13 @@ impl Engine {
             // (~13.2 s in) rather than at the 15 s boundary, so decodes land a slot
             // earlier and the operator can reply on the next cycle (not skip one).
             let rx_slot_id = now.div_euclid(self.mode.cycle_ms());
-            let into_rx_cycle = now.rem_euclid(self.mode.cycle_ms());
+            // Shifted back by rx_latency_ms (0 for anyone who hasn't set it,
+            // same as every build before this setting existed) -- see
+            // rx_latency_adjusted_into_cycle_ms's own doc comment.
+            let into_rx_cycle = rx_latency_adjusted_into_cycle_ms(
+                now.rem_euclid(self.mode.cycle_ms()),
+                self.rx_latency_ms,
+            );
             if decode_dispatch_due(
                 self.decoding,
                 self.decode_suspended,
@@ -2304,6 +2355,10 @@ impl Engine {
                 self.clear_on_band_mode_change = enabled;
                 let _ = self.db.set_config("clearOnBandModeChange", if enabled { "1" } else { "0" });
             }
+            EngineCommand::SetRxLatencyMs(ms) => {
+                self.rx_latency_ms = clamp_rx_latency_ms(ms);
+                let _ = self.db.set_config("rxLatencyMs", &self.rx_latency_ms.to_string());
+            }
             EngineCommand::SetInputDevice(name) => {
                 self.input_device = name.clone();
                 let _ = self.db.set_config("input_device", name.as_deref().unwrap_or(""));
@@ -2961,6 +3016,39 @@ mod tests {
         // Not decoding at all: never due, PTT state is irrelevant.
         assert!(!waterfall_row_due(false, false));
         assert!(!waterfall_row_due(false, true));
+    }
+
+    #[test]
+    fn rx_latency_zero_is_a_no_op() {
+        use super::rx_latency_adjusted_into_cycle_ms;
+        assert_eq!(rx_latency_adjusted_into_cycle_ms(13_200, 0), 13_200);
+        assert_eq!(rx_latency_adjusted_into_cycle_ms(0, 0), 0);
+    }
+
+    #[test]
+    fn rx_latency_shifts_back_by_the_configured_amount() {
+        use super::rx_latency_adjusted_into_cycle_ms;
+        // Matches the QMX's own real-world figure from Android's source.
+        assert_eq!(rx_latency_adjusted_into_cycle_ms(13_200, 920), 12_280);
+        assert_eq!(rx_latency_adjusted_into_cycle_ms(1_000, 1_000), 0);
+    }
+
+    #[test]
+    fn rx_latency_never_goes_negative() {
+        use super::rx_latency_adjusted_into_cycle_ms;
+        // Early in the cycle with a large configured latency: clamps to 0
+        // rather than asking the decoder to see into the future.
+        assert_eq!(rx_latency_adjusted_into_cycle_ms(500, 3000), 0);
+    }
+
+    #[test]
+    fn clamp_rx_latency_ms_matches_androids_own_bound() {
+        use super::clamp_rx_latency_ms;
+        assert_eq!(clamp_rx_latency_ms(-100), 0);
+        assert_eq!(clamp_rx_latency_ms(0), 0);
+        assert_eq!(clamp_rx_latency_ms(920), 920);
+        assert_eq!(clamp_rx_latency_ms(3000), 3000);
+        assert_eq!(clamp_rx_latency_ms(5000), 3000);
     }
 
     #[test]

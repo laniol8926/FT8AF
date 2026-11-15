@@ -5,24 +5,53 @@
 // classification Android uses (calling me, POTA, new DXCC/zone/state/grid/
 // prefix/band, worked, plain CQ).
 //
-// Two tiers are left out rather than faked:
-//   - SOTA: needs a parsed CQ "modifier" field (e.g. "CQ SOTA K1ABC FN42")
-//     the desktop decoder doesn't extract yet.
-//   - NEW_POTA (an unhunted park, vs. plain POTA): needs a live pota.app
-//     spot feed for the park ref, same gap hunt.ts already documents for
-//     Hunt's pota_first priority. isPota here is text-only CQ detection
-//     (isPotaCq), so it can only ever produce the plain POTA tier.
+// SOTA is real: the CQ "modifier" token (e.g. "SOTA" in "CQ SOTA K1ABC
+// FN42") decodes into plain text already -- desktop's C decode core is the
+// exact same kgoba ft8_lib Android's own cpp/unpack.c compiles from
+// (confirmed: `unpack_callsign`'s "CQ_nnn"/"CQ_aaaa" special-token branch
+// produces this literal text, no new decode-side work needed), so
+// `extractCqModifier` below is pure text parsing on top of what the
+// decoder already hands back, matching Android's exact detection regex.
+//
+// One tier is still left out rather than faked:
+//   - NEW_POTA (an unhunted park, vs. plain POTA): the FT8 message itself
+//     never carries a park reference -- Android gets it from a *live
+//     pota.app spot feed* correlating callsign -> park (`PotaSpotsRepository
+//     .parkRefFor`), the same gap hunt.ts already documents for Hunt's
+//     pota_first priority. Without that feed there's no way to know *which*
+//     park a station is activating, let alone whether it's already hunted,
+//     so isPota here (text-only CQ detection, isPotaCq) can only ever
+//     produce the plain POTA tier -- a real missing subsystem, not a quick
+//     text-parsing addition like SOTA was.
 //
 // highlightX gates below mirror Android's Settings -> Decode Highlights
-// *default* values (GeneralVariables.java): DXCC/Zone/Band/Worked/POTA on,
-// State/Grid/Prefix off (too noisy on a fresh install). No Settings screen
-// exists yet on desktop to change these -- hardcoded so the toggles have
-// matching logic to attach to once that screen is built, rather than
-// inventing this priority chain from scratch then.
+// *real, operator-configurable* values now (Settings -> Decode & Filters,
+// wired in App.tsx's highlightConfig) -- SOTA itself is never gated by a
+// highlight toggle, matching Android's own unconditional `isCQ && modifier
+// == "SOTA"` check exactly (unlike POTA, which Android does gate behind
+// `highlightPota`).
+
+/**
+ * The CQ "modifier" token right after "CQ " (e.g. "SOTA", "DX", "123"), or
+ * `null` when the next token doesn't look like one -- matches Android's own
+ * `Ft8Message.modifier` detection regex exactly (`"[0-9]{3}|[A-Z]{1,4}"`).
+ * A real callsign never matches this: every issued amateur callsign
+ * contains at least one digit mixed with letters, which neither pattern
+ * allows (3 digits with no letters, or 1-4 letters with no digits).
+ */
+export function extractCqModifier(isCq: boolean, text: string): string | null {
+  if (!isCq) return null;
+  const upper = text.trim().toUpperCase();
+  if (!upper.startsWith("CQ ")) return null;
+  const token = upper.slice(3).trim().split(/\s+/)[0] ?? "";
+  if (/^[0-9]{3}$/.test(token) || /^[A-Z]{1,4}$/.test(token)) return token;
+  return null;
+}
 
 export type QsoStatus =
   | "pending"
   | "pota"
+  | "sota"
   | "new_dxcc"
   | "new_zone"
   | "new_state"
@@ -36,6 +65,8 @@ export interface QsoStatusFlags {
   isCq: boolean;
   isToMe: boolean;
   isPota: boolean;
+  /** A SOTA activator's CQ (modifier == "SOTA") -- see `extractCqModifier`. */
+  isSota: boolean;
   isNewDxcc: boolean;
   isNewZone: boolean;
   isNewState: boolean;
@@ -76,6 +107,9 @@ export const HIGHLIGHT_DEFAULTS: HighlightConfig = {
 export function resolveQsoStatus(f: QsoStatusFlags, highlights: HighlightConfig = HIGHLIGHT_DEFAULTS): QsoStatus | null {
   if (f.isToMe) return "pending";
   if (highlights.pota && f.isPota) return "pota";
+  // Unconditional -- matches Android's own `isCQ && modifier == "SOTA"`,
+  // which has no highlight-toggle gate at all (unlike POTA just above).
+  if (f.isSota) return "sota";
   if (highlights.dxcc && f.isNewDxcc) return "new_dxcc";
   if (highlights.zone && f.isNewZone) return "new_zone";
   if (highlights.state && f.isNewState) return "new_state";
@@ -98,6 +132,7 @@ export const QSO_STATUS_META: Record<
 > = {
   pending: { label: "PENDING", color: "#8a96b1", bg: "rgba(138,150,177,0.10)", border: "rgba(138,150,177,0.22)" },
   pota: { label: "POTA", color: "#4ade80", bg: "rgba(74,222,128,0.12)", border: "rgba(74,222,128,0.28)" },
+  sota: { label: "SOTA", color: "#4ade80", bg: "rgba(74,222,128,0.12)", border: "rgba(74,222,128,0.28)" },
   new_dxcc: { label: "NEW DXCC", color: "#c084fc", bg: "rgba(192,132,252,0.12)", border: "rgba(192,132,252,0.28)" },
   new_zone: { label: "NEW ZONE", color: "#60a5fa", bg: "rgba(96,165,250,0.12)", border: "rgba(96,165,250,0.28)" },
   new_state: { label: "NEW STATE", color: "#2dd4bf", bg: "rgba(45,212,191,0.12)", border: "rgba(45,212,191,0.28)" },

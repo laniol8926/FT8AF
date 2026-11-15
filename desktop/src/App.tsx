@@ -83,7 +83,7 @@ import {
 import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
 import { formatDecodeDt, formatDecodeFreq, isDecodeDtNotable } from "./decodeRow";
 import { wpxPrefixOf } from "./wpxPrefix";
-import { resolveQsoStatus, QSO_STATUS_META, HIGHLIGHT_DEFAULTS, type HighlightConfig } from "./qsoStatus";
+import { resolveQsoStatus, extractCqModifier, QSO_STATUS_META, HIGHLIGHT_DEFAULTS, type HighlightConfig } from "./qsoStatus";
 import {
   parseWorkedMode, parseWorkedScope, isWorkedByScope, shouldHideWorked,
   parseCallList, isBlocked, matchesWatchlist, type WorkedMode, type WorkedScope,
@@ -3403,12 +3403,21 @@ function DecodeScreen(props: {
               }
               const callUpper = m.call_from.toUpperCase();
               const worked = workedCalls.has(callUpper);
+              // The station currently being called -- ported from Android's
+              // DecodeScreen.kt's own isTarget: TX must actually be running
+              // with a real (non-CQ) target, not just armed. Desktop's own
+              // qso.rs clears `target` back to null the moment a QSO/CQ
+              // isn't actively targeting someone (give-up, stop, reset), so
+              // unlike Android there's no idle "CQ" sentinel value to filter
+              // out separately here.
+              const isTarget = txTarget != null && callUpper === txTarget.toUpperCase();
               const rowTime = new Date(m.utc_ms).toISOString().substring(11, 19);
               const prefix = wpxPrefixOf(m.call_from);
               const status = resolveQsoStatus({
                 isCq: m.is_cq,
                 isToMe: m.to_me,
                 isPota: isPotaCq(m.is_cq, m.text),
+                isSota: extractCqModifier(m.is_cq, m.text) === "SOTA",
                 isNewDxcc: m.dxcc_prefix != null && !workedDxccPrefixes.has(m.dxcc_prefix),
                 isNewZone: m.cq_zone != null && !workedCqZones.has(m.cq_zone),
                 isNewState: m.state != null && !workedStates.has(m.state),
@@ -3431,12 +3440,32 @@ function DecodeScreen(props: {
                       "decode-row" +
                       (m.is_cq ? " cq" : "") +
                       (m.to_me ? " tome" : "") +
+                      (isTarget ? " target" : "") +
                       (m.is_cq || m.to_me ? " clickable" : "")
                     }
                     onClick={() => (m.is_cq || m.to_me) && onAnswer(m)}
                     title={m.is_cq || m.to_me ? "Click to answer" : ""}
                   >
-                    <span className={"decode-row-msg" + (worked ? " worked" : "")}>{m.text}</span>
+                    <span className="decode-row-msg-slot">
+                      {/* "→ CALLING" chip, matching Android's DecodeRowLabelChip
+                          (compact mode shows only this one, never separate CQ/TO
+                          YOU chips -- those are already carried by the row's own
+                          highlight + the status pill, see decodeRowLabels' own
+                          comment). Shares the message column's fixed width, same
+                          as Android, so the columns after it still line up. */}
+                      {isTarget && <span className="decode-row-calling-chip">→ CALLING</span>}
+                      <span
+                        className={
+                          "decode-row-msg" +
+                          (worked ? " worked" : "") +
+                          // to-me beats target for message-text emphasis too,
+                          // matching Android's compactMessageEmphasis priority.
+                          (m.to_me ? " tome" : isTarget ? " target" : "")
+                        }
+                      >
+                        {m.text}
+                      </span>
+                    </span>
                     <span className="decode-row-snr">{m.snr}</span>
                     {/* Zero-padded to 4 digits (Android's getFreq_hz(), "%04.0f") so
                         this column's digits line up row to row regardless of how
