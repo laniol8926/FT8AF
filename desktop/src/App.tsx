@@ -49,6 +49,7 @@ import {
   formFromQso,
   isLogFiltered,
   logbookPlace,
+  maskDateInput,
   neededStates,
   neededStatesPreview,
   NEEDED_STATES_PREVIEW_MAX,
@@ -4458,20 +4459,29 @@ function ExportLogSheet(props: {
           <div className="row">
             <input
               className="date"
-              type="date"
+              type="text"
+              inputMode="numeric"
+              placeholder="YYYY-MM-DD"
+              maxLength={10}
               value={rangeStart}
-              onChange={(e) => onRangeStart(e.target.value)}
+              onChange={(e) => onRangeStart(maskDateInput(e.target.value))}
               aria-label="Export start date"
             />
             <span className="muted">→</span>
             <input
               className="date"
-              type="date"
+              type="text"
+              inputMode="numeric"
+              placeholder="YYYY-MM-DD"
+              maxLength={10}
               value={rangeEnd}
-              onChange={(e) => onRangeEnd(e.target.value)}
+              onChange={(e) => onRangeEnd(maskDateInput(e.target.value))}
               aria-label="Export end date"
             />
           </div>
+          <span className="muted" style={{ display: "block", marginTop: 4, fontSize: 12 }}>
+            Type digits only (e.g. 20261101) -- hyphens are added automatically.
+          </span>
         </div>
         <div className="actions">
           <button onClick={onClose}>Cancel</button>

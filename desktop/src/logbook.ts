@@ -53,6 +53,27 @@ export function adifToDateInput(value: string): string {
   return v;
 }
 
+/**
+ * Auto-hyphenating mask for a plain-text "YYYY-MM-DD" date field, typed
+ * left-to-right one digit at a time (e.g. Export's date-range fields).
+ * Strips anything that isn't a digit, caps at 8 digits, and inserts the two
+ * hyphens as soon as enough digits exist for them -- so backspacing a
+ * trailing digit also removes a hyphen that's no longer earned, instead of
+ * leaving a dangling one behind. A plain text input + this mask replaces a
+ * native `<input type="date">`: WebKitGTK's own date-entry widget has a
+ * real, confirmed-on-this-board bug where the year segment refuses typed
+ * keyboard digits at all (only month/day accept them) -- see this
+ * function's call site in `App.tsx`'s `ExportLogSheet` and `main.rs`'s
+ * `pick_adif_file` doc comment for the same board's prior native-widget
+ * quirk under this same WebKitGTK plugin.
+ */
+export function maskDateInput(raw: string): string {
+  const digits = (raw ?? "").replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 4) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6)}`;
+}
+
 /** Format a stored `time_on` ("HHMMSS" or "HHMM", UTC) as "HH:MM" for the
  *  table view. Blank or non-numeric input -> "". */
 export function formatHhmm(timeOn: string): string {

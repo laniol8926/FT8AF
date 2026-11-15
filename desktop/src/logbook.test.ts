@@ -16,6 +16,7 @@ import {
   GRID_HEATMAP_ROWS,
   isLogFiltered,
   logbookPlace,
+  maskDateInput,
   neededStates,
   neededStatesPreview,
   qslMarks,
@@ -70,6 +71,30 @@ describe("dateInputToAdif / adifToDateInput", () => {
     expect(adifToDateInput("")).toBe("");
     // Non-8-digit values pass through.
     expect(adifToDateInput("2026")).toBe("2026");
+  });
+});
+
+describe("maskDateInput", () => {
+  it("inserts hyphens as digits accumulate, typed left-to-right", () => {
+    expect(maskDateInput("2")).toBe("2");
+    expect(maskDateInput("2026")).toBe("2026");
+    expect(maskDateInput("20261")).toBe("2026-1");
+    expect(maskDateInput("202611")).toBe("2026-11");
+    expect(maskDateInput("2026111")).toBe("2026-11-1");
+    expect(maskDateInput("20261115")).toBe("2026-11-15");
+  });
+
+  it("strips non-digits so pasted or hyphenated text still masks correctly", () => {
+    expect(maskDateInput("2026-11-15")).toBe("2026-11-15");
+    expect(maskDateInput("20/26/11/15")).toBe("2026-11-15");
+  });
+
+  it("caps at 8 digits, ignoring anything typed past a full date", () => {
+    expect(maskDateInput("202611159999")).toBe("2026-11-15");
+  });
+
+  it("empty input stays empty", () => {
+    expect(maskDateInput("")).toBe("");
   });
 });
 
