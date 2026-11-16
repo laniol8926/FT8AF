@@ -22,6 +22,7 @@ use crate::mode::Mode;
 use crate::qmx_cat_tones as cat_tones;
 use crate::qmx_meters;
 use crate::qrz;
+use crate::pskreporter_sender::{self, PskReporterSender};
 use crate::qso::{QsoEngine, QsoOutcome, QsoStatus};
 use crate::rig::{RigConfig, RigConnection};
 use crate::tx_protection;
@@ -809,6 +810,11 @@ struct Engine {
     /// upload button, which reads `db` directly rather than going through
     /// this field).
     qrz_xml: qrz::QrzXmlClient,
+    /// Uploads decoded spots to PSKReporter -- see `pskreporter_sender.rs`'s
+    /// top doc comment. Gated on `enablePskReporter`, checked fresh on
+    /// every slot (not cached) so a live Settings toggle takes effect
+    /// immediately.
+    psk_sender: PskReporterSender,
     rig: Option<RigConnection>,
     input: Option<AudioInput>,
     input_device: Option<String>,
@@ -1140,6 +1146,22 @@ impl Engine {
 
         let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol(), decode_deep);
 
+        let psk_sender = PskReporterSender::new();
+        {
+            let flush_sender = psk_sender.clone();
+            let flush_db = db.clone();
+            psk_sender.start(move || {
+                let rig = flush_sender.rig_name();
+                pskreporter_sender::StationInfo {
+                    my_call: flush_db.get_config("my_call").unwrap_or_default(),
+                    my_grid: flush_db.get_config("my_grid").unwrap_or_default(),
+                    software: pskreporter_sender::build_software_string(env!("CARGO_PKG_VERSION"), rig.as_deref()),
+                    antenna: flush_db.get_config("antenna").unwrap_or_default(),
+                    rig: rig.unwrap_or_default(),
+                }
+            });
+        }
+
         Engine {
             db,
             decode_deep,
@@ -1151,6 +1173,7 @@ impl Engine {
             txed_slot: -1,
             qso,
             qrz_xml: qrz::QrzXmlClient::new(),
+            psk_sender,
             rig: None,
             input: None,
             input_device,
@@ -1462,6 +1485,25 @@ impl Engine {
     fn handle_decoded(&mut self, decoded: Vec<DecodedMessage>, slot_id: i64) {
         self.publish_decodes(&decoded);
         self.broadcast_decodes(&decoded);
+
+        // PSKReporter upload: enqueue this slot's decodes (gated on
+        // enablePskReporter inside `enqueue` itself), and keep the sender's
+        // rig-name snapshot in sync -- see `psk_sender`'s own doc comment
+        // for why this is the handoff point rather than every individual
+        // connect/disconnect call site.
+        self.psk_sender.set_rig_name(self.rig.as_ref().map(|r| r.name()));
+        let psk_enabled = self.db.get_config(pskreporter_sender::CONFIG_ENABLE).map(|v| v != "0").unwrap_or(true);
+        let slot_cycle_ms = self.mode.cycle_ms();
+        let slot_start_ms = self.now() - (self.now().rem_euclid(slot_cycle_ms));
+        self.psk_sender.enqueue(
+            &decoded,
+            psk_enabled,
+            &self.qso.my_call,
+            self.dial_hz,
+            self.mode,
+            slot_start_ms / 1000,
+            self.now(),
+        );
 
         if let Some(QsoOutcome::Completed(mut record)) = self.qso.process_rx(&decoded) {
             // The operator's current power setting at the moment the QSO

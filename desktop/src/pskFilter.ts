@@ -15,7 +15,14 @@
 import type { OperatingMode } from "./ipc";
 
 export type PskMode = "CURRENT" | "FT8" | "FT4" | "FT2";
-export type PskDirection = "WHO_HEARD_ME" | "WHO_I_HEARD";
+/** Android has no "BOTH" option (confirmed: `PskFilter.kt`'s own enum only
+ *  has the two single-direction values) -- a real desktop-only addition,
+ *  per the user's explicit ask. Showing both directions at once still
+ *  respects the backend's single shared 5-minute fetch cooldown (there's
+ *  no per-direction cooldown slot), so the fetch loop alternates which
+ *  direction it actually queries each poll tick rather than firing both
+ *  requests in the same tick -- see `App.tsx`'s PSK fetch effect. */
+export type PskDirection = "WHO_HEARD_ME" | "WHO_I_HEARD" | "BOTH";
 
 /** Seconds-back presets for the PSK filter sheet's time-window chips. */
 export const PSK_TIME_PRESETS = [900, 3600, 10800, 21600, 86400];

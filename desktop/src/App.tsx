@@ -1532,7 +1532,18 @@ function MapScreen({
     });
   }, []);
   const [pskFilter, setPskFilter] = useState<PskFilter>(() => initialPskFilter(dialHz, () => null));
-  const [pskSpots, setPskSpots] = useState<(PskReporterSpot & { lat: number; lon: number })[]>([]);
+  type PosSpot = PskReporterSpot & { lat: number; lon: number };
+  // Kept as two separate lists (rather than one) so "Both" can show the
+  // most recently fetched result from *each* direction at once -- see
+  // the fetch effect below for why they're never fetched in the same
+  // tick (the backend's fetch cooldown is shared, not per-direction).
+  const [pskSpotsHeardMe, setPskSpotsHeardMe] = useState<PosSpot[]>([]);
+  const [pskSpotsIHeard, setPskSpotsIHeard] = useState<PosSpot[]>([]);
+  const pskSpots = useMemo(() => {
+    if (pskFilter.direction === "WHO_HEARD_ME") return pskSpotsHeardMe;
+    if (pskFilter.direction === "WHO_I_HEARD") return pskSpotsIHeard;
+    return [...pskSpotsHeardMe, ...pskSpotsIHeard];
+  }, [pskFilter.direction, pskSpotsHeardMe, pskSpotsIHeard]);
   const [pskError, setPskError] = useState<string | null>(null);
   const [filterSheetOpen, setFilterSheetOpen] = useState(false);
   function togglePskOverlay() {
@@ -1544,18 +1555,28 @@ function MapScreen({
 
   useEffect(() => {
     if (!pskOverlayEnabled) {
-      setPskSpots([]);
+      setPskSpotsHeardMe([]);
+      setPskSpotsIHeard([]);
       setPskError(null);
       return;
     }
     let cancelled = false;
     let firstFetch = true;
+    // "Both" alternates which direction it actually fetches each tick --
+    // the backend's cooldown is one shared gate, not per-direction, so
+    // firing both requests in the same tick would starve whichever one
+    // loses the race every single time. Each direction individually
+    // still polls on its own normal cadence; "Both" just doubles the
+    // effective interval per direction.
+    let nextIsReceiver = pskFilter.direction === "WHO_I_HEARD";
     const modeStr = resolvePskModeString(pskFilter.mode, operatingMode);
-    const byReceiver = pskFilter.direction === "WHO_I_HEARD";
     async function loop() {
       while (!cancelled) {
         const call = myCall.trim().toUpperCase();
         if (call) {
+          const byReceiver =
+            pskFilter.direction === "BOTH" ? nextIsReceiver : pskFilter.direction === "WHO_I_HEARD";
+          if (pskFilter.direction === "BOTH") nextIsReceiver = !nextIsReceiver;
           const result = await api.pskReporterSpots(call, pskFilter.timeWindowSec, firstFetch, modeStr, byReceiver);
           firstFetch = false;
           if (cancelled) return;
@@ -1566,14 +1587,17 @@ function MapScreen({
                 return pos ? { ...s, lat: pos.lat, lon: pos.lon } : null;
               })
               .filter((s): s is PskReporterSpot & { lat: number; lon: number } => s !== null);
-            setPskSpots(applyPskBandFilter(withPos, pskFilter.band));
+            const filtered = applyPskBandFilter(withPos, pskFilter.band);
+            if (byReceiver) setPskSpotsIHeard(filtered);
+            else setPskSpotsHeardMe(filtered);
             setPskError(null);
           } else {
             // No flicker: keep whatever spots are already showing.
             setPskError(result.error);
           }
         } else {
-          setPskSpots([]);
+          setPskSpotsHeardMe([]);
+          setPskSpotsIHeard([]);
         }
         await new Promise((r) => setTimeout(r, PSK_POLL_INTERVAL_MS));
       }
@@ -2172,9 +2196,13 @@ function MapScreen({
   }, [hasAnimatedLines]);
 
   const opPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
+  // Always from the "heard me" list specifically, even in "Both" display
+  // mode -- "signal reach" means how far *my* signal reached, so mixing
+  // in "who I heard" spots would be wrong regardless of what's drawn on
+  // the map.
   const signalReach = useMemo(
-    () => summarizeSignalReach(pskSpots, opPos?.lat ?? null, opPos?.lon ?? null),
-    [pskSpots, opPos],
+    () => summarizeSignalReach(pskSpotsHeardMe, opPos?.lat ?? null, opPos?.lon ?? null),
+    [pskSpotsHeardMe, opPos],
   );
 
   // Tracker-on's CQ labels (rendered below), matching GridMarkerInfoWindow's
@@ -2297,7 +2325,7 @@ function MapScreen({
         )}
         {pskOverlayEnabled &&
           !filterSheetOpen &&
-          pskFilter.direction === "WHO_HEARD_ME" &&
+          pskFilter.direction !== "WHO_I_HEARD" &&
           signalReach && <SignalReachCard reach={signalReach} />}
         {cqLabels.map(({ marker, x, y }) => (
           <TrackerCqLabel
@@ -2374,6 +2402,7 @@ function PskFilterSheet({ filter, onChange }: { filter: PskFilter; onChange: (f:
   const directions: { id: PskDirection; label: string }[] = [
     { id: "WHO_HEARD_ME", label: "Heard me" },
     { id: "WHO_I_HEARD", label: "I heard" },
+    { id: "BOTH", label: "Both" },
   ];
   return (
     <div className="glass-card map-filter-sheet">
