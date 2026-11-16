@@ -438,9 +438,11 @@ impl PskReporterSender {
 
         let spots: Vec<SpotRecord> = self.inner.queue.lock().unwrap().drain(..).collect();
         if spots.is_empty() {
+            eprintln!("[ft8af] PSKReporter: flush tick, nothing queued to send");
             return;
         }
         if station.my_call.trim().is_empty() {
+            eprintln!("[ft8af] PSKReporter: {} spot(s) queued but no callsign configured, dropping", spots.len());
             return;
         }
 
@@ -459,6 +461,12 @@ impl PskReporterSender {
         for pkt in &packets {
             (self.inner.send_datagram)(pkt);
         }
+        eprintln!(
+            "[ft8af] PSKReporter: sent {} packet(s) with {} spot(s) as {}",
+            packets.len(),
+            spots.len(),
+            station.my_call,
+        );
         self.inner.packets_sent.fetch_add(packets.len(), Ordering::Relaxed);
         if include_templates {
             self.inner.last_template_sent_ms.store(now_ms, Ordering::Relaxed);
