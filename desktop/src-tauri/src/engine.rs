@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::adif_log_file;
 use crate::audio::{output, AudioInput, SlotAccumulator};
 use crate::bands;
 use crate::db::{Db, QsoRecord};
@@ -1503,6 +1504,13 @@ impl Engine {
             match self.db.insert_qso(&record) {
                 Ok(_) => {
                     self.broadcast_qso(&record);
+                    // Running ADIF log mirror (ft8af_log.adi in Downloads),
+                    // ported from Android's `AdifLogFile.java` -- gated on
+                    // `enableAdifExport`, defaulting to on (Android's own
+                    // default) since this is new desktop functionality with
+                    // no prior behavior to preserve. Swallows its own errors.
+                    let adif_log_enabled = self.db.get_config("enableAdifExport").map(|v| v != "0").unwrap_or(true);
+                    adif_log_file::log_qso(adif_log_enabled, &crate::db::adif_record(&record));
                     // Fork: auto-upload to QRZ's Logbook the moment this QSO is
                     // logged (gated on `enableQRZ`), matching
                     // `MainViewModel.java`'s post-insert background thread --

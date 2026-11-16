@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../ipc";
-import { SettingsRow } from "./SettingsPrimitives";
+import type { UdpConfig } from "../ipc";
+import { SettingsRow, SettingsSection } from "./SettingsPrimitives";
 
 /**
  * Logging & Awards, ported from Android's `LoggingSettings.kt`. Priority
@@ -35,7 +36,36 @@ import { SettingsRow } from "./SettingsPrimitives";
  * dialog below carries its own "Upload to QRZ now" instead of leaving the
  * feature with no manual trigger at all.
  *
- * Cloudlog stays a disclosed disabled stub pending its own build pass.
+ * Cloudlog and World Radio League stay disclosed disabled stubs (WRL
+ * per the user's own explicit call -- "I do not use WRL we can activate
+ * it later"). "Save SWL Decodes"/"Save SWL QSOs" (logging stations merely
+ * *heard*, no completed two-way QSO) stay disclosed disabled stubs too --
+ * needs a new SWL DB schema this project's own notes already defer to the
+ * later "QSO logic replacement" effort.
+ *
+ * PSKReporter's row gates *uploading your own decoded spots* via
+ * Android's IPFIX/UDP `PskReporterSender.kt` -- a different, unbuilt
+ * protocol, NOT the Map screen's already-working "who's hearing me"
+ * overlay that reuses this same `psk_reporter.rs` module to fetch
+ * (confirmed live). The uploader itself isn't built, but the toggle IS
+ * real and persists for real (per the user's explicit ask -- "there
+ * should be a toggle... and it is not there"), matching this project's
+ * established disclosed-but-real-preference pattern (e.g. Transmission's
+ * ALC Auto-Volume): nothing reads `enablePskReporter` yet, but the
+ * operator's choice is never silently discarded just because the backend
+ * isn't wired up.
+ *
+ * The "ADIF log file" row is real (`adif_log_file.rs`): every logged QSO
+ * is appended to a running `ft8af_log.adi` the moment it's logged, for a
+ * desktop logger (LOG4OM, N1MM, DXKeeper) to tail. Written straight to
+ * `~/Downloads/FT8AF/` -- simpler than Android's app-private-file-plus-
+ * MediaStore-mirror dance, which solves a scoped-storage problem desktop
+ * doesn't have.
+ *
+ * The "WSJT-X UDP" section is real and moved here from Radio & Audio to
+ * match Android's actual placement (confirmed: it's a `LoggingSettings.kt`
+ * section, not a Radio & Audio one) -- same `set_udp_config`/`udp_*`
+ * config keys as before, just relocated, not rebuilt.
  *
  * Android's "Awards" half of this category's name is desktop's separate
  * Logbook/Stats screen (already built in an earlier phase) -- nothing in
@@ -50,6 +80,10 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   const [qrzApiKeySet, setQrzApiKeySet] = useState(false);
   const [qrzXmlUser, setQrzXmlUser] = useState("");
   const [qrzXmlPassSet, setQrzXmlPassSet] = useState(false);
+  const [adifExportEnabled, setAdifExportEnabled] = useState(true);
+  const [pskReporterEnabled, setPskReporterEnabled] = useState(true);
+  const [udpOpen, setUdpOpen] = useState(false);
+  const [udp, setUdp] = useState<UdpConfig>({ enabled: false, host: "127.0.0.1", port: 2237, accept_requests: false });
 
   useEffect(() => {
     api.getConfig("lotwUsername").then((v) => setLotwUsername(v ?? ""));
@@ -68,17 +102,75 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
     api.setConfig("enableQRZ", next ? "1" : "0");
   }
 
+  useEffect(() => {
+    // Defaults to on, matching Android -- see adif_log_file.rs's doc
+    // comment on why this new-to-desktop feature uses Android's own
+    // default rather than this project's usual "preserve prior desktop
+    // behavior" rule (there is no prior behavior to preserve).
+    api.getConfig("enableAdifExport").then((v) => setAdifExportEnabled(v !== "0"));
+  }, []);
+  function saveAdifExportEnabled(next: boolean) {
+    setAdifExportEnabled(next);
+    api.setConfig("enableAdifExport", next ? "1" : "0");
+  }
+
+  useEffect(() => {
+    // Real, persisted preference (defaults to on, matching Android) even
+    // though nothing reads it yet -- the actual IPFIX/UDP sender is still
+    // deferred (see this file's top doc comment). Matches this project's
+    // established pattern for a disclosed-but-real config toggle (e.g.
+    // Transmission's ALC Auto-Volume): the operator's choice is never
+    // silently discarded just because the backend isn't wired up.
+    api.getConfig("enablePskReporter").then((v) => setPskReporterEnabled(v !== "0"));
+  }, []);
+  function savePskReporterEnabled(next: boolean) {
+    setPskReporterEnabled(next);
+    api.setConfig("enablePskReporter", next ? "1" : "0");
+  }
+
+  function refreshUdp() {
+    Promise.all([
+      api.getConfig("udp_enabled"),
+      api.getConfig("udp_host"),
+      api.getConfig("udp_port"),
+      api.getConfig("udp_accept_requests"),
+    ]).then(([en, host, port, accept]) => {
+      const p = parseInt(port ?? "", 10);
+      setUdp((prev) => ({
+        enabled: en === "true",
+        host: host && host.length > 0 ? host : prev.host,
+        port: Number.isFinite(p) && p > 0 && p <= 65535 ? p : prev.port,
+        accept_requests: accept === "true",
+      }));
+    });
+  }
+  useEffect(refreshUdp, [udpOpen]);
+  function applyUdp(next: UdpConfig) {
+    setUdp(next);
+    api.setUdpConfig(next);
+  }
+
   return (
     <>
       {lotwOpen && <LotwDialog callsign={callsign} onClose={() => setLotwOpen(false)} />}
       {qrzLogbookOpen && <QrzLogbookDialog onClose={() => setQrzLogbookOpen(false)} />}
       {qrzCredsOpen && <QrzCredsDialog onClose={() => setQrzCredsOpen(false)} />}
+      {udpOpen && <UdpServerDialog udp={udp} onSave={applyUdp} onClose={() => setUdpOpen(false)} />}
+      <SettingsSection title="Logging & Awards" />
       <div className="settings-category-list panel settings-category-card">
+        <SettingsRow label="Save SWL Decodes" description="Log all decoded messages to the database" disabled />
+        <SettingsRow label="Save SWL QSOs" description="Log QSOs detected between other stations" disabled />
         <SettingsRow
-          label="LoTW"
-          description="Download QSL confirmations and upload your log via TQSL"
-          value={lotwUsername || "Not configured"}
-          onClick={() => setLotwOpen(true)}
+          label="PSKReporter"
+          description="Upload decoded spots to pskreporter.info -- preference saved for real, but the uploader itself isn't built yet (separate from the Map screen's spot overlay, which already works)"
+          toggle={pskReporterEnabled}
+          onToggleChange={savePskReporterEnabled}
+        />
+        <SettingsRow
+          label="ADIF log file"
+          description="Append each logged QSO to ft8af_log.adi for backup and desktop-logger (LOG4OM) monitor import. A copy is kept in Downloads/FT8AF."
+          toggle={adifExportEnabled}
+          onToggleChange={saveAdifExportEnabled}
         />
         <SettingsRow
           label="QRZ.com"
@@ -95,8 +187,94 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
           onClick={() => setQrzCredsOpen(true)}
         />
         <SettingsRow label="Cloudlog" description="Upload QSOs to a Cloudlog/Wavelog/Nextlog server" disabled />
+        <SettingsRow
+          label="World Radio League"
+          description="Auto-upload QSOs to your World Radio League logbook (requires a Developer API key)"
+          disabled
+        />
+        <SettingsRow
+          label="LoTW"
+          description="Download QSL confirmations and upload your log via TQSL"
+          value={lotwUsername || "Not configured"}
+          onClick={() => setLotwOpen(true)}
+        />
+      </div>
+
+      <SettingsSection title="WSJT-X UDP" />
+      <div className="settings-category-list panel settings-category-card">
+        <SettingsRow
+          label="Enable UDP broadcast"
+          description="Broadcast decodes, status and logged QSOs to companion apps (GridTracker, JTAlert, N1MM, Log4OM)."
+          toggle={udp.enabled}
+          onToggleChange={(checked) => applyUdp({ ...udp, enabled: checked })}
+        />
+        <SettingsRow
+          label="Server address"
+          description="Destination host and port for outgoing datagrams."
+          value={`${udp.host}:${udp.port}`}
+          onClick={() => setUdpOpen(true)}
+        />
+        <SettingsRow
+          label="Accept UDP requests"
+          description="Let companion apps reply to a call, halt TX, or send free text."
+          toggle={udp.accept_requests}
+          onToggleChange={(checked) => applyUdp({ ...udp, accept_requests: checked })}
+        />
       </div>
     </>
+  );
+}
+
+/** Host/port dialog for the WSJT-X UDP server address, matching Android's
+ *  `WsjtxUdpDialog`: Save disabled unless the port parses into 1..65535. */
+function UdpServerDialog({
+  udp,
+  onSave,
+  onClose,
+}: {
+  udp: UdpConfig;
+  onSave: (next: UdpConfig) => void;
+  onClose: () => void;
+}) {
+  const [host, setHost] = useState(udp.host);
+  const [portText, setPortText] = useState(String(udp.port));
+  const port = parseInt(portText, 10);
+  const valid = host.trim().length > 0 && Number.isFinite(port) && port >= 1 && port <= 65535;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>WSJT-X UDP server</h3>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+        <div className="field">
+          <label>Host</label>
+          <input value={host} onChange={(e) => setHost(e.target.value)} autoComplete="off" />
+        </div>
+        <div className="field">
+          <label>Port</label>
+          <input
+            value={portText}
+            onChange={(e) => setPortText(e.target.value.replace(/\D/g, "").slice(0, 5))}
+            inputMode="numeric"
+          />
+        </div>
+        <div className="actions">
+          <button onClick={onClose}>Cancel</button>
+          <button
+            className="primary"
+            disabled={!valid}
+            onClick={() => {
+              onSave({ ...udp, host: host.trim(), port });
+              onClose();
+            }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

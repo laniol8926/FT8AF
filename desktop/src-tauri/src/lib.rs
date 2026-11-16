@@ -5,6 +5,7 @@
 //! later milestones.
 
 pub mod adif;
+pub mod adif_log_file;
 pub mod audio;
 pub mod bands;
 pub mod callsign;
