@@ -48,7 +48,12 @@ export function SettingsRow({
         <div className="settings-row-label">{label}</div>
         {description && <div className="settings-row-desc muted">{description}</div>}
       </div>
-      {onToggleChange ? (
+      {/* A row can carry both a toggle and a value+chevron at once (e.g.
+       *  Android's QRZ.com row: an inline enable switch alongside a
+       *  "Configured"/"Not configured" value and a chevron into the API
+       *  key dialog) -- these aren't mutually exclusive. */}
+      {value !== undefined && <div className="settings-row-value muted">{value}</div>}
+      {onToggleChange && (
         <label className="settings-toggle" onClick={(e) => e.stopPropagation()}>
           <input
             type="checkbox"
@@ -58,12 +63,8 @@ export function SettingsRow({
           />
           <span className="settings-toggle-track" />
         </label>
-      ) : (
-        <>
-          {value !== undefined && <div className="settings-row-value muted">{value}</div>}
-          {clickable && <div className="settings-row-chevron">&rsaquo;</div>}
-        </>
       )}
+      {clickable && <div className="settings-row-chevron">&rsaquo;</div>}
     </div>
   );
 }

@@ -553,6 +553,25 @@ export const api = {
    *  confirm before calling this, not fire it on a stray click. */
   lotwUploadPending: (callsign: string) =>
     invoke<LotwUploadResult>("lotw_upload_pending", { callsign }),
+
+  /** Settings -> Logging & Awards -> QRZ.com. Count of logged QSOs not yet
+   *  uploaded to QRZ's Logbook (`synced_qrz = 0`) -- every new QSO is also
+   *  auto-uploaded the moment it's logged when `enableQRZ` is on, so this
+   *  is normally 0 except for QSOs logged before QRZ was configured. */
+  qrzPendingUploadCount: () => invoke<number>("qrz_pending_upload_count"),
+  /** Uploads every not-yet-synced QSO to QRZ's Logbook, one API call per
+   *  QSO (QRZ has no batch endpoint). Never stops early on a failure --
+   *  see `qrz.rs`'s doc comment -- so `failed` can be nonzero alongside a
+   *  nonzero `uploaded`. */
+  qrzUploadPending: () => invoke<QrzUploadResult>("qrz_upload_pending"),
+  /** Read-only Logbook API key check (`ACTION=STATUS`); rejects with a
+   *  message on failure, resolves on success. */
+  qrzTestLogbookConnection: () => invoke<void>("qrz_test_logbook_connection"),
+  /** Verifies the QRZ XML subscription username/password with a fresh
+   *  auth call. Resolves to `"OK"` on success, else a short error message
+   *  (never rejects -- unlike the Logbook check, this mirrors Android's
+   *  own `testConnection()` returning a string either way). */
+  qrzTestXmlConnection: () => invoke<string>("qrz_test_xml_connection"),
 };
 
 export interface LotwDownloadResult {
@@ -563,6 +582,13 @@ export interface LotwDownloadResult {
 
 export interface LotwUploadResult {
   attempted: number;
+  error: string | null;
+}
+
+export interface QrzUploadResult {
+  uploaded: number;
+  duplicates: number;
+  failed: number;
   error: string | null;
 }
 

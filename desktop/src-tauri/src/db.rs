@@ -1084,6 +1084,25 @@ impl Db {
         changed
     }
 
+    /// QSOs not yet uploaded to QRZ.com's Logbook API (`synced_qrz = 0`),
+    /// oldest first -- same shape/ordering rationale as
+    /// [`Self::qsos_pending_lotw_upload`]. QRZ's API has no batch endpoint
+    /// (one `ACTION=INSERT` call per QSO), so unlike LoTW this list is
+    /// walked one row at a time, marking each synced individually via
+    /// [`Self::mark_synced`] as its own upload call succeeds.
+    pub fn qsos_pending_qrz_upload(&self) -> Vec<QsoRecord> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE synced_qrz = 0 ORDER BY id ASC",
+        )) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], row_to_qso)
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     pub fn count(&self) -> i64 {
         self.conn
             .lock()

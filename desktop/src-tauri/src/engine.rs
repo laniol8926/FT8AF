@@ -15,13 +15,17 @@ use crate::bands;
 use crate::db::{Db, QsoRecord};
 use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
+use crate::dxcc;
+use crate::logged_state;
 use crate::mode::Mode;
 use crate::qmx_cat_tones as cat_tones;
 use crate::qmx_meters;
+use crate::qrz;
 use crate::qso::{QsoEngine, QsoOutcome, QsoStatus};
 use crate::rig::{RigConfig, RigConnection};
 use crate::tx_protection;
 use crate::util;
+use crate::us_states;
 use crate::wf::{WfConfig, WfProcessor, WfWindow};
 
 // Cycle/TX-timing constants (15s/12.64s-audio FT8, 7.5s/5.04s-audio FT4) now
@@ -798,6 +802,12 @@ struct Engine {
     mode: Mode,
     txed_slot: i64,
     qso: QsoEngine,
+    /// QRZ.com XML station-lookup cache + Logbook API upload -- see
+    /// `qrz.rs`'s top doc comment for the three real features this backs
+    /// (prefetch-on-target, auto-upload-on-log, and the manual Settings
+    /// upload button, which reads `db` directly rather than going through
+    /// this field).
+    qrz_xml: qrz::QrzXmlClient,
     rig: Option<RigConnection>,
     input: Option<AudioInput>,
     input_device: Option<String>,
@@ -1139,6 +1149,7 @@ impl Engine {
             mode,
             txed_slot: -1,
             qso,
+            qrz_xml: qrz::QrzXmlClient::new(),
             rig: None,
             input: None,
             input_device,
@@ -1457,9 +1468,54 @@ impl Engine {
             // QSLTable.tx_pwr. `qso.rs` builds the record without DB/config
             // access (deliberately kept pure), so this is filled in here.
             record.tx_pwr = self.db.get_config("powerWatts").unwrap_or_default();
+            // Fork: fill COUNTRY (DXCC prefix lookup) and STATE (QRZ's
+            // registered state for the partner, gated by `logged_state`'s
+            // portable/grid-match rules) when the QSO itself didn't already
+            // carry one -- ported from Android's `DatabaseOpr.fillPlace`.
+            // See `logged_state.rs`'s doc comment for a real, disclosed gap
+            // (desktop has no POTA/SIG tracking on a QSO yet, so only the
+            // callsign-suffix half of "portable" is checked).
+            if record.country.is_empty() {
+                if let Some(m) = dxcc::lookup(&record.call) {
+                    if !m.country_name.is_empty() {
+                        record.country = m.country_name;
+                    }
+                }
+            }
+            if record.state.is_empty() {
+                let us_or_unknown = record.country.is_empty()
+                    || record.country.to_uppercase().starts_with("UNITED STATES");
+                if us_or_unknown {
+                    let grid_state = us_states::state_for_grid(&record.gridsquare);
+                    let qrz = self.qrz_xml.cached(&record.call);
+                    let portable = logged_state::is_portable_call(&record.call);
+                    if let Some(picked) = logged_state::pick_logged_state(
+                        grid_state.as_deref(),
+                        qrz.as_ref().map(|q| q.state.as_str()),
+                        qrz.as_ref().map(|q| q.grid.as_str()),
+                        Some(record.gridsquare.as_str()),
+                        portable,
+                    ) {
+                        record.state = picked;
+                    }
+                }
+            }
             match self.db.insert_qso(&record) {
                 Ok(_) => {
                     self.broadcast_qso(&record);
+                    // Fork: auto-upload to QRZ's Logbook the moment this QSO is
+                    // logged (gated on `enableQRZ`), matching
+                    // `MainViewModel.java`'s post-insert background thread --
+                    // spawned so a slow/blocked network call never stalls the
+                    // engine's own run loop.
+                    if self.db.get_config(qrz::CONFIG_ENABLE).as_deref() == Some("1") {
+                        let db = self.db.clone();
+                        let api_key = self.db.get_config(qrz::CONFIG_API_KEY).unwrap_or_default();
+                        let record_for_upload = record.clone();
+                        std::thread::spawn(move || {
+                            qrz::upload_one_logged(&db, &api_key, &record_for_upload);
+                        });
+                    }
                     self.emit(EngineEvent::QsoCompleted(record));
                 }
                 Err(e) => self.emit(EngineEvent::Error(format!("log QSO failed: {e}"))),
@@ -2447,6 +2503,10 @@ impl Engine {
                 // away if we're still inside the window — matching WSJT-X.
                 self.tx_parity = Some(self.cur_parity());
                 self.qso.answer(&msg);
+                // Fork: look the partner up on QRZ now, so its state is
+                // cached by the time the QSO is logged. Mirrors
+                // `FT8TransmitSignal.java`'s one real call site.
+                self.qrz_xml.prefetch(&self.db, &msg.call_from);
                 self.maybe_transmit(self.cur_slot());
                 self.publish_tx_state();
             }

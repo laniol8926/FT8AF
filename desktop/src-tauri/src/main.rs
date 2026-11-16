@@ -16,6 +16,7 @@ use ft8af::lotw::{self, LotwDownloadResult, LotwUploadResult};
 use ft8af::map_tiles::MapTiles;
 use ft8af::os_location::{self, OsLocation};
 use ft8af::psk_reporter::{PskFetchResult, PskReporterState};
+use ft8af::qrz::{self, QrzUploadResult};
 use ft8af::rig::{self, HamlibRig, RigConfig, SerialPortInfo};
 use ft8af::settings_backup::{self, ParsedBackup};
 use ft8af::wf::WfConfig;
@@ -846,6 +847,36 @@ fn lotw_upload_pending(state: State<AppState>, callsign: String) -> LotwUploadRe
     lotw::upload_pending(&state.db, &callsign, &app_data_dir())
 }
 
+// --- QRZ.com -----------------------------------------------------------
+
+#[tauri::command]
+fn qrz_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_qrz_upload().len() as i64
+}
+
+#[tauri::command]
+fn qrz_upload_pending(state: State<AppState>) -> QrzUploadResult {
+    let api_key = state.db.get_config(qrz::CONFIG_API_KEY).unwrap_or_default();
+    qrz::upload_pending(&state.db, &api_key)
+}
+
+/// Read-only Logbook API key check (`ACTION=STATUS`, inserts nothing).
+#[tauri::command]
+fn qrz_test_logbook_connection(state: State<AppState>) -> Result<(), String> {
+    let api_key = state.db.get_config(qrz::CONFIG_API_KEY).unwrap_or_default();
+    qrz::check_logbook_connection(&api_key)
+}
+
+/// Verifies the XML subscription credentials with a fresh auth call. Uses a
+/// throwaway client -- this is a one-off check, not worth sharing the
+/// engine's own prefetch cache/session for.
+#[tauri::command]
+fn qrz_test_xml_connection(state: State<AppState>) -> String {
+    let username = state.db.get_config(qrz::CONFIG_XML_USERNAME).unwrap_or_default();
+    let password = state.db.get_config(qrz::CONFIG_XML_PASSWORD).unwrap_or_default();
+    qrz::QrzXmlClient::new().test_connection(&username, &password)
+}
+
 #[tauri::command]
 fn set_waterfall_config(state: State<AppState>, config: WfConfig) {
     // The engine sanitizes, persists (wf_window/wf_fft_size/wf_avg/
@@ -1216,6 +1247,10 @@ fn main() {
             lotw_download_confirmations,
             lotw_pending_upload_count,
             lotw_upload_pending,
+            qrz_pending_upload_count,
+            qrz_upload_pending,
+            qrz_test_logbook_connection,
+            qrz_test_xml_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error running FT8AF");
