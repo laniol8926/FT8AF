@@ -4,6 +4,17 @@
 //! both roles: calling CQ (initiator) and answering a CQ (answerer). On QSO
 //! completion it emits a `QsoRecord` to log. No I/O lives here, so it's fully
 //! unit-testable; the scheduler turns its decisions into encode+PTT+DB+events.
+//!
+//! **Deliberately not ported**: Android's no-reply-counting also exempts a
+//! weak-signal slot (`!messages.get(0).isWeakSignal`) from counting against
+//! the TX Watchdog. `isWeakSignal` is set by Android's decoder based on
+//! which decode *pass* found the message (`isDeep`, its second/subtraction
+//! pass for marginal signals) -- an architectural concept desktop's
+//! single-pass-per-slot decoder has no equivalent of at all (confirmed: no
+//! per-message pass/confidence flag exists on `DecodedMessage`). Inventing
+//! a substitute threshold off `DecodedMessage.score` would be guessing at a
+//! cutoff Android never used this way, so this exemption is left out
+//! rather than faked -- flagged here for whoever next touches this file.
 
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +110,45 @@ pub struct QsoEngine {
     /// transmitted for the current target (set in `notify_transmitted`,
     /// reset on target change). Drives `max_73_sends`.
     final_ack_sends: u32,
+    /// The most recently *cleanly completed* QSO, remembered briefly so a
+    /// repeat from that station (they missed our final RR73/73) is
+    /// answered as a continuation of the same QSO rather than ignored or
+    /// logged a second time. Ported from Android's `lastLoggedCall`/
+    /// `stoppedAfterQso`/`answerRepeatAfterLog`. Only ever set by
+    /// `finish_qso` when `auto_return_to_cq` is off (Android's own
+    /// "TX switched itself off after a logged QSO" precondition) --
+    /// `give_up_target` (TX Watchdog / Max 73 Sends cap) never sets it, so
+    /// a station the operator's own limit gave up on is structurally never
+    /// eligible for a repeat answer, matching Android's "operator's limit
+    /// wins" `cappedCallsign` check without needing to port that flag
+    /// separately.
+    dormant: Option<DormantQso>,
+    /// Set while re-answering a `dormant` repeat, so the completion it
+    /// eventually reaches suppresses the `QsoOutcome` (no duplicate log
+    /// entry) instead of being gated by stage/content the way a normal
+    /// completion is.
+    answering_dormant_repeat: bool,
 }
+
+/// See `QsoEngine::dormant`'s doc comment.
+#[derive(Debug, Clone)]
+struct DormantQso {
+    call: String,
+    band: String,
+    /// The ORIGINAL QSO's start time -- a repeat answer keeps this
+    /// (Android's `keepsQsoStart`) rather than stamping a fresh one, so
+    /// TIME_ON never changes if the courtesy 73 just needed a second try.
+    started_ms: i64,
+    ended_ms: i64,
+    repeat_answers: u32,
+}
+
+/// How long after a clean completion a repeat from that same station still
+/// counts as the same QSO. Matches Android's `SAME_QSO_WINDOW_MS`.
+const SAME_QSO_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// Caps how many times a repeat is answered per completed QSO. Matches
+/// Android's `MAX_REPEAT_ANSWERS`.
+const MAX_REPEAT_ANSWERS: u32 = 2;
 
 impl QsoEngine {
     pub fn new(my_call: impl Into<String>, my_grid: impl Into<String>) -> Self {
@@ -123,6 +172,8 @@ impl QsoEngine {
             bye73_sent: false,
             no_reply_count: 0,
             final_ack_sends: 0,
+            dormant: None,
+            answering_dormant_repeat: false,
         }
     }
 
@@ -162,6 +213,7 @@ impl QsoEngine {
     /// Begin calling CQ.
     pub fn start_cq(&mut self) {
         self.reset_qso();
+        self.dormant = None; // a deliberate new CQ abandons any repeat-answer window
         self.active = true;
         self.stage = TxStage::Cq;
         self.tx_message = Some(format!("CQ {} {}", self.my_call, self.my_grid));
@@ -170,6 +222,7 @@ impl QsoEngine {
     /// Begin answering a specific decoded CQ (operator tapped a station).
     pub fn answer(&mut self, msg: &DecodedMessage) {
         self.reset_qso();
+        self.dormant = None; // a deliberate new target abandons any repeat-answer window
         self.active = true;
         self.target = Some(msg.call_from.to_uppercase());
         self.grid_rcvd = if msg.grid.is_empty() { None } else { Some(msg.grid.clone()) };
@@ -251,6 +304,7 @@ impl QsoEngine {
     /// otherwise goes idle, same as Android's own "move on" behavior rather
     /// than hanging on a station that stopped answering.
     fn give_up_target(&mut self) {
+        self.answering_dormant_repeat = false;
         self.reset_qso();
         if self.auto_return_to_cq {
             self.stage = TxStage::Cq;
@@ -266,6 +320,12 @@ impl QsoEngine {
     /// for the next TX slot and returns a completion outcome if a QSO finished.
     pub fn process_rx(&mut self, messages: &[DecodedMessage]) -> Option<QsoOutcome> {
         if !self.active || self.stage == TxStage::Idle {
+            // Dormant repeat-answer window (see `dormant`'s doc comment):
+            // TX is off after a clean completion, but a repeat from that
+            // same station within the window still gets answered.
+            if !self.active && self.dormant.is_some() {
+                self.try_answer_dormant_repeat(messages);
+            }
             return None;
         }
 
@@ -296,37 +356,11 @@ impl QsoEngine {
         });
 
         let msg = match mine {
-            Some(m) => {
-                // Evidence heard from the target -- reset the TX Watchdog's
-                // silence counter (matches Android's own noReplyCount, which
-                // resets on every decode from the target, not just on a
-                // target change).
-                self.no_reply_count = 0;
-                m.clone()
-            }
+            Some(m) => m.clone(),
             None => {
-                // No reply this slot -- advance the give-up counters that
-                // apply to the current stage (see no_reply_limit/
-                // max_73_sends' doc comments). Cq is exempt: there's no
-                // specific target to give up on yet.
-                match self.stage {
-                    TxStage::Grid | TxStage::Report | TxStage::RReport => {
-                        self.no_reply_count = self.no_reply_count.saturating_add(1);
-                        if should_give_up_target(self.no_reply_limit, self.no_reply_count) {
-                            self.give_up_target();
-                        }
-                    }
-                    TxStage::Rr73 => {
-                        let unlimited_failsafe =
-                            self.max_73_sends == 0 && self.final_ack_sends >= RR73_GIVEUP_CYCLES_FAILSAFE;
-                        if has_reached_max_73_sends(self.max_73_sends, self.final_ack_sends)
-                            || unlimited_failsafe
-                        {
-                            self.give_up_target();
-                        }
-                    }
-                    TxStage::Cq | TxStage::Bye73 | TxStage::Idle => {}
-                }
+                // No reply at all this slot -- same as a non-advancing
+                // reply, see `advanced` below.
+                self.on_no_progress();
                 return None; // scheduler retransmits (or we just gave up above)
             }
         };
@@ -337,6 +371,30 @@ impl QsoEngine {
         }
         let dx = self.target.clone().unwrap();
         let content = classify(&msg);
+
+        // Whether this cycle's content actually ADVANCES the stage, vs. a
+        // stale/non-matching reply (the partner repeating what he already
+        // sent because he isn't copying us -- Android's `isPartnerRepeat`).
+        // Only a real advance resets the TX Watchdog's silence counter;
+        // Android's own `noReplyCount` resets on *progress*, not on mere
+        // presence of a message from the target -- a repeat counts as a
+        // failed attempt, same as silence, for every stage that has a
+        // give-up concept (everything except Cq, which has no specific
+        // target yet to give up on).
+        let advanced = matches!(
+            (self.stage, &content),
+            (TxStage::Cq, Content::Grid(_) | Content::Report(_))
+                | (TxStage::Grid, Content::Report(_) | Content::RReport(_))
+                | (TxStage::Report, Content::RReport(_) | Content::Rr73 | Content::Rrr | Content::Bye73)
+                | (TxStage::RReport, Content::Rr73 | Content::Rrr | Content::Bye73)
+                | (TxStage::Rr73, Content::Bye73 | Content::Rr73 | Content::Rrr)
+        );
+        if advanced {
+            self.no_reply_count = 0;
+        } else {
+            self.on_no_progress();
+            return None;
+        }
 
         match self.stage {
             TxStage::Cq => match content {
@@ -397,6 +455,88 @@ impl QsoEngine {
         None
     }
 
+    /// Shared by total silence and a non-advancing reply (see `advanced`
+    /// in `process_rx`): advances whichever give-up counter applies to
+    /// the current stage. Checked every time progress didn't happen, not
+    /// just on total silence -- Android's `hasReachedMax73Sends` runs
+    /// every cycle for exactly this reason: a partner who keeps replying
+    /// with something that never confirms (e.g. re-sending his own
+    /// report) would otherwise never trip the cap, since presence of
+    /// *any* message used to keep resetting the counter.
+    fn on_no_progress(&mut self) {
+        match self.stage {
+            TxStage::Grid | TxStage::Report | TxStage::RReport => {
+                self.no_reply_count = self.no_reply_count.saturating_add(1);
+                if should_give_up_target(self.no_reply_limit, self.no_reply_count) {
+                    self.give_up_target();
+                }
+            }
+            TxStage::Rr73 => {
+                let unlimited_failsafe =
+                    self.max_73_sends == 0 && self.final_ack_sends >= RR73_GIVEUP_CYCLES_FAILSAFE;
+                if has_reached_max_73_sends(self.max_73_sends, self.final_ack_sends) || unlimited_failsafe {
+                    self.give_up_target();
+                }
+            }
+            TxStage::Cq | TxStage::Bye73 | TxStage::Idle => {}
+        }
+    }
+
+    /// Android's `answerRepeatAfterLog`: TX is dormant after cleanly
+    /// completing a QSO with `auto_return_to_cq` off, and the SAME
+    /// station (same band, within `SAME_QSO_WINDOW_MS`) repeats their
+    /// R-report or RR73 -- they missed our final RR73/73. Re-arm and
+    /// answer the next stage as if the QSO were still open, reusing the
+    /// ORIGINAL start time (`keepsQsoStart`, never a fresh one) and
+    /// without logging a second `QsoRecord`. Capped at
+    /// `MAX_REPEAT_ANSWERS`. Returns whether a repeat answer was armed.
+    fn try_answer_dormant_repeat(&mut self, messages: &[DecodedMessage]) -> bool {
+        let Some(dormant) = self.dormant.clone() else { return false };
+        if dormant.repeat_answers >= MAX_REPEAT_ANSWERS {
+            return false;
+        }
+        if util::now_unix_ms() - dormant.ended_ms >= SAME_QSO_WINDOW_MS {
+            self.dormant = None;
+            return false;
+        }
+        if self.band != dormant.band {
+            return false;
+        }
+
+        let found = messages
+            .iter()
+            .find(|m| crate::callsign::is_my_callsign(&m.call_to, &self.my_call) && m.call_from.eq_ignore_ascii_case(&dormant.call));
+        let Some(m) = found else { return false };
+        let content = classify(m);
+        if !matches!(content, Content::RReport(_) | Content::Rr73 | Content::Rrr | Content::Bye73) {
+            return false;
+        }
+
+        self.target = Some(dormant.call.clone());
+        self.started_ms = dormant.started_ms; // keepsQsoStart
+        self.active = true;
+        self.answering_dormant_repeat = true;
+        self.no_reply_count = 0;
+        if let Some(d) = self.dormant.as_mut() {
+            d.repeat_answers += 1;
+        }
+        let dx = dormant.call.clone();
+        match content {
+            Content::RReport(n) => {
+                self.report_rcvd = Some(n);
+                self.send_rr73(&dx);
+            }
+            Content::Rr73 | Content::Rrr | Content::Bye73 => {
+                self.tx_message = Some(format!("{} {} 73", dx, self.my_call));
+                self.stage = TxStage::Bye73;
+                self.bye73_sent = false;
+                self.complete(&dx);
+            }
+            _ => unreachable!("guarded above"),
+        }
+        true
+    }
+
     fn send_report(&mut self, dx: &str) {
         let r = self.report_sent.unwrap_or(0);
         self.tx_message = Some(format!("{} {} {}", dx, self.my_call, fmt_report(r)));
@@ -441,11 +581,39 @@ impl QsoEngine {
         if self.stage != TxStage::Bye73 {
             self.finish_qso();
         }
-        Some(QsoOutcome::Completed(record))
+        // A dormant-repeat completion (see `try_answer_dormant_repeat`) is
+        // the SAME QSO as the one already logged -- never return a second
+        // loggable outcome for it, matching Android's "updateQSlRecordList
+        // skips a just-logged station."
+        if self.answering_dormant_repeat {
+            None
+        } else {
+            Some(QsoOutcome::Completed(record))
+        }
     }
 
     /// Return to calling CQ, or stop, per `auto_return_to_cq`.
     fn finish_qso(&mut self) {
+        // Remember this station/band/start-time briefly (see `dormant`'s
+        // doc comment) so a repeat within the window still gets answered,
+        // without logging again -- only when auto_return_to_cq is off,
+        // matching Android's own "TX switched itself off after a logged
+        // QSO" precondition for this mechanism. Refreshes (not resets)
+        // repeat_answers so a chain of repeats still respects the overall
+        // MAX_REPEAT_ANSWERS cap across the whole window, not per-attempt.
+        if !self.auto_return_to_cq {
+            if let Some(target) = self.target.clone() {
+                let repeat_answers = self.dormant.as_ref().map(|d| d.repeat_answers).unwrap_or(0);
+                self.dormant = Some(DormantQso {
+                    call: target,
+                    band: self.band.clone(),
+                    started_ms: self.started_ms,
+                    ended_ms: util::now_unix_ms(),
+                    repeat_answers,
+                });
+            }
+        }
+        self.answering_dormant_repeat = false;
         if self.auto_return_to_cq {
             self.reset_qso();
             self.stage = TxStage::Cq;
@@ -840,5 +1008,137 @@ mod tests {
             e.process_rx(&[]);
         }
         assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn max_73_sends_caps_even_when_the_partner_keeps_replying_without_confirming() {
+        // Real bug fix: the cap used to be checked only on total silence.
+        // A partner who keeps replying every cycle with something that
+        // never confirms (e.g. re-sending his own report) must still
+        // trip the cap, not hold the frequency forever.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.max_73_sends = 2;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "R-12", "", -8)]); // -> Rr73
+        assert_eq!(e.status().stage, TxStage::Rr73);
+        e.notify_transmitted(); // 1st RR73 send
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "R-12", "", -8)]); // still not confirming
+        assert_eq!(e.status().stage, TxStage::Rr73); // not capped yet (1 < 2)
+        e.notify_transmitted(); // 2nd RR73 send
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "R-12", "", -8)]); // still not confirming
+        assert_eq!(e.status().stage, TxStage::Cq); // now capped -> give up
+    }
+
+    #[test]
+    fn a_partner_repeat_counts_toward_the_watchdog_same_as_silence() {
+        // Real bug fix: previously ANY message from the target reset the
+        // no-reply counter, even a stale repeat that doesn't advance the
+        // stage. A partner re-sending the same thing he already sent
+        // (not copying us) must count as a failed attempt, same as
+        // silence would.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 2;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+        // He keeps re-sending his grid (what he already sent before we
+        // even answered) instead of a report -- never advances Grid.
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "", "FN42", -8)]);
+        assert_eq!(e.status().stage, TxStage::Grid); // 1 non-advancing reply
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "", "FN42", -8)]);
+        // 2nd non-advancing reply hits the limit -> give up, same as silence would.
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn dormant_repeat_answers_without_logging_a_duplicate_qso() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.auto_return_to_cq = false; // Android's precondition: TX off after a logged QSO
+        e.band = "20m".to_string();
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]); // -> RReport, R-08 sent
+        let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]); // logs, queues 73
+        assert!(matches!(out, Some(QsoOutcome::Completed(_))));
+        e.notify_transmitted();
+        assert!(e.process_rx(&[]).is_none()); // 73 sent -> TX stops (auto_return_to_cq=false)
+        assert!(!e.status().active);
+        assert_eq!(e.status().stage, TxStage::Idle);
+
+        // K1ABC missed our 73 and repeats RR73 within the window.
+        let out2 = e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]);
+        assert!(out2.is_none(), "a repeat must never produce a second loggable outcome");
+        assert!(e.status().active);
+        assert_eq!(e.status().target.as_deref(), Some("K1ABC"));
+        assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
+        assert_eq!(e.status().stage, TxStage::Bye73);
+
+        // Transmitting the repeat 73 completes (still not logged) and
+        // returns to the dormant/idle state.
+        e.notify_transmitted();
+        assert!(e.process_rx(&[]).is_none());
+        assert!(!e.status().active);
+    }
+
+    #[test]
+    fn dormant_repeat_is_capped_at_max_repeat_answers() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.auto_return_to_cq = false;
+        e.band = "20m".to_string();
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]);
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]);
+        e.notify_transmitted();
+        e.process_rx(&[]); // stopped, dormant set, repeat_answers=0
+
+        for _ in 0..MAX_REPEAT_ANSWERS {
+            assert!(e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]).is_none());
+            assert!(e.status().active, "repeat answer must be armed under the cap");
+            e.notify_transmitted();
+            e.process_rx(&[]); // completes again, stops again
+            assert!(!e.status().active);
+        }
+
+        // Cap reached -- the next repeat must NOT be re-armed.
+        assert!(e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]).is_none());
+        assert!(!e.status().active, "must stay idle once the repeat-answer cap is reached");
+    }
+
+    #[test]
+    fn a_watchdog_give_up_never_creates_a_repeat_answer_window() {
+        // Android's cappedCallsign intent ("the operator's limit wins"),
+        // achieved structurally here: give_up_target never sets `dormant`,
+        // so a station abandoned via the TX Watchdog is never eligible
+        // for a repeat answer.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.auto_return_to_cq = false;
+        e.no_reply_limit = 1;
+        e.band = "20m".to_string();
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[]); // silent -> gives up (no_reply_limit=1), goes idle
+        assert!(!e.status().active);
+
+        // K1ABC shows up later with an RR73-shaped message -- must NOT be
+        // treated as a repeat-answer window, since we gave up, never completed.
+        assert!(e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]).is_none());
+        assert!(!e.status().active, "a watchdog give-up must never be repeat-answered");
+    }
+
+    #[test]
+    fn starting_a_new_cq_abandons_a_pending_repeat_answer_window() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.auto_return_to_cq = false;
+        e.band = "20m".to_string();
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]);
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]);
+        e.notify_transmitted();
+        e.process_rx(&[]); // stopped, dormant set for K1ABC
+
+        e.start_cq(); // operator deliberately starts a fresh CQ -- clears dormant
+        e.stop(); // and immediately stops again, back to idle with no live QSO
+
+        // K1ABC's repeat must NOT be answered now -- the window from the
+        // original QSO was abandoned the moment a new CQ was started.
+        assert!(e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]).is_none());
+        assert!(!e.status().active);
     }
 }
