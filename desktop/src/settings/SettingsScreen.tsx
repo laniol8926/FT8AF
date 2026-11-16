@@ -11,10 +11,11 @@ import { TimeSyncSettings } from "./TimeSyncSettings";
 import { DecodeFilterSettings } from "./DecodeFilterSettings";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { TransmissionSettings } from "./TransmissionSettings";
+import { LoggingSettings } from "./LoggingSettings";
 import type { HighlightConfig } from "../qsoStatus";
 import type { WorkedMode, WorkedScope } from "../decodeFilters";
 
-type Category = "radio" | "about" | "timesync" | "decodefilters" | "advanced" | "transmission";
+type Category = "radio" | "about" | "timesync" | "decodefilters" | "advanced" | "transmission" | "logging";
 
 /**
  * Settings landing page, matching the real Android fork's own
@@ -255,6 +256,14 @@ export function SettingsScreen(props: {
     );
   }
 
+  if (category === "logging") {
+    return (
+      <SettingsDetailScaffold title="Logging & Awards" onBack={() => setCategory(null)}>
+        <LoggingSettings callsign={call} />
+      </SettingsDetailScaffold>
+    );
+  }
+
   if (category === "transmission") {
     return (
       <SettingsDetailScaffold title="Transmission" onBack={() => setCategory(null)}>
@@ -323,7 +332,7 @@ export function SettingsScreen(props: {
         <SettingsRow label="Time Sync" description="Manual clock correction for offline operating" onClick={() => setCategory("timesync")} />
         <SettingsRow label="Decode & Filters" onClick={() => setCategory("decodefilters")} />
         <SettingsRow label="Voice Assistant" description="Spoken announcements and hands-free voice commands" disabled />
-        <SettingsRow label="Logging & Awards" disabled />
+        <SettingsRow label="Logging & Awards" description="LoTW, QRZ, Cloudlog" onClick={() => setCategory("logging")} />
         <SettingsRow label="Advanced" description="Backup & restore settings, decode tuning" onClick={() => setCategory("advanced")} />
         <SettingsRow label="About" onClick={() => setCategory("about")} />
       </div>

@@ -12,6 +12,7 @@ use ft8af::bands::{self, BandEntry, CustomBand};
 use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, LogStats, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
 use ft8af::fcc_grid::{self, FccSeedSummary};
+use ft8af::lotw::{self, LotwDownloadResult, LotwUploadResult};
 use ft8af::map_tiles::MapTiles;
 use ft8af::os_location::{self, OsLocation};
 use ft8af::psk_reporter::{PskFetchResult, PskReporterState};
@@ -823,6 +824,28 @@ fn get_os_location(state: State<AppState>) -> Result<OsLocation, String> {
     os_location::resolve()
 }
 
+// --- LoTW (ARRL Logbook of the World) ---------------------------------------
+
+#[tauri::command]
+fn lotw_download_confirmations(state: State<AppState>, full_refresh: bool) -> LotwDownloadResult {
+    let username = state.db.get_config(lotw::CONFIG_USERNAME).unwrap_or_default();
+    let password = state.db.get_config(lotw::CONFIG_PASSWORD).unwrap_or_default();
+    lotw::download_confirmations(&state.db, &username, &password, full_refresh)
+}
+
+#[tauri::command]
+fn lotw_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_lotw_upload().len() as i64
+}
+
+/// `callsign`: the station callsign to sign with -- the caller passes the
+/// live Station-settings callsign, not a separate config key (TQSL's own
+/// cert/location selection already keys off `-c <callsign>`).
+#[tauri::command]
+fn lotw_upload_pending(state: State<AppState>, callsign: String) -> LotwUploadResult {
+    lotw::upload_pending(&state.db, &callsign, &app_data_dir())
+}
+
 #[tauri::command]
 fn set_waterfall_config(state: State<AppState>, config: WfConfig) {
     // The engine sanitizes, persists (wf_window/wf_fft_size/wf_avg/
@@ -1190,6 +1213,9 @@ fn main() {
             get_custom_css,
             set_udp_config,
             get_os_location,
+            lotw_download_confirmations,
+            lotw_pending_upload_count,
+            lotw_upload_pending,
         ])
         .run(tauri::generate_context!())
         .expect("error running FT8AF");

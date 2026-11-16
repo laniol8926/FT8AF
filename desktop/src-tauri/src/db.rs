@@ -1014,6 +1014,76 @@ impl Db {
             .unwrap_or(false)
     }
 
+    /// QSOs not yet uploaded to LoTW (`lotw_sent = 0`), oldest first -- the
+    /// batch a `tqsl` upload run should sign. Oldest-first (not `id DESC`
+    /// like [`Self::list_qsos`]) so a partial/aborted run still covers the
+    /// longest-pending QSOs first.
+    pub fn qsos_pending_lotw_upload(&self) -> Vec<QsoRecord> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE lotw_sent = 0 ORDER BY id ASC",
+        )) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], row_to_qso)
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// Marks exactly the given ids as uploaded to LoTW. Called only after a
+    /// `tqsl` run exits successfully, with the same ids that were actually
+    /// written into that run's ADIF file -- never re-matched by content, so
+    /// a QSO deleted in the window between export and a delayed `tqsl` run
+    /// just makes this a harmless no-op for that id, not a mismatch.
+    pub fn mark_lotw_sent(&self, ids: &[i64]) -> anyhow::Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        self.conn.lock().execute(
+            &format!("UPDATE qso_log SET lotw_sent = 1 WHERE id IN ({placeholders})"),
+            rusqlite::params_from_iter(ids.iter()),
+        )?;
+        Ok(())
+    }
+
+    /// Applies LoTW confirmations to matching local QSOs, UPDATE-only --
+    /// never inserts a new row for a confirmation with no local match,
+    /// matching Android's own `applyConfirmations` exactly. Deliberately
+    /// NOT reusing this file's ADIF-import twin-matching
+    /// ([`Self::find_lotw_twin_locked`]): the real `lotwreport.adi`
+    /// response has no `TIME_OFF` field at all, which
+    /// [`is_lotw_style_record`] requires, so routing it through that
+    /// pipeline would either insert bogus rows or simply never match.
+    /// Returns the number of QSOs newly marked confirmed.
+    pub fn apply_lotw_confirmations(&self, qsls: &[crate::lotw::LotwQsl]) -> usize {
+        let conn = self.conn.lock();
+        let mut changed = 0usize;
+        for q in qsls {
+            if q.qso_date.is_empty() || q.time_on.len() < 4 {
+                continue;
+            }
+            let n = conn
+                .execute(
+                    "UPDATE qso_log SET lotw_rcvd = 1 \
+                     WHERE lotw_rcvd = 0 AND UPPER(call) = ?1 AND qso_date = ?2 AND LOWER(band) = ?3 \
+                       AND (UPPER(mode) = ?4 OR UPPER(mode) = ?5) AND substr(time_on, 1, 4) = ?6",
+                    params![
+                        q.call.to_uppercase(),
+                        q.qso_date,
+                        q.band.to_lowercase(),
+                        q.mode.to_uppercase(),
+                        q.raw_mode.to_uppercase(),
+                        &q.time_on[..4],
+                    ],
+                )
+                .unwrap_or(0);
+            changed += n;
+        }
+        changed
+    }
+
     pub fn count(&self) -> i64 {
         self.conn
             .lock()
@@ -3960,5 +4030,78 @@ mod tests {
 
         let merged = bands::merged_bands(&reloaded);
         assert!(merged.iter().any(|b| b.dial_hz == 14_090_000 && b.custom));
+    }
+
+    #[test]
+    fn qsos_pending_lotw_upload_excludes_already_sent_rows_oldest_first() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "120000".into(),
+            lotw_sent: true, ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), qso_date: "20260102".into(), time_on: "120000".into(),
+            ..Default::default()
+        }).unwrap();
+        let pending = db.qsos_pending_lotw_upload();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].call, "W1AW");
+    }
+
+    #[test]
+    fn mark_lotw_sent_only_touches_the_given_ids() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "120000".into(),
+            ..Default::default()
+        }).unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "W1AW".into(), qso_date: "20260102".into(), time_on: "120000".into(),
+            ..Default::default()
+        }).unwrap();
+        let ids: Vec<i64> = db.list_qsos(10, 0).iter().filter_map(|q| q.id).collect();
+        let first_id = *ids.iter().min().unwrap();
+        db.mark_lotw_sent(&[first_id]).unwrap();
+        let pending = db.qsos_pending_lotw_upload();
+        assert_eq!(pending.len(), 1);
+        assert_ne!(pending[0].id, Some(first_id));
+    }
+
+    #[test]
+    fn apply_lotw_confirmations_updates_only_an_exact_match_and_never_inserts() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "120000".into(),
+            band: "40m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        let qsls = vec![
+            crate::lotw::LotwQsl {
+                call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "1200".into(),
+                band: "40m".into(), mode: "FT8".into(), raw_mode: "FT8".into(),
+            },
+            // No local match -- must be silently dropped, not inserted.
+            crate::lotw::LotwQsl {
+                call: "N0CALL".into(), qso_date: "20260101".into(), time_on: "1200".into(),
+                band: "40m".into(), mode: "FT8".into(), raw_mode: "FT8".into(),
+            },
+        ];
+        let changed = db.apply_lotw_confirmations(&qsls);
+        assert_eq!(changed, 1);
+        assert_eq!(db.count(), 1);
+        assert!(db.list_qsos(10, 0)[0].lotw_rcvd);
+    }
+
+    #[test]
+    fn apply_lotw_confirmations_matches_ft4_via_either_mode_or_raw_mode() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "120000".into(),
+            band: "40m".into(), mode: "FT4".into(), ..Default::default()
+        }).unwrap();
+        let qsls = vec![crate::lotw::LotwQsl {
+            call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "1200".into(),
+            band: "40m".into(), mode: "FT4".into(), raw_mode: "MFSK".into(),
+        }];
+        assert_eq!(db.apply_lotw_confirmations(&qsls), 1);
     }
 }

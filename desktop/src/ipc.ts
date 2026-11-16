@@ -537,7 +537,34 @@ export const api = {
   /** Apply + persist WSJT-X UDP settings (Rust side persists the udp_* keys and
    * rebinds the socket/listener live). */
   setUdpConfig: (config: UdpConfig) => invoke("set_udp_config", { config }),
+
+  /** Settings -> Logging & Awards -> LoTW. Downloads confirmations from
+   *  lotw.arrl.org and marks matching logged QSOs `lotw_rcvd`. Credentials
+   *  are read from the `lotwUsername`/`lotwPassword` config keys server-side
+   *  (same `get_config`/`set_config` round-trip as every other credential on
+   *  this screen) -- this call takes no secrets over IPC itself. */
+  lotwDownloadConfirmations: (fullRefresh: boolean) =>
+    invoke<LotwDownloadResult>("lotw_download_confirmations", { fullRefresh }),
+  /** Count of logged QSOs not yet uploaded to LoTW (`lotw_sent = 0`). */
+  lotwPendingUploadCount: () => invoke<number>("lotw_pending_upload_count"),
+  /** Shells out to the locally installed `tqsl` to sign + upload every
+   *  not-yet-uploaded QSO. A real, one-way action against ARRL's system
+   *  using the operator's own certificate -- the Settings dialog should
+   *  confirm before calling this, not fire it on a stray click. */
+  lotwUploadPending: (callsign: string) =>
+    invoke<LotwUploadResult>("lotw_upload_pending", { callsign }),
 };
+
+export interface LotwDownloadResult {
+  in_report: number;
+  newly_confirmed: number;
+  error: string | null;
+}
+
+export interface LotwUploadResult {
+  attempted: number;
+  error: string | null;
+}
 
 /** WSJT-X UDP settings. Field names match the Rust `UdpConfig` (snake_case). */
 export type UdpConfig = {
