@@ -70,6 +70,7 @@ Quadra):
 | **Stop After** counts a partner re-sending the message we answer (he didn't copy us), so "3" means three tries; only real progress resets it | `FT8TransmitSignal.isPartnerRepeat` |
 | Giving up at the Stop After limit follows Auto-CQ too: with nobody queued or watched to work, TX goes off instead of calling CQ; it never re-picks the station it gave up on | `giveUpTarget` |
 | **TX watchdog** refreshes when the QSO progresses or a station is tapped (it switched TX off mid-QSO); 1–4 minute options added; a timeout is logged | `doOnSecTimer`, `TransmissionSettings` |
+| **CQ Watchdog** (Settings → Transmission, 2026-11-16): TX goes off after N CQ cycles in a row with no caller; Unlimited (default) changes nothing. Weak-signal cycles and the cycle after Pause don't count; the count starts over when a caller is picked up, a new CQ run starts, or TX goes off. A cycle with no decodes at all isn't counted (TX watchdog covers a dead band by time). Ported from the Quadra session's desktop work; config key `cqNoReplyLimit` | `FT8TransmitSignal.shouldGiveUpCq`, `setTransmit`; upstream PR #1008 (open) |
 | **Auto-CQ after QSO decides what follows a logged QSO**, however it started: off → TX off (WSJT-X "Disable Tx after sending 73"), on → CQ. The QSO panel ✕ follows the same rule | `shouldStopAfterQso`, `userCancelQso` |
 | After TX stopped itself, a repeat from the station just logged (his R+report or RR73) is answered (RR73 / 73, at most twice) without logging the QSO again; a station ended by Max 73 Sends is left alone | `answerRepeatAfterLog`, `isSameQsoAsLogged` |
 | A late (deep-pass) reply swaps the over on the air within the late-start tolerance, not only inside the audio slack | `shouldRestartForNewOrder(..., lateStartToleranceMs)` |
@@ -295,6 +296,12 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   received) never overwrites a stored report. A LoTW-only QSO with no full
   record (e.g. UT5MB 2024-06-07) stays a QSO of its own. The logbook shows
   the "no report" values −120 / −100 blank. (`checkIsQSL`, `matchLotwTwin`)
+  Since 2026-11-16 the mode match also accepts a generic family on either
+  side (MFSK, MFSK8, PSK, DATA vs FT8, FT4, PSK31): CQRLOG exports FT8 as
+  MFSK without SUBMODE, which left LoTW-style copies unmerged (desktop re-import
+  of the AI5II log: 1,986 → 1,815 unmerged). Two different specific modes
+  (SSB vs FT8) still don't merge, since the time window is already ±15 min.
+  Not sent upstream: `matchLotwTwin` itself is fork-only.
 - **Import commits in batches** of 200 QSOs (yielding the database to the UI
   when it waits), instead of one flash write per statement: minutes became
   much faster on the phones. The file is streamed one record at a time.
