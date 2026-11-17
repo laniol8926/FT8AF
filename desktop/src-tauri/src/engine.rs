@@ -1577,6 +1577,24 @@ impl Engine {
             // QSLTable.tx_pwr. `qso.rs` builds the record without DB/config
             // access (deliberately kept pure), so this is filled in here.
             record.tx_pwr = self.db.get_config("powerWatts").unwrap_or_default();
+            // Auto comment, ported from Android's `QSLRecord` constructor
+            // exactly: "Distance: <N> <mi|km>, QSO by FT8AF" when both grids
+            // are known, else just "QSO by FT8AF". Real bug, found live:
+            // qso.rs's `complete()` always left this blank (`comment:
+            // String::new()`) -- filled in here instead of there for the
+            // same "qso.rs stays pure, no DB/config access" reason tx_pwr
+            // above is filled in here, not in qso.rs. `distanceInMiles`
+            // (Settings -> Decode & Filters, default on) is read fresh each
+            // time rather than cached, matching every other per-QSO config
+            // read in this block.
+            let miles = self.db.get_config("distanceInMiles").as_deref() != Some("0");
+            record.comment = match util::maidenhead_distance_km(&record.my_gridsquare, &record.gridsquare) {
+                Some(km) => {
+                    let dist = if miles { km * 0.621371 } else { km };
+                    format!("Distance: {:.0} {}, QSO by FT8AF", dist, if miles { "mi" } else { "km" })
+                }
+                None => "QSO by FT8AF".to_string(),
+            };
             // Fork: fill COUNTRY (DXCC prefix lookup) and STATE (QRZ's
             // registered state for the partner, gated by `logged_state`'s
             // portable/grid-match rules) when the QSO itself didn't already
@@ -3795,6 +3813,84 @@ mod tests {
 
         assert!(!engine.qso.active, "must end the instant the 73 finishes transmitting");
         assert_eq!(engine.qso.status().stage, TxStage::Idle);
+    }
+
+    #[test]
+    fn qso_comment_includes_distance_when_both_grids_are_known() {
+        // Real bug, found live: "check logic in android to see what
+        // populates the comments when the qso is logged because field is
+        // empty in the qso i just had." qso.rs's complete() always leaves
+        // comment blank by design (no DB/config access there); Android's
+        // QSLRecord constructor instead auto-fills "Distance: <N> <mi|km>,
+        // QSO by FT8AF" -- ported into engine.rs alongside the existing
+        // tx_pwr fill, which already lives in exactly this spot for the
+        // same reason.
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.my_grid = "FN42".into();
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "EM12".into(), snr: -5, ..Default::default()
+        });
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "-12".into(), snr: -8, ..Default::default()
+        }], 0);
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
+        }], 1);
+
+        let qsos = engine.db.list_qsos(10, 0);
+        assert_eq!(qsos.len(), 1);
+        let comment = &qsos[0].comment;
+        assert!(comment.starts_with("Distance: "), "got: {comment}");
+        assert!(comment.ends_with(", QSO by FT8AF"), "got: {comment}");
+        assert!(comment.contains(" mi,"), "distanceInMiles defaults on, got: {comment}");
+    }
+
+    #[test]
+    fn qso_comment_respects_distance_in_miles_config() {
+        let mut engine = test_engine();
+        let _ = engine.db.set_config("distanceInMiles", "0");
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.my_grid = "FN42".into();
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "EM12".into(), snr: -5, ..Default::default()
+        });
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "-12".into(), snr: -8, ..Default::default()
+        }], 0);
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
+        }], 1);
+
+        let comment = engine.db.list_qsos(10, 0)[0].comment.clone();
+        assert!(comment.contains(" km,"), "distanceInMiles=0 must use km, got: {comment}");
+    }
+
+    #[test]
+    fn qso_comment_is_plain_when_a_grid_is_unknown() {
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.my_grid = String::new(); // operator never set a grid
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "EM12".into(), snr: -5, ..Default::default()
+        });
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "-12".into(), snr: -8, ..Default::default()
+        }], 0);
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
+        }], 1);
+
+        assert_eq!(engine.db.list_qsos(10, 0)[0].comment, "QSO by FT8AF");
     }
 
     #[test]
