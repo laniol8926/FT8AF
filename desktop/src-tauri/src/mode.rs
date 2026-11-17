@@ -21,9 +21,14 @@ use serde::{Deserialize, Serialize};
 /// re-derived one.
 const DECODE_MARGIN_MS: i64 = 560;
 
-/// How long before a keyed-up PTT a rig needs (see `PTT_DELAY_MS` in
-/// engine.rs) -- shared across modes, so `tx_latest_ms` can subtract it.
-const PTT_DELAY_MS: i64 = 100;
+/// Default "PTT Delay" (ms) -- how long a rig needs after a keyed-up PTT
+/// before transmit audio begins (see `engine.rs`'s real `PTT_DELAY_MS`
+/// sleep, which must stay the same value as whatever's configured, since
+/// `tx_latest_ms` promising a window the real settle sleep doesn't honor
+/// would reintroduce exactly the late-start bug class this margin exists
+/// to prevent). `Settings -> Advanced -> "PTT Delay"`, Android's own
+/// `pttDelay` key/default/range (0-190ms, 10ms steps).
+pub const DEFAULT_PTT_DELAY_MS: i64 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -137,9 +142,15 @@ impl Mode {
 
     /// Latest point into the cycle TX can still key up and have the full
     /// waveform (plus the PTT lead) land before the next slot boundary --
-    /// matches engine.rs's `TX_LATEST_MS`, generalized per mode.
-    pub fn tx_latest_ms(self) -> i64 {
-        self.audio_slack_ms() - PTT_DELAY_MS
+    /// matches engine.rs's `TX_LATEST_MS`, generalized per mode. Takes the
+    /// *configured* PTT delay (Settings -> Advanced -> "PTT Delay",
+    /// `Engine::ptt_delay_ms`) rather than a fixed constant, so lengthening
+    /// it for a slow-settling rig correctly shrinks this window too --
+    /// promising a window the real PTT-settle sleep doesn't honor would
+    /// reintroduce the late-start/clipped-Costas bug class this margin
+    /// exists to prevent.
+    pub fn tx_latest_ms(self, ptt_delay_ms: i64) -> i64 {
+        self.audio_slack_ms() - ptt_delay_ms
     }
 
     /// Point in the UTC cycle at which this mode's just-finished RX slot is
@@ -158,7 +169,7 @@ impl Default for Mode {
 
 #[cfg(test)]
 mod tests {
-    use super::Mode;
+    use super::{Mode, DEFAULT_PTT_DELAY_MS};
 
     #[test]
     fn ft8_matches_existing_engine_constants() {
@@ -166,7 +177,7 @@ mod tests {
         // for FT8 -- Mode::Ft8 replaces those constants, not just approximates them.
         assert_eq!(Mode::Ft8.cycle_ms(), 15_000);
         assert_eq!(Mode::Ft8.audio_ms(), 12_640);
-        assert_eq!(Mode::Ft8.tx_latest_ms(), 2_260);
+        assert_eq!(Mode::Ft8.tx_latest_ms(DEFAULT_PTT_DELAY_MS), 2_260);
         assert_eq!(Mode::Ft8.decode_at_ms(), 13_200);
         assert!(Mode::Ft8.is_ft8());
     }
@@ -181,7 +192,7 @@ mod tests {
         assert_eq!(Mode::Ft4.symbol_bt(), 1.0);
         assert_eq!(Mode::Ft4.audio_ms(), 5_040);
         assert_eq!(Mode::Ft4.audio_slack_ms(), 2_460);
-        assert_eq!(Mode::Ft4.tx_latest_ms(), 2_360);
+        assert_eq!(Mode::Ft4.tx_latest_ms(DEFAULT_PTT_DELAY_MS), 2_360);
         assert!(!Mode::Ft4.is_ft8());
     }
 
@@ -218,9 +229,18 @@ mod tests {
         assert_eq!(Mode::Ft2.symbol_bt(), 1.0);
         assert_eq!(Mode::Ft2.audio_ms(), 2_520);
         assert_eq!(Mode::Ft2.audio_slack_ms(), 1_230);
-        assert_eq!(Mode::Ft2.tx_latest_ms(), 1_130);
+        assert_eq!(Mode::Ft2.tx_latest_ms(DEFAULT_PTT_DELAY_MS), 1_130);
         assert_eq!(Mode::Ft2.decode_at_ms(), 3_080);
         assert!(!Mode::Ft2.is_ft8());
+    }
+
+    #[test]
+    fn tx_latest_ms_shrinks_as_ptt_delay_grows() {
+        // A slower-settling rig needs more PTT lead, which eats directly into
+        // the window TX can still key up in -- the whole point of making
+        // this configurable rather than a fixed constant.
+        assert_eq!(Mode::Ft8.tx_latest_ms(0), 2_360);
+        assert_eq!(Mode::Ft8.tx_latest_ms(190), 2_170);
     }
 
     #[test]

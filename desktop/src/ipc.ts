@@ -410,13 +410,19 @@ export const api = {
    *  "RX Audio Latency" (a manual stand-in for Android's own auto-calibrated
    *  value; see TimeSyncSettings.tsx's doc comment). */
   setRxLatencyMs: (ms: number) => invoke("set_rx_latency_ms", { ms }),
+  /** Settings -> Advanced's "PTT Delay" (ms). */
+  setPttDelayMs: (ms: number) => invoke("set_ptt_delay_ms", { ms }),
+  /** Settings -> Advanced's "Late-start Tolerance" (ms). */
+  setLateStartToleranceMs: (ms: number) => invoke("set_late_start_tolerance_ms", { ms }),
   refreshStatus: () => invoke("refresh_status"),
   resyncTime: () => invoke("resync_time"),
   /** Manual clock-correction stepper for offline operating (Settings -> Time Sync). */
   setClockOffset: (offsetMs: number) => invoke("set_clock_offset", { offsetMs }),
 
   startCq: () => invoke("start_cq"),
-  answer: (args: { call_from: string; grid: string; snr: number }) =>
+  /** `delta_freq`: audio offset (Hz) to answer on, 0 (default) = keep the
+   *  current TX offset -- see Settings -> Transmission's "Hold TX freq". */
+  answer: (args: { call_from: string; grid: string; snr: number; delta_freq?: number }) =>
     invoke("answer", { args }),
   setStage: (stage: TxStage) => invoke("set_stage", { stage }),
   stopTx: () => invoke("stop_tx"),
@@ -428,6 +434,9 @@ export const api = {
 
   listLog: (limit: number, offset: number) =>
     invoke<QsoRecord[]>("list_log", { limit, offset }),
+  /** Every prior QSO with `callsign` (exact, case-insensitive), oldest
+   *  first -- feeds the QSO Sheet's "Worked before" card. */
+  priorQsos: (callsign: string) => invoke<QsoRecord[]>("prior_qsos", { callsign }),
   /** Server-side callsign search + confirmation filter + column sort
    *  (sortColumn is one of logbook.ts's QSO_COL_* indices). Sorting happens
    *  in SQL before `limit` truncates the result -- see db.rs's

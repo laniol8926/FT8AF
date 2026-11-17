@@ -1,8 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import type { ParsedSettingsBackup } from "../ipc";
 import { defaultBackupFileName } from "../settingsBackup";
-import { SettingsRow } from "./SettingsPrimitives";
+import { SettingsRow, NumberInputDialog, ListPickerDialog } from "./SettingsPrimitives";
+
+type DecodeTier = "fast" | "balanced" | "deep";
+const DECODE_TIER_OPTIONS: { value: DecodeTier; label: string }[] = [
+  { value: "fast", label: "Fast Decode" },
+  { value: "balanced", label: "Balanced Decode" },
+  { value: "deep", label: "Deep Decode" },
+];
 
 /**
  * Advanced, ported from the Android fork's own `AdvancedSettings.kt` +
@@ -26,23 +33,61 @@ import { SettingsRow } from "./SettingsPrimitives";
  *   "re-hydrate everything" hook, so this honestly tells the operator to
  *   restart instead of pretending a live re-apply that isn't actually
  *   wired everywhere.
- * - **Decode Depth**: real -- a Fast/Deep 2-tier toggle (desktop's
- *   `Decoder::set_deep`, found already ported but never wired to anything
- *   while researching this screen). Own config key (`decodeDeep`, plain
- *   boolean) rather than Android's `decodeDepth` (0/1/2 Fast/Balanced/
- *   Deep): desktop has no separate BALANCED tier (no subtract-and-redecode
- *   pass exists), so reusing Android's 3-value encoding would be a false
- *   equivalence.
- * - **PTT Delay / TX Delay / Late-start Tolerance**: disclosed stubs.
- *   These feed directly into Android's TX-timing safety math
- *   (`FT8TransmitSignal.keyUpHoldLimitMs`/`lateStartSkipMs`) -- this
- *   project's own `AGENTS.md` documents two real historical TX-timing bugs
- *   from exactly this class of calculation, and a real stuck-TX incident
- *   is on record for a sibling project. Wiring these needs its own
- *   careful, dedicated pass (confirm desktop's TX pipeline has an
- *   equivalent late-start-skip mechanism at all, replicate the safety math
- *   exactly, unit-test it, then live-test deliberately) -- not something
- *   to rush alongside a dozen other settings in one sitting.
+ * - **Decode Depth**: real, now a Fast/Balanced/Deep 3-way picker matching
+ *   Android's own labels. The underlying mechanism is still just one
+ *   boolean (`decodeDeep`/`Decoder::set_deep` -- more LDPC iterations + a
+ *   lower sync threshold), stored under its own pre-existing key; a new,
+ *   separate `decodeDepthTier` key remembers which *label* the operator
+ *   picked (Balanced vs. Deep), since the boolean alone can't distinguish
+ *   them. Balanced and Deep are honestly disclosed as currently identical
+ *   in effect -- Android's real Deep tier adds a subtract-and-redecode
+ *   second pass (dig a weaker signal out from under a stronger one on the
+ *   same frequency) that doesn't exist in this decoder at all; building
+ *   that is real new DSP/FFI work, not a Settings relabel, and is left for
+ *   a future pass rather than faked. An install from before this 3-tier
+ *   picker existed (tier key unset) migrates its old boolean 1:1 onto the
+ *   label that preserves its prior meaning (off -> Fast, on -> Deep, not
+ *   Balanced -- "Deep Decode" was the only on-state that setting's name
+ *   ever had).
+ * - **PTT Delay / Late-start Tolerance**: real. Checked carefully against
+ *   this project's own `AGENTS.md` (which documents two real historical
+ *   TX-timing bugs from exactly this class of calculation) before
+ *   touching anything: desktop's existing `Mode::tx_latest_ms`/
+ *   `tx_slot_eligible` gate already uses the *correct* lateness formula
+ *   (`max(0, into_cycle - audio_slack_ms)`, confirmed via its own
+ *   `// AGENTS.md gotcha` comment -- not the naive modulo that caused the
+ *   historical bug), and a real, already-tested leading-symbol/sample clip
+ *   (`cat_tones::symbols_to_skip`/`audio::output::skip_cursor`) already
+ *   existed but was structurally unreachable (the eligibility gate never
+ *   let a late-enough start through to need it). PTT Delay generalizes the
+ *   previously-fixed `PTT_DELAY_MS=100` into `Engine::ptt_delay_ms`
+ *   (Android's own `pttDelay`, same 0-190ms range) -- default unchanged,
+ *   so every existing install's real-world timing is identical until this
+ *   is actually opened and changed. Late-start Tolerance widens the
+ *   eligibility window by a configured amount, letting the already-correct
+ *   clip math engage for whatever lateness that lets through -- but its
+ *   *default* is `0`, deliberately **not** Android's `2000`: desktop's
+ *   prior behavior (refuse to start at all once too late, never clip) is
+ *   strictly safer than "clip some leading audio and go anyway", and every
+ *   existing install has only ever had that safer behavior -- introducing
+ *   this knob must not silently start clipping real transmissions for
+ *   someone who never touched the setting (same reasoning as
+ *   `autoCqAfterQso` keeping desktop's own prior default). See
+ *   `tx_protection.rs`'s own doc comment for the full clamp/default
+ *   rationale.
+ * - **TX Delay**: disclosed stub, but not for a safety reason -- checked
+ *   Android's real `GeneralVariables.transmitDelay`/`setTimer_sec` and
+ *   found it exists to delay Android's own *fixed-interval polling timer*
+ *   long enough that the previous slot's decode has likely finished before
+ *   the TX module starts evaluating what to send. Desktop's run loop has
+ *   no such fixed-delay polling timer to tune: its boundary TX trigger
+ *   (`boundary_tx_ready`) is gated directly on the real decode-complete
+ *   event (`!awaiting_any_decode`), which is both more precise (reacts the
+ *   instant decoding actually finishes, not after a fixed guess) and
+ *   already unconditionally correct. A TX Delay setting here would have
+ *   nothing real to control -- wiring one anyway would either be an inert
+ *   no-op or, worse, an artificial sleep that shrinks the real TX window
+ *   for no benefit, undermining a mechanism that already works.
  * - **FFT Averaging / Spectrum Bin Combining**: disclosed stubs -- distinct
  *   from the FFT Window/FFT size/Welch-averaging knobs already real under
  *   Radio & Audio's "Developer — waterfall FFT" panel (which cover a
@@ -76,10 +121,34 @@ export function AdvancedSettings({
   const [importError, setImportError] = useState<string | null>(null);
   const [pendingImport, setPendingImport] = useState<ParsedSettingsBackup | null>(null);
   const [importDone, setImportDone] = useState(false);
+  const [decodeTier, setDecodeTierState] = useState<DecodeTier>(decodeDeep ? "deep" : "fast");
+  const [pttDelay, setPttDelay] = useState(100);
+  const [lateStartTolerance, setLateStartTolerance] = useState(0);
+  const [openDialog, setOpenDialog] = useState<null | "decodeTier" | "pttDelay" | "lateStartTolerance">(null);
 
-  function setDecodeDeep(v: boolean) {
-    onDecodeDeep(v);
-    api.setDecodeDepth(v);
+  useEffect(() => {
+    // `decodeDepthTier` only remembers which of the 3 *labels* the operator
+    // picked -- the real underlying decoder behavior is still just the one
+    // boolean (`decodeDeep`/`onDecodeDeep`, already live-controlled from
+    // App.tsx). An install from before this 3-tier UI existed has no tier
+    // key yet; migrate its old boolean 1:1 onto the label that best
+    // preserves its prior meaning (off -> Fast, on -> Deep, not Balanced --
+    // "Deep Decode" was the only on-state that setting's own name ever had).
+    api.getConfig("decodeDepthTier").then((v) => {
+      if (v === "fast" || v === "balanced" || v === "deep") setDecodeTierState(v);
+    });
+    api.getConfig("pttDelay").then((v) => setPttDelay(v ? parseInt(v, 10) || 100 : 100));
+    api.getConfig("lateStartTolerance").then((v) => setLateStartTolerance(v ? parseInt(v, 10) || 0 : 0));
+  }, []);
+
+  function setDecodeTier(tier: DecodeTier) {
+    setDecodeTierState(tier);
+    api.setConfig("decodeDepthTier", tier);
+    // Balanced and Deep currently behave identically (see this row's own
+    // description) -- both just mean "the existing deep-decode boolean is
+    // on".
+    onDecodeDeep(tier !== "fast");
+    api.setDecodeDepth(tier !== "fast");
   }
 
   async function doExport() {
@@ -122,9 +191,23 @@ export function AdvancedSettings({
       <div className="panel">
         <h3>Advanced</h3>
         <div className="settings-category-list">
-          <SettingsRow label="PTT Delay" description="Delay after PTT before transmit audio begins -- needs a dedicated TX-timing-safety review before this is wired, see this screen's own doc comment" disabled />
-          <SettingsRow label="TX Delay" description="Delay before transmit to allow prior-cycle decode -- same TX-timing-safety deferral as PTT Delay" disabled />
-          <SettingsRow label="Late-start Tolerance" description="Extra leading audio a late manual TX may clip so it still goes out this cycle -- same TX-timing-safety deferral" disabled />
+          <SettingsRow
+            label="PTT Delay"
+            description="Delay after PTT before transmit audio begins -- how long your rig needs its T/R relay to settle"
+            value={`${pttDelay}ms`}
+            onClick={() => setOpenDialog("pttDelay")}
+          />
+          <SettingsRow
+            label="TX Delay"
+            description="Android delays its own TX timer this long to let the prior cycle's decode finish first -- desktop's TX trigger instead waits on the real decode-complete event directly (no fixed delay to tune), so there's nothing here for this setting to control"
+            disabled
+          />
+          <SettingsRow
+            label="Late-start Tolerance"
+            description="Extra leading audio a late TX may clip so it still goes out this cycle instead of waiting for the next slot"
+            value={`${lateStartTolerance}ms`}
+            onClick={() => setOpenDialog("lateStartTolerance")}
+          />
         </div>
       </div>
 
@@ -146,9 +229,9 @@ export function AdvancedSettings({
         <div className="settings-category-list">
           <SettingsRow
             label="Decode Depth"
-            description="Deep runs more LDPC iterations and a lower sync threshold to dig out weak signals, at higher CPU cost. Fast runs coolest."
-            toggle={decodeDeep}
-            onToggleChange={setDecodeDeep}
+            description="Balanced and Deep both run more LDPC iterations and a lower sync threshold to dig out weak signals, at higher CPU cost than Fast. Deep's own subtract-and-redecode second pass (digging a weaker signal out from under a stronger one on the same frequency) doesn't exist in this decoder yet, so Balanced and Deep currently behave identically -- a real future enhancement, not silently dropped."
+            value={DECODE_TIER_OPTIONS.find((o) => o.value === decodeTier)?.label ?? "Fast Decode"}
+            onClick={() => setOpenDialog("decodeTier")}
           />
         </div>
       </div>
@@ -235,6 +318,48 @@ export function AdvancedSettings({
             </div>
           </div>
         </div>
+      )}
+      {openDialog === "decodeTier" && (
+        <ListPickerDialog
+          title="Decode Depth"
+          options={DECODE_TIER_OPTIONS}
+          value={decodeTier}
+          onSelect={(v) => {
+            setDecodeTier(v);
+            setOpenDialog(null);
+          }}
+          onCancel={() => setOpenDialog(null)}
+        />
+      )}
+      {openDialog === "pttDelay" && (
+        <NumberInputDialog
+          title="PTT Delay"
+          description="Delay (ms) after keying PTT before transmit audio begins, to let your rig's T/R relay settle. Too short can clip the leading edge of every transmission."
+          value={pttDelay}
+          min={0}
+          max={190}
+          onSave={(v) => {
+            setPttDelay(v);
+            api.setPttDelayMs(v);
+            setOpenDialog(null);
+          }}
+          onCancel={() => setOpenDialog(null)}
+        />
+      )}
+      {openDialog === "lateStartTolerance" && (
+        <NumberInputDialog
+          title="Late-start Tolerance"
+          description="Extra leading audio (ms) a late TX may clip so it still goes out this cycle instead of waiting for the next slot. 0 (the default) never clips -- a too-late TX simply waits for the next slot, which is the safest choice; raising this trades a small amount of signal (and decodability) at the very start of the transmission for not having to wait up to a full cycle."
+          value={lateStartTolerance}
+          min={0}
+          max={4000}
+          onSave={(v) => {
+            setLateStartTolerance(v);
+            api.setLateStartToleranceMs(v);
+            setOpenDialog(null);
+          }}
+          onCancel={() => setOpenDialog(null)}
+        />
       )}
     </>
   );

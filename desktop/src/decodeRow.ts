@@ -47,3 +47,61 @@ export function formatDecodeFreq(freqHz: number): string {
   const rounded = Math.max(0, Math.round(freqHz));
   return String(rounded).padStart(4, "0");
 }
+
+/**
+ * Distance text for a decode row, ported from Android's
+ * `MaidenheadGrid.formatDist`/`convertDist`/`getDistUnitLabel` -- "%.0f %s"
+ * rounded to the nearest whole unit. `distKm` is always in kilometers
+ * (Android's own `getDist` return unit); `miles` selects the "Distance in
+ * Miles" Settings toggle's unit.
+ */
+const KM_TO_MILES = 0.621371;
+
+export function formatDistance(distKm: number, miles: boolean): string {
+  const v = miles ? distKm * KM_TO_MILES : distKm;
+  return `${Math.round(v)} ${miles ? "mi" : "km"}`;
+}
+
+/**
+ * Initial great-circle bearing (degrees, `[0, 360)`) from point 1 to point 2
+ * -- ported from Android's `BeamHeading.kt#greatCircleBearing` (standard
+ * forward-azimuth formula). 360 is never returned (due north is 0).
+ */
+export function greatCircleBearingDeg(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const phi1 = toRad(lat1);
+  const phi2 = toRad(lat2);
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(phi2);
+  const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+/** Round a bearing to whole degrees in `0..359` (360 wraps back to 0) --
+ *  matches Android's `normalizeHeadingDeg`. */
+export function normalizeHeadingDeg(deg: number): number {
+  return ((Math.round(deg) % 360) + 360) % 360;
+}
+
+/** "47°" -- matches Android's `formatHeading`. */
+export function formatHeading(deg: number): string {
+  return `${deg}°`;
+}
+
+/**
+ * Short-path beam heading (whole degrees) from `myGrid` to `theirGrid`, or
+ * `null` when either grid doesn't resolve to a position or the two points
+ * are identical (a bearing to yourself is undefined) -- matches Android's
+ * `computeBeamHeadings`'s short-path case exactly; desktop has no use for
+ * the long-path reciprocal Android also computes (its QSO sheet shows
+ * both, desktop's decode row -- the only place this is used -- shows only
+ * the short path, same as Android's own row).
+ */
+export function beamHeadingDeg(
+  myGrid: { lat: number; lon: number } | null,
+  theirGrid: { lat: number; lon: number } | null,
+): number | null {
+  if (!myGrid || !theirGrid) return null;
+  if (myGrid.lat === theirGrid.lat && myGrid.lon === theirGrid.lon) return null;
+  return normalizeHeadingDeg(greatCircleBearingDeg(myGrid.lat, myGrid.lon, theirGrid.lat, theirGrid.lon));
+}

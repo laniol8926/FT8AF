@@ -36,14 +36,23 @@ const TUNE_METHOD_OPTIONS: { value: number; label: string }[] = [
  * in the app reads them; only the Auto-Sequence section's Hunt row is a
  * controlled prop, since Hunt itself lives in `App.tsx`/`hunt.ts`, not here.
  *
- * - **TX/RX Split** / **Hold TX freq**: disclosed stubs. Android's "TX/RX
- *   Split" is real split-*frequency* operation (a separate TX dial
- *   frequency from RX, like working a DX pileup) -- desktop's whole
- *   architecture assumes one dial frequency shared by TX and RX (`dial_hz`),
- *   so this needs real new split-VFO rig control, not a quick toggle. "Hold
- *   TX freq" is gated behind split being on in Android too (it only means
- *   something once TX has its own frequency to hold) -- correctly bundled
- *   as the same stub rather than built against nothing.
+ * - **TX/RX Split**: disclosed stub. Android's version is real
+ *   split-*frequency* operation (a separate TX dial frequency from RX, like
+ *   working a DX pileup) -- desktop's whole architecture assumes one dial
+ *   frequency shared by TX and RX (`dial_hz`), so this needs real new
+ *   split-VFO rig control, not a quick toggle.
+ * - **Hold TX freq**: real, and NOT actually gated behind Split the way the
+ *   above might suggest -- checked against Android's own
+ *   `FT8TransmitSignal.shouldFollowTargetFreq`/`holdTxFreq`: it's purely an
+ *   audio-offset choice (does answering a station move your TX tone onto
+ *   theirs, or keep it where it was), nothing to do with a second dial
+ *   frequency. Desktop's `answer` IPC command already carries a
+ *   `delta_freq` field (0 = keep current offset, matching both the
+ *   existing UI click-to-answer behavior and Android's own `holdTxFreq`
+ *   default of `true`) -- this toggle (Android's own `holdTxFreq` key,
+ *   default on, matching current behavior exactly) is purely a frontend
+ *   decision in `App.tsx`'s Call button: off sends the target's own
+ *   decoded frequency as `delta_freq` instead of `0`.
  * - **Clear decodes on band/mode change**: real (`clearOnBandModeChange`,
  *   Android's own key/default) -- wipes the decode list and resets the TX
  *   target to CQ (if something was running) on a band or mode change, see
@@ -90,6 +99,8 @@ export function TransmissionSettings({
   onHuntAvoidPileups,
   huntMinSnr,
   onHuntMinSnr,
+  holdTxFreq,
+  onHoldTxFreq,
 }: {
   huntEnabled: boolean;
   onHuntEnabled: (v: boolean) => void;
@@ -99,6 +110,8 @@ export function TransmissionSettings({
   onHuntAvoidPileups: (v: boolean) => void;
   huntMinSnr: number | null;
   onHuntMinSnr: (v: number | null) => void;
+  holdTxFreq: boolean;
+  onHoldTxFreq: (v: boolean) => void;
 }) {
   const [openDialog, setOpenDialog] = useState<OpenDialog>(null);
 
@@ -144,8 +157,9 @@ export function TransmissionSettings({
           />
           <SettingsRow
             label="Hold TX freq"
-            description="Keep your TX offset when answering a station instead of moving it to theirs -- only meaningful once TX/RX Split exists"
-            disabled
+            description="Keep your TX offset when answering a station instead of moving it to theirs"
+            toggle={holdTxFreq}
+            onToggleChange={onHoldTxFreq}
           />
           <SettingsRow
             label="Clear decodes on band/mode change"

@@ -84,7 +84,20 @@ import {
 import { formatPowerWatts, formatSwrRatio, swrBand } from "./meters";
 import { formatDecodeDt, formatDecodeFreq, isDecodeDtNotable } from "./decodeRow";
 import { wpxPrefixOf } from "./wpxPrefix";
-import { resolveQsoStatus, extractCqModifier, QSO_STATUS_META, HIGHLIGHT_DEFAULTS, type HighlightConfig } from "./qsoStatus";
+import {
+  resolveQsoStatus, extractCqModifier, QSO_STATUS_META, HIGHLIGHT_DEFAULTS, type HighlightConfig,
+  type QsoStatus as QsoStatusName,
+} from "./qsoStatus";
+import {
+  buildQsoLog, decideTxLog, formatTxLogText, mergeRxLog, qsoHeaderText, type QsoLogEntry,
+} from "./activeQsoPanel";
+import {
+  buildQsoSteps, computeBeamHeadings, computeCurrentStepIndex, computeDistanceText,
+  computeGrayLineStatusText, computeLastHeard, formatHeading, formatLocationLine,
+  lastHeardText, qsoLiveStatusText,
+} from "./qsoSheet";
+import { summarizeWorkedBefore, type PriorQso } from "./workedBeforeHistory";
+import { QsoPathProjection } from "./qsoPathProjection";
 import {
   parseWorkedMode, parseWorkedScope, isWorkedByScope, shouldHideWorked,
   parseCallList, isBlocked, matchesWatchlist, type WorkedMode, type WorkedScope,
@@ -258,6 +271,24 @@ export default function App() {
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [cycle, setCycle] = useState<CycleTick | null>(null);
   const [txState, setTxState] = useState<TxStateEvent | null>(null);
+  // The docked "Calling CQ" / active-QSO panel's running log -- see
+  // activeQsoPanel.ts for the ported logic this wires up. rxLog holds
+  // durable RX/BUSY rows classified from the raw (unfiltered) decode list;
+  // txLog holds our own synthesized TX rows, sourced from txState rather
+  // than the decode list (loopback decodes, if any ever arrived, must
+  // never become a row here -- see buildQsoLog's own doc comment). Both
+  // use desktop's single "continuous log" shape (Android's inLeftColumn
+  // mode): one running log per TX run, reset only when a fresh run starts.
+  const [rxLog, setRxLog] = useState<QsoLogEntry[]>([]);
+  const [txLog, setTxLog] = useState<QsoLogEntry[]>([]);
+  const wasActiveRef = useRef(false);
+  const wasTransmittingRef = useRef(false);
+  const pendingTxLogRef = useRef(false);
+  // QSO Sheet (qsoSheet.ts) -- the "tap a decode row" station-detail
+  // dialog with an explicit Call button; the row's tap no longer answers
+  // immediately, it opens this review step instead (see the onAnswer call
+  // site below).
+  const [qsoSheetMessage, setQsoSheetMessage] = useState<UiMessage | null>(null);
   const [rig, setRig] = useState<RigStatusEvent | null>(null);
   const [clock, setClock] = useState<ClockSyncEvent | null>(null);
   // Which automatic source (if any) is disciplining the clock right now --
@@ -312,11 +343,74 @@ export default function App() {
   }
   useEffect(refreshAudioBandConfig, []);
 
+  // Active QSO panel (see activeQsoPanel.ts): reset the whole running log
+  // the instant a fresh run starts (CQ or an answered QSO) -- the false ->
+  // true edge of status.active, matching Android's own
+  // `LaunchedEffect(isActivated, continuousLog)`.
+  const txActive = txState?.status.active ?? false;
+  useEffect(() => {
+    if (txActive && !wasActiveRef.current) {
+      setRxLog([]);
+      setTxLog([]);
+      wasTransmittingRef.current = false;
+      pendingTxLogRef.current = false;
+    }
+    wasActiveRef.current = txActive;
+  }, [txActive]);
+
+  // Fold this snapshot's decodes from the live target into the durable RX/
+  // BUSY log. Reads the raw (unfiltered) `messages`, not the decode list's
+  // currently-visible subset -- an unrelated filter chip (e.g. Show Only
+  // CQ) must never hide the other station's half of our own QSO.
+  const logTarget = txState?.status.target ?? null;
+  useEffect(() => {
+    if (!logTarget) return;
+    const incoming = buildQsoLog(messages, logTarget);
+    setRxLog((existing) => mergeRxLog(existing, incoming));
+  }, [messages, logTarget]);
+
+  // Synthesize one TX row per transmission, keyed off the rising edge of
+  // `transmitting` -- see decideTxLog's own doc comment for why (one row
+  // per transmission, not de-duplicated by text).
+  const isTransmitting = txState?.transmitting ?? false;
+  const txMessageNow = txState?.message ?? "";
+  useEffect(() => {
+    const decision = decideTxLog(
+      wasTransmittingRef.current,
+      isTransmitting,
+      pendingTxLogRef.current,
+      txMessageNow,
+      txActive,
+    );
+    wasTransmittingRef.current = isTransmitting;
+    pendingTxLogRef.current = decision.pendingAfter;
+    if (decision.shouldLog) {
+      setTxLog((prev) => [
+        ...prev,
+        { direction: "tx" as const, utcMs: Date.now(), text: formatTxLogText(txMessageNow, txFreq), snr: null },
+      ]);
+    }
+  }, [isTransmitting, txMessageNow, txActive, txFreq]);
+
+  const qsoLogEntries = useMemo(
+    () => [...rxLog, ...txLog].sort((a, b) => a.utcMs - b.utcMs),
+    [rxLog, txLog],
+  );
+
   // Settings -> Advanced's "Decode Depth" (own key, see AdvancedSettings.tsx's
   // doc comment for why it isn't Android's decodeDepth).
   const [decodeDeep, setDecodeDeep] = useState(false);
   useEffect(() => {
     api.getConfig("decodeDeep").then((v) => setDecodeDeep(v === "1"));
+  }, []);
+
+  // Settings -> Decode & Filters' "Distance in Miles" (Android's own
+  // `distanceInMiles`, default true -- matches this app's one existing
+  // precedent, logbook.ts's Best DX card). Read here (not just inside
+  // Settings) because it also drives the QSO Sheet's Distance stat card.
+  const [distanceMiles, setDistanceMiles] = useState(true);
+  useEffect(() => {
+    api.getConfig("distanceInMiles").then((v) => setDistanceMiles(v !== "0"));
   }, []);
 
   // Decode & Filters (Settings -> Decode & Filters, ported from Android's
@@ -441,6 +535,12 @@ export default function App() {
   const [huntPriority, setHuntPriorityState] = useState<HuntPriority>("latest");
   const [huntAvoidPileups, setHuntAvoidPileups] = useState(false);
   const [huntMinSnr, setHuntMinSnr] = useState<number | null>(null);
+  // Settings -> Transmission's "Hold TX freq" (Android's own `holdTxFreq`,
+  // default true -- matches desktop's only-ever behavior until this toggle
+  // existed, see TransmissionSettings.tsx's own doc comment). Read here
+  // (not just inside Settings) because it drives the QSO Sheet's Call
+  // button, not just the Settings row itself.
+  const [holdTxFreq, setHoldTxFreq] = useState(true);
 
   function refreshWorkedCalls() {
     api.workedCalls(operatingMode).then((calls) => setWorkedCalls(new Set(calls)));
@@ -761,6 +861,7 @@ export default function App() {
       const n = v == null || v === "" ? NaN : parseInt(v, 10);
       setHuntMinSnr(Number.isNaN(n) ? null : n);
     });
+    api.getConfig("holdTxFreq").then((v) => setHoldTxFreq(v !== "0"));
     maybeAutoStartDecode();
     return () => {
       cancelled = true;
@@ -1198,7 +1299,7 @@ export default function App() {
               setTxFreq(hz);
               api.setBaseFreq(hz);
             }}
-            onAnswer={(m) => api.answer({ call_from: m.call_from, grid: m.grid, snr: m.snr })}
+            onAnswer={(m) => setQsoSheetMessage(m)}
             decoding={decoding}
             audio={audio}
             displayHz={displayHz}
@@ -1207,6 +1308,11 @@ export default function App() {
             onDenoise={onDenoise}
             showMessages={showMessages}
             onToggleMessages={onToggleMessages}
+            qsoActive={txActive}
+            qsoLog={qsoLogEntries}
+            qsoTarget={logTarget}
+            qsoTransmitting={isTransmitting}
+            qsoPowerWatts={meter?.power_watts ?? null}
           />
         )}
         {tab === "waterfall" && (
@@ -1258,6 +1364,11 @@ export default function App() {
             onAudioBandConfigChanged={refreshAudioBandConfig}
             decodeDeep={decodeDeep}
             onDecodeDeep={setDecodeDeep}
+            distanceMiles={distanceMiles}
+            onDistanceMiles={(v) => {
+              setDistanceMiles(v);
+              api.setConfig("distanceInMiles", v ? "1" : "0");
+            }}
             highlightConfig={highlightConfig}
             onHighlightConfig={setHighlightConfig}
             workedMode={workedMode}
@@ -1305,6 +1416,11 @@ export default function App() {
               setHuntMinSnr(v);
               api.setConfig("hunt_min_snr", v == null ? "" : String(v));
             }}
+            holdTxFreq={holdTxFreq}
+            onHoldTxFreq={(v) => {
+              setHoldTxFreq(v);
+              api.setConfig("holdTxFreq", v ? "1" : "0");
+            }}
             inputGain={inputGain}
             onInputGain={onInputGain}
             txGain={txGain}
@@ -1347,6 +1463,40 @@ export default function App() {
         moreOpen={moreOpen}
         onToggleMore={() => setMoreOpen((v) => !v)}
       />
+      {qsoSheetMessage && (
+        <QsoSheetDialog
+          message={qsoSheetMessage}
+          status={resolveQsoStatus(
+            {
+              isCq: qsoSheetMessage.is_cq,
+              isToMe: qsoSheetMessage.to_me,
+              isPota: isPotaCq(qsoSheetMessage.is_cq, qsoSheetMessage.text),
+              isSota: extractCqModifier(qsoSheetMessage.is_cq, qsoSheetMessage.text) === "SOTA",
+              isNewDxcc: qsoSheetMessage.dxcc_prefix != null && !workedDxccPrefixes.has(qsoSheetMessage.dxcc_prefix),
+              isNewZone: qsoSheetMessage.cq_zone != null && !workedCqZones.has(qsoSheetMessage.cq_zone),
+              isNewState: qsoSheetMessage.state != null && !workedStates.has(qsoSheetMessage.state),
+              isNewGrid: qsoSheetMessage.grid.length >= 4 && !workedGrids.has(qsoSheetMessage.grid.toUpperCase()),
+              isNewPrefix: wpxPrefixOf(qsoSheetMessage.call_from) != null &&
+                !workedPrefixes.has(wpxPrefixOf(qsoSheetMessage.call_from)!),
+              isWorkedOtherBand: !workedCalls.has(qsoSheetMessage.call_from.toUpperCase()) &&
+                workedCallsAnyBand.has(qsoSheetMessage.call_from.toUpperCase()),
+              isWorked: workedCalls.has(qsoSheetMessage.call_from.toUpperCase()),
+            },
+            highlightConfig,
+          )}
+          myCall={myCall}
+          myGrid={myGrid}
+          bands={bands}
+          dialHz={dialHz}
+          txState={txState}
+          distanceMiles={distanceMiles}
+          onClose={() => setQsoSheetMessage(null)}
+          onCall={(m) => api.answer({
+            call_from: m.call_from, grid: m.grid, snr: m.snr,
+            delta_freq: holdTxFreq ? 0 : Math.round(m.freq_hz),
+          })}
+        />
+      )}
     </>
   );
 }
@@ -3329,6 +3479,353 @@ function EmptyState({ filter, operatingMode }: { filter: Filter; operatingMode: 
   );
 }
 
+/**
+ * Docked "Calling CQ" / active-QSO panel, replacing the decode list while a
+ * CQ or QSO is running -- see activeQsoPanel.ts for the ported logic and
+ * App.tsx's wiring (qsoActive/qsoLog/qsoTarget/qsoTransmitting/
+ * qsoPowerWatts). Ported from Android's ActiveQsoPanel.kt's header +
+ * message-log rows; the PAUSE/LOG buttons, caller-queue bar, and manual
+ * TX1-5 selector are deliberately not here -- see activeQsoPanel.ts's doc
+ * comment for why.
+ */
+function ActiveQsoPanelView({
+  entries,
+  hasTarget,
+  target,
+  isTransmitting,
+  powerWatts,
+}: {
+  entries: QsoLogEntry[];
+  hasTarget: boolean;
+  target: string | null;
+  isTransmitting: boolean;
+  powerWatts: number | null;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [entries.length]);
+
+  return (
+    <div className="qso-panel">
+      <div className="qso-panel-header">
+        <span className="qso-panel-title">{qsoHeaderText(hasTarget, target, isTransmitting)}</span>
+        {!hasTarget && powerWatts != null && powerWatts > 0 && (
+          <span className="qso-panel-power">{formatPowerWatts(powerWatts)}</span>
+        )}
+      </div>
+      <div className="qso-panel-log" ref={listRef}>
+        {entries.length === 0 ? (
+          <div className="qso-panel-waiting">Waiting for messages...</div>
+        ) : (
+          entries.map((e, i) => {
+            const time = new Date(e.utcMs).toISOString().slice(11, 19);
+            return (
+              <div key={`${e.direction}|${e.utcMs}|${i}`} className={"qso-panel-row " + e.direction}>
+                <span className={"qso-panel-row-dir " + e.direction}>{e.direction.toUpperCase()}</span>
+                <span className="qso-panel-row-time">{time}</span>
+                <span className="qso-panel-row-text">{e.text}</span>
+                {e.snr != null && (
+                  <span className="qso-panel-row-snr">{e.snr >= 0 ? `+${e.snr}` : e.snr}</span>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * QSO Sheet: the "tap a decode row" station-detail dialog with an explicit
+ * Call button, ported from Android's `QsoSheet.kt` -- see qsoSheet.ts's
+ * doc comment for why this is a separate, deliberate review step desktop
+ * had no equivalent of at all (tapping a row called `onAnswer`
+ * immediately). Deliberately not ported: QRZ profile-picture avatars (no
+ * image-fetch infrastructure for this yet -- initials-only, same as
+ * Android's own offline fallback); the "country" line uses the decoded
+ * DXCC *prefix* rather than a resolved country name (desktop has no
+ * prefix->name lookup anywhere yet); Android's landscape-only "hide
+ * station info while TX is on" fork tweak doesn't apply -- desktop has one
+ * fixed layout, not a phone that rotates, and the docked ActiveQsoPanel
+ * already owns the live-QSO view.
+ */
+function QsoSheetDialog({
+  message,
+  status,
+  myCall,
+  myGrid,
+  bands,
+  dialHz,
+  txState,
+  distanceMiles,
+  onClose,
+  onCall,
+}: {
+  message: UiMessage;
+  status: QsoStatusName | null;
+  myCall: string;
+  myGrid: string;
+  bands: BandInfo[];
+  dialHz: number;
+  txState: TxStateEvent | null;
+  distanceMiles: boolean;
+  onClose: () => void;
+  onCall: (m: UiMessage) => void;
+}) {
+  const callsign = message.call_from;
+  const theirGrid = message.grid || null;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const isTransmitting = txState?.transmitting ?? false;
+  const liveTarget = txState?.status.target ?? null;
+  const isLiveQso = txState?.status.active === true && liveTarget?.toUpperCase() === callsign.toUpperCase();
+  const isFullyComplete = status === "worked";
+  const currentStepIndex = computeCurrentStepIndex(isFullyComplete, isLiveQso, isLiveQso ? txState!.status.stage : null);
+
+  const headings = computeBeamHeadings(myGrid, theirGrid);
+  const distanceText = computeDistanceText(myGrid, theirGrid, distanceMiles);
+  const bandLabel = bands.find((b) => b.dial_hz === dialHz)?.name ?? "--";
+  const locationText = formatLocationLine(message.state, message.dxcc_prefix, theirGrid);
+  const grayLineText = computeGrayLineStatusText(theirGrid, now);
+
+  const [priorQsos, setPriorQsos] = useState<PriorQso[] | null>(null);
+  useEffect(() => {
+    setPriorQsos(null);
+    api.priorQsos(callsign).then((rows) =>
+      setPriorQsos(rows.map((r) => ({ qsoDate: r.qso_date, timeOn: r.time_on, band: r.band, mode: r.mode }))),
+    );
+  }, [callsign]);
+  const workedBefore = priorQsos ? summarizeWorkedBefore(priorQsos) : null;
+
+  const pathCanvasRef = useRef<HTMLCanvasElement>(null);
+  const me = gridToLatLon(myGrid);
+  const them = gridToLatLon(theirGrid ?? "");
+  useEffect(() => {
+    const canvas = pathCanvasRef.current;
+    if (!canvas || !me || !them) return;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (w === 0 || h === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#0e131e";
+    ctx.fillRect(0, 0, w, h);
+
+    const proj = new QsoPathProjection(me.lat, me.lon, them.lat, them.lon, w, h);
+    const tLon = proj.normalizedTheirLon;
+
+    function strokeRings(rings: number[][], fill: string | null, stroke: string, width: number) {
+      for (const off of [-360, 0, 360]) {
+        ctx!.beginPath();
+        for (const ring of rings) {
+          forEachRingVertex(ring, fill ? 3 : 2, (lon, lat, first) => {
+            const x = proj.projectX(lon + off);
+            const y = proj.projectY(lat);
+            if (first) ctx!.moveTo(x, y);
+            else ctx!.lineTo(x, y);
+          });
+          ctx!.closePath();
+        }
+        if (fill) {
+          ctx!.fillStyle = fill;
+          ctx!.fill();
+        }
+        ctx!.strokeStyle = stroke;
+        ctx!.lineWidth = width;
+        ctx!.stroke();
+      }
+    }
+    strokeRings(MAP_LAND_RINGS, "rgba(148,163,184,0.25)", "rgba(148,163,184,0.55)", 0.75);
+    strokeRings(MAP_STATE_RINGS, null, "rgba(148,163,184,0.33)", 0.6);
+
+    const myX = proj.projectX(me.lon);
+    const myY = proj.projectY(me.lat);
+    const tX = proj.projectX(tLon);
+    const tY = proj.projectY(them.lat);
+
+    ctx.strokeStyle = "rgba(255,175,94,0.75)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 5]);
+    ctx.beginPath();
+    ctx.moveTo(myX, myY);
+    ctx.lineTo(tX, tY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    function drawStation(x: number, y: number, color: string, label: string) {
+      ctx!.beginPath();
+      ctx!.fillStyle = color + "38";
+      ctx!.arc(x, y, 9, 0, Math.PI * 2);
+      ctx!.fill();
+      ctx!.beginPath();
+      ctx!.fillStyle = color;
+      ctx!.arc(x, y, 4.5, 0, Math.PI * 2);
+      ctx!.fill();
+      ctx!.strokeStyle = "#07090f";
+      ctx!.lineWidth = 1.3;
+      ctx!.stroke();
+      ctx!.font = "bold 11px monospace";
+      ctx!.fillStyle = color;
+      ctx!.fillText(label, x + 9, y + 4);
+    }
+    drawStation(myX, myY, "#ffaf5e", myCall || "ME");
+    drawStation(tX, tY, "#5cd6e8", callsign);
+  }, [me?.lat, me?.lon, them?.lat, them?.lon, myCall, callsign]);
+
+  const snrDisplay = message.snr != null ? `${message.snr}` : "--";
+  const steps = buildQsoSteps(callsign, myCall, myGrid, snrDisplay);
+  const liveStatusText = qsoLiveStatusText(callsign, isLiveQso, isTransmitting, currentStepIndex);
+  const txNext = txState?.status.tx_message;
+  const showTxBanner = (txState?.status.active ?? false) && txNext;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal qso-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="qso-sheet-header">
+          <div className="qso-sheet-avatar">{callsign.slice(0, 2)}</div>
+          <div className="qso-sheet-header-text">
+            <div className="qso-sheet-callrow">
+              <span className="qso-sheet-call">{callsign}</span>
+              {status && (
+                <span
+                  className="status-pill-row"
+                  style={{ color: QSO_STATUS_META[status].color, background: QSO_STATUS_META[status].bg, borderColor: QSO_STATUS_META[status].border }}
+                >
+                  <span className="status-pill-row-dot" style={{ background: QSO_STATUS_META[status].color }} />
+                  {QSO_STATUS_META[status].label}
+                </span>
+              )}
+            </div>
+            {locationText && <div className="qso-sheet-location">{locationText}</div>}
+            <a
+              className="qso-sheet-qrz-link"
+              onClick={(e) => {
+                e.preventDefault();
+                api.openExternal(`https://www.qrz.com/db/${callsign}`);
+              }}
+              href="#"
+            >
+              QRZ &#8599;
+            </a>
+          </div>
+          <button className="modal-close" onClick={onClose}>&times;</button>
+        </div>
+
+        <div className="qso-sheet-stats">
+          <div className="qso-stat-card">
+            <div className="qso-stat-label">Signal</div>
+            <div className="qso-stat-value">{message.snr != null ? `${message.snr} dB` : "-- dB"}</div>
+          </div>
+          <div className="qso-stat-card">
+            <div className="qso-stat-label">Distance</div>
+            <div className="qso-stat-value">{distanceText}</div>
+          </div>
+          <div className="qso-stat-card">
+            <div className="qso-stat-label">Azimuth</div>
+            <div className="qso-stat-value">{headings ? formatHeading(headings.shortPathDeg) : "--"}</div>
+            {headings && <div className="qso-stat-subtitle">LP {formatHeading(headings.longPathDeg)}</div>}
+          </div>
+          <div className="qso-stat-card">
+            <div className="qso-stat-label">Band</div>
+            <div className="qso-stat-value">{bandLabel}</div>
+          </div>
+        </div>
+
+        <div className="qso-sheet-row">
+          <span className="qso-sheet-row-label">Last heard</span>
+          <span className="qso-sheet-row-value">{lastHeardText(computeLastHeard(message.utc_ms, now))}</span>
+        </div>
+        {grayLineText && (
+          <div className="qso-sheet-row">
+            <span className="qso-sheet-row-label">Gray line</span>
+            <span className="qso-sheet-row-value">{grayLineText}</span>
+          </div>
+        )}
+
+        {workedBefore && (
+          <div className="glass-card qso-sheet-worked-before">
+            <div className="qso-sheet-worked-before-title">
+              Worked before <span className="qso-sheet-worked-before-count">{workedBefore.count}</span>
+            </div>
+            {workedBefore.lastLine && <div className="qso-sheet-worked-before-last">last {workedBefore.lastLine}</div>}
+            {workedBefore.bands.length > 1 && (
+              <div className="qso-sheet-worked-before-bands">Bands: {workedBefore.bands.join(" · ")}</div>
+            )}
+          </div>
+        )}
+
+        {me && them && (
+          <div className="glass-card qso-sheet-path-map-card">
+            <canvas ref={pathCanvasRef} className="qso-sheet-path-map" />
+          </div>
+        )}
+
+        <div className="qso-sheet-sequence">
+          <div className="qso-sheet-sequence-header">QSO SEQUENCE</div>
+          {steps.map((step, i) => {
+            const isComplete = i < currentStepIndex;
+            const isCurrent = i === currentStepIndex && currentStepIndex >= 0 && currentStepIndex <= 4;
+            return (
+              <div key={i} className={"qso-step" + (isComplete ? " complete" : "") + (isCurrent ? " current" : "")}>
+                <div className="qso-step-indicator">
+                  <div className={"qso-step-circle" + (isCurrent ? " pulse" : "")}>
+                    {isComplete ? "✓" : i + 1}
+                  </div>
+                  {i < steps.length - 1 && <div className="qso-step-line" />}
+                </div>
+                <div className="qso-step-body">
+                  <div className="qso-step-label-row">
+                    <span className="qso-step-label">{step.label}</span>
+                    {step.txRxLabel !== "--" && (
+                      <span className={"qso-step-dir " + step.txRxLabel.toLowerCase()}>{step.txRxLabel}</span>
+                    )}
+                  </div>
+                  <div className="qso-step-preview">{step.messagePreview}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {showTxBanner && (
+          <div className={"qso-sheet-tx-banner" + (isTransmitting ? " now" : "")}>
+            <span className="qso-sheet-tx-banner-label">{isTransmitting ? "TX NOW" : "TX NEXT"}</span>
+            <span className="qso-sheet-tx-banner-text">{txNext}</span>
+          </div>
+        )}
+
+        {liveStatusText && <div className="qso-sheet-live-status">{liveStatusText}</div>}
+
+        {isFullyComplete ? (
+          <div className="qso-sheet-complete">&#10003; QSO Complete</div>
+        ) : (
+          <button
+            className="qso-sheet-call-btn"
+            disabled={isTransmitting}
+            onClick={() => {
+              onCall(message);
+              onClose();
+            }}
+          >
+            Call {callsign}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DecodeScreen(props: {
   // Which panel fills the right-hand pane: the waterfall (the default) or
   // the Map, in place of it -- the two are mutually exclusive in that one
@@ -3362,6 +3859,13 @@ function DecodeScreen(props: {
   onDenoise: (v: boolean) => void;
   showMessages: boolean;
   onToggleMessages: () => void;
+  // Docked "Calling CQ" / active-QSO panel (activeQsoPanel.ts) -- replaces
+  // the decode list/empty-state while a CQ or QSO is actually running.
+  qsoActive: boolean;
+  qsoLog: QsoLogEntry[];
+  qsoTarget: string | null;
+  qsoTransmitting: boolean;
+  qsoPowerWatts: number | null;
 }) {
   const {
     rightPane, messages, sortMode, myGrid, myCall, dialHz, txTarget, operatingMode, filter, setFilter,
@@ -3369,6 +3873,7 @@ function DecodeScreen(props: {
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, highlightConfig,
     txFreq, onSelectFreq, onAnswer,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
+    qsoActive, qsoLog, qsoTarget, qsoTransmitting, qsoPowerWatts,
   } = props;
 
   // Default "time" mode keeps the existing full-history, per-slot-grouped
@@ -3409,6 +3914,16 @@ function DecodeScreen(props: {
               has no such composable. A previous round added one here that
               Android never actually had; removed. */}
           <div className="decode-list">
+            {qsoActive ? (
+              <ActiveQsoPanelView
+                entries={qsoLog}
+                hasTarget={qsoTarget != null}
+                target={qsoTarget}
+                isTransmitting={qsoTransmitting}
+                powerWatts={qsoPowerWatts}
+              />
+            ) : (
+            <>
             {displayMessages.map((m, i) => {
               // Time-group dividers only make sense in "time" mode, where rows
               // stay time-ordered -- once sorted by call/SNR/distance the rows
@@ -3533,6 +4048,8 @@ function DecodeScreen(props: {
             })}
             {displayMessages.length === 0 && (
               <EmptyState filter={filter} operatingMode={operatingMode} />
+            )}
+            </>
             )}
           </div>
         </div>

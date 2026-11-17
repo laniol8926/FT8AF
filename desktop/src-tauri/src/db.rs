@@ -588,6 +588,25 @@ impl Db {
             .unwrap_or_default()
     }
 
+    /// Every prior QSO logged with `callsign` (case-insensitive exact match),
+    /// oldest first -- feeds the QSO Sheet's "Worked before" card (ported
+    /// from Android's `DatabaseOpr.getPriorQsos`). Deliberately exact, not a
+    /// substring `LIKE` like `search_qsos` -- "worked before" means this
+    /// exact station, not anything containing it.
+    pub fn prior_qsos(&self, callsign: &str) -> Vec<QsoRecord> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE call = ?1 COLLATE NOCASE \
+             ORDER BY qso_date ASC, time_on ASC",
+        )) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![callsign], row_to_qso)
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     /// Server-side search/filter mirroring the Android Logbook tab: substring
     /// match on callsign plus the QSL confirmation filter, most-recent-first.
     ///
@@ -1983,6 +2002,26 @@ mod tests {
         // Confirmed QSO exports QSL_RCVD:Y, unconfirmed exports N.
         assert!(adif.contains("<call:5>K1ABC <QSL_RCVD:1>Y "));
         assert!(adif.contains("<call:4>W1AW <QSL_RCVD:1>N "));
+    }
+
+    #[test]
+    fn prior_qsos_finds_exact_case_insensitive_matches_oldest_first() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&rec("K1ABC", "20260604", "130000", false)).unwrap();
+        db.insert_qso(&rec("k1abc", "20260101", "090000", false)).unwrap();
+        db.insert_qso(&rec("W1AW", "20260604", "120000", false)).unwrap();
+
+        let prior = db.prior_qsos("K1ABC");
+        assert_eq!(prior.len(), 2);
+        assert_eq!(prior[0].qso_date, "20260101");
+        assert_eq!(prior[1].qso_date, "20260604");
+    }
+
+    #[test]
+    fn prior_qsos_is_empty_for_a_never_worked_station() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&rec("K1ABC", "20260604", "120000", false)).unwrap();
+        assert!(db.prior_qsos("W1AW").is_empty());
     }
 
     #[test]

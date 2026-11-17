@@ -32,9 +32,10 @@ use crate::wf::{WfConfig, WfProcessor, WfWindow};
 
 // Cycle/TX-timing constants (15s/12.64s-audio FT8, 7.5s/5.04s-audio FT4) now
 // live on `Mode` (cycle_ms/audio_slack_ms/tx_latest_ms/decode_at_ms) instead
-// of as fixed consts here -- see mode.rs. PTT_DELAY_MS stays a plain const:
-// it's rig-settle time, not FT8/FT4-specific.
-const PTT_DELAY_MS: u64 = 100;
+// of as fixed consts here -- see mode.rs. PTT delay is rig-settle time, not
+// FT8/FT4-specific, so it isn't on `Mode` either -- it's now a real,
+// configurable `Engine::ptt_delay_ms` field (Settings -> Advanced's "PTT
+// Delay"), not a fixed const.
 // Run-loop tick while a QMX CAT-tone transmission is in flight (see
 // `service_cat_tx`): short enough that each symbol goes out close to on time
 // despite being polled rather than slept-to directly (no separate timer
@@ -541,6 +542,14 @@ pub enum EngineCommand {
     /// `rx_latency_adjusted_into_cycle_ms`'s doc comment. Clamped to
     /// Android's own 0-3000ms range.
     SetRxLatencyMs(i64),
+    /// Settings -> Advanced's "PTT Delay" (ms) -- Android's own `pttDelay`.
+    /// Feeds both the real PTT-settle sleep and `Mode::tx_latest_ms`'s
+    /// eligibility window; see `tx_protection::clamp_ptt_delay_ms`.
+    SetPttDelayMs(i64),
+    /// Settings -> Advanced's "Late-start Tolerance" (ms) -- see
+    /// `tx_protection::clamp_late_start_tolerance_ms`'s doc comment for why
+    /// desktop's default (`0`) deliberately diverges from Android's (2000).
+    SetLateStartToleranceMs(i64),
     Shutdown,
 }
 
@@ -965,6 +974,27 @@ struct Engine {
     /// isn't available yet. Default 0 -- unset, no shift, matches every
     /// build before this setting existed.
     rx_latency_ms: i64,
+    /// Settings -> Advanced's "PTT Delay" (ms) -- Android's own `pttDelay`.
+    /// Feeds both the real PTT-settle sleep (the 3 `thread::sleep` sites in
+    /// `start_transmit`/`send_cat_transmission`/`start_tune`) and
+    /// `Mode::tx_latest_ms`'s eligibility window via
+    /// `Engine::effective_tx_latest_ms` -- the two must never disagree, see
+    /// `Mode::tx_latest_ms`'s doc comment. Default matches the exact
+    /// constant this replaces (`mode::DEFAULT_PTT_DELAY_MS`, 100ms), so
+    /// every existing install's real-world timing is unchanged until the
+    /// operator actually opens this new setting and changes it.
+    ptt_delay_ms: i64,
+    /// Settings -> Advanced's "Late-start Tolerance" (ms) -- see
+    /// `tx_protection::clamp_late_start_tolerance_ms`'s doc comment for why
+    /// desktop's default (`0`) deliberately diverges from Android's
+    /// (2000ms): desktop's existing behavior already refuses to start a
+    /// transmission too late to fit (never clipping), which is strictly
+    /// safer than Android's "clip some leading audio and go anyway" -- this
+    /// setting widens `tx_slot_eligible`'s window by this many ms, and the
+    /// already-existing, already-tested clip math
+    /// (`cat_tones::symbols_to_skip`/`audio::output::skip_cursor`) naturally
+    /// engages for whatever lateness that widened window now lets through.
+    late_start_tolerance_ms: i64,
 }
 
 /// Whether the keepalive should resend PTT-on now. `since_last_on` is the
@@ -1143,6 +1173,18 @@ impl Engine {
             .and_then(|s| s.parse().ok())
             .map(clamp_rx_latency_ms)
             .unwrap_or(0);
+        let ptt_delay_ms = db
+            .get_config("pttDelay")
+            .and_then(|s| s.parse().ok())
+            .map(tx_protection::clamp_ptt_delay_ms)
+            .unwrap_or(tx_protection::DEFAULT_PTT_DELAY_MS);
+        // Default 0, deliberately not Android's 2000 -- see
+        // `late_start_tolerance_ms`'s own doc comment.
+        let late_start_tolerance_ms = db
+            .get_config("lateStartTolerance")
+            .and_then(|s| s.parse().ok())
+            .map(tx_protection::clamp_late_start_tolerance_ms)
+            .unwrap_or(0);
 
         let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol(), decode_deep);
 
@@ -1218,6 +1260,8 @@ impl Engine {
             tune_gain,
             clear_on_band_mode_change,
             rx_latency_ms,
+            ptt_delay_ms,
+            late_start_tolerance_ms,
         }
     }
 
@@ -1445,7 +1489,7 @@ impl Engine {
                 slot_id,
                 self.txed_slot,
                 now.rem_euclid(self.mode.cycle_ms()),
-                self.mode.tx_latest_ms(),
+                self.effective_tx_latest_ms(),
             ) {
                 self.maybe_transmit(slot_id);
             }
@@ -1575,6 +1619,17 @@ impl Engine {
         self.publish_tx_state();
     }
 
+    /// `Mode::tx_latest_ms` (the configured PTT delay's eligibility window)
+    /// widened by the configured "Late-start Tolerance" -- the single value
+    /// `tx_slot_eligible`'s boundary check should use everywhere, so the
+    /// late-start clip math downstream (already correct, already tested --
+    /// see `late_start_tolerance_ms`'s own doc comment) is the only thing
+    /// that changes when this setting is non-zero, not the eligibility
+    /// logic itself.
+    fn effective_tx_latest_ms(&self) -> i64 {
+        self.mode.tx_latest_ms(self.ptt_delay_ms) + self.late_start_tolerance_ms
+    }
+
     /// Key up this slot's QSO message if we're armed, it's our turn, and the
     /// 12.64 s waveform still fits before the next boundary. Idempotent per slot
     /// (`txed_slot` guard), so calling it from both `handle_decoded` and a command
@@ -1600,7 +1655,7 @@ impl Engine {
             slot_id,
             self.txed_slot,
             self.now().rem_euclid(self.mode.cycle_ms()),
-            self.mode.tx_latest_ms(),
+            self.effective_tx_latest_ms(),
         ) {
             return;
         }
@@ -1782,7 +1837,7 @@ impl Engine {
 
         // Key up, let the rig's T/R relay settle, then start clocking samples.
         self.set_ptt(true);
-        std::thread::sleep(Duration::from_millis(PTT_DELAY_MS));
+        std::thread::sleep(Duration::from_millis(self.ptt_delay_ms as u64));
 
         // Clip leading audio only if we'd overrun the cycle (AGENTS.md gotcha:
         // ms_late = max(0, into_cycle - 2360), NOT into_cycle % 15000). Computed
@@ -1819,7 +1874,7 @@ impl Engine {
 
         // Key up, let the rig's T/R relay settle -- same as the audio path.
         self.set_ptt(true);
-        std::thread::sleep(Duration::from_millis(PTT_DELAY_MS));
+        std::thread::sleep(Duration::from_millis(self.ptt_delay_ms as u64));
 
         // Same lateness math as the audio path (AGENTS.md gotcha: ms_late =
         // max(0, into_cycle - audio_slack_ms), NOT into_cycle % cycle_ms), just
@@ -1871,7 +1926,7 @@ impl Engine {
             return;
         }
         self.set_ptt(true);
-        std::thread::sleep(Duration::from_millis(PTT_DELAY_MS));
+        std::thread::sleep(Duration::from_millis(self.ptt_delay_ms as u64));
         let tune_gain = if self.tune_level_independent { self.tune_gain } else { self.tx_gain };
         if self.tx_via_cat_tones {
             if let Some(rig) = self.rig.as_mut() {
@@ -2345,10 +2400,19 @@ impl Engine {
                 self.dec_rx = dec_rx;
             }
             EngineCommand::SetStation { call, grid } => {
+                // Persist the operator's full-precision grid (e.g. an 8-char
+                // extended square) for display/distance purposes -- matches
+                // Android's GeneralVariables.setMyMaidenheadGrid, which never
+                // truncates the stored value. Only the live FT8 exchange
+                // needs the 4-char locator (the protocol's fixed-width grid
+                // field), so qso.my_grid alone is truncated via grid4;
+                // on restart, QsoEngine::new re-derives the same truncation
+                // from this same full-precision config value.
+                let grid_full = grid.to_uppercase();
                 self.qso.my_call = call.to_uppercase();
-                self.qso.my_grid = util::grid4(&grid).to_uppercase();
+                self.qso.my_grid = util::grid4(&grid_full);
                 let _ = self.db.set_config("my_call", &self.qso.my_call);
-                let _ = self.db.set_config("my_grid", &self.qso.my_grid);
+                let _ = self.db.set_config("my_grid", &grid_full);
             }
             EngineCommand::SetBand(hz) => {
                 self.dial_hz = hz;
@@ -2465,6 +2529,14 @@ impl Engine {
                 self.rx_latency_ms = clamp_rx_latency_ms(ms);
                 let _ = self.db.set_config("rxLatencyMs", &self.rx_latency_ms.to_string());
             }
+            EngineCommand::SetPttDelayMs(ms) => {
+                self.ptt_delay_ms = tx_protection::clamp_ptt_delay_ms(ms);
+                let _ = self.db.set_config("pttDelay", &self.ptt_delay_ms.to_string());
+            }
+            EngineCommand::SetLateStartToleranceMs(ms) => {
+                self.late_start_tolerance_ms = tx_protection::clamp_late_start_tolerance_ms(ms);
+                let _ = self.db.set_config("lateStartTolerance", &self.late_start_tolerance_ms.to_string());
+            }
             EngineCommand::SetInputDevice(name) => {
                 self.input_device = name.clone();
                 let _ = self.db.set_config("input_device", name.as_deref().unwrap_or(""));
@@ -2540,7 +2612,9 @@ impl Engine {
                 // the `df` arrives on an untrusted UDP socket, so it must never
                 // rewrite the operator's persisted `base_freq` (only SetBaseFreq / the
                 // UI do that, and the saved offset survives a restart). The desktop
-                // UI's own "click to answer" sends df=0 (offset unchanged).
+                // UI's own QSO Sheet "Call" button sends df=0 (offset unchanged) when
+                // "Hold TX freq" is on (the default, matching every build before that
+                // setting existed), or the target's own decoded frequency when off.
                 self.apply_reply_df(args.delta_freq);
                 let msg = DecodedMessage {
                     call_from: args.call_from,
@@ -2691,7 +2765,8 @@ mod tests {
     use crate::audio::channel_select;
     use crate::db::Db;
     use crate::dsp::DecodedMessage;
-    use crate::mode::Mode;
+    use crate::qmx_cat_tones as cat_tones;
+    use crate::mode::{Mode, DEFAULT_PTT_DELAY_MS};
     use crate::rig::{RigBackend, QRPLABS_QMX_HAMLIB_MODEL};
     use std::sync::Arc;
     use std::time::Duration;
@@ -3209,7 +3284,7 @@ mod tests {
     #[test]
     fn tx_slot_eligible_enforces_active_parity_once_and_window() {
         use super::tx_slot_eligible;
-        let tx_latest_ms = Mode::Ft8.tx_latest_ms();
+        let tx_latest_ms = Mode::Ft8.tx_latest_ms(DEFAULT_PTT_DELAY_MS);
         // Inactive QSO never keys.
         assert!(!tx_slot_eligible(false, None, 10, -1, 0, tx_latest_ms));
         // Active, no parity lock, fresh slot, at the very top of the cycle → eligible.
@@ -3231,8 +3306,8 @@ mod tests {
         // FT4's TX window (2360ms) is a different, independently-computed value
         // from FT8's (2260ms) -- the gate must use exactly whichever one the
         // caller passes in, not a hard-coded FT8 assumption.
-        let ft4_latest = Mode::Ft4.tx_latest_ms();
-        assert_ne!(ft4_latest, Mode::Ft8.tx_latest_ms());
+        let ft4_latest = Mode::Ft4.tx_latest_ms(DEFAULT_PTT_DELAY_MS);
+        assert_ne!(ft4_latest, Mode::Ft8.tx_latest_ms(DEFAULT_PTT_DELAY_MS));
         assert!(tx_slot_eligible(true, None, 10, -1, ft4_latest, ft4_latest));
         assert!(!tx_slot_eligible(true, None, 10, -1, ft4_latest + 1, ft4_latest));
     }
@@ -3240,7 +3315,7 @@ mod tests {
     #[test]
     fn boundary_tx_keys_at_slot_top_only_after_this_slots_decode() {
         use super::boundary_tx_ready;
-        let tx_latest_ms = Mode::Ft8.tx_latest_ms();
+        let tx_latest_ms = Mode::Ft8.tx_latest_ms(DEFAULT_PTT_DELAY_MS);
         // Fast decode: this slot's decodes are already processed (awaiting=false), so a
         // reply computed in the previous cycle keys at the top of its slot. This is the
         // case the decode-arrival trigger used to miss — it fires mid-slot, past the
@@ -3261,7 +3336,7 @@ mod tests {
     #[test]
     fn boundary_tx_is_dormant_while_decoding_is_stopped() {
         use super::boundary_tx_ready;
-        let tx_latest_ms = Mode::Ft8.tx_latest_ms();
+        let tx_latest_ms = Mode::Ft8.tx_latest_ms(DEFAULT_PTT_DELAY_MS);
         // Regression for the StopDecode runaway-TX bug: after the operator stops
         // decoding, `pending_decodes` is reset to 0 (so the awaiting gate opens) but a
         // CQ/QSO left `active` keeps `qso.active` and `tx_parity` set. The per-tick
@@ -3335,6 +3410,101 @@ mod tests {
 
         engine.note_swr_reading(Some(9.0));
         assert!(!engine.swr_lockout);
+    }
+
+    #[test]
+    fn ptt_delay_and_late_start_tolerance_default_to_desktops_prior_behavior() {
+        // A fresh engine (no config row yet) must reproduce exactly the old
+        // hardcoded PTT_DELAY_MS=100 / "never transmit late" behavior -- a
+        // new install, or any install that never opens this new setting,
+        // must see zero timing change.
+        let engine = test_engine();
+        assert_eq!(engine.ptt_delay_ms, 100);
+        assert_eq!(engine.late_start_tolerance_ms, 0);
+        assert_eq!(engine.effective_tx_latest_ms(), Mode::Ft8.tx_latest_ms(100));
+    }
+
+    #[test]
+    fn set_ptt_delay_ms_clamps_persists_and_shrinks_the_tx_window() {
+        let mut engine = test_engine();
+        engine.handle(EngineCommand::SetPttDelayMs(190));
+        assert_eq!(engine.ptt_delay_ms, 190);
+        assert_eq!(engine.db.get_config("pttDelay").as_deref(), Some("190"));
+        // A longer PTT settle eats directly into the eligible TX window.
+        assert_eq!(engine.effective_tx_latest_ms(), Mode::Ft8.tx_latest_ms(190));
+
+        // Out-of-range values clamp rather than panic or silently wrap.
+        engine.handle(EngineCommand::SetPttDelayMs(-50));
+        assert_eq!(engine.ptt_delay_ms, 0);
+        engine.handle(EngineCommand::SetPttDelayMs(9000));
+        assert_eq!(engine.ptt_delay_ms, 190);
+    }
+
+    #[test]
+    fn set_late_start_tolerance_ms_clamps_persists_and_widens_the_tx_window() {
+        let mut engine = test_engine();
+        let before = engine.effective_tx_latest_ms();
+        engine.handle(EngineCommand::SetLateStartToleranceMs(2000));
+        assert_eq!(engine.late_start_tolerance_ms, 2000);
+        assert_eq!(engine.db.get_config("lateStartTolerance").as_deref(), Some("2000"));
+        assert_eq!(engine.effective_tx_latest_ms(), before + 2000);
+
+        engine.handle(EngineCommand::SetLateStartToleranceMs(-100));
+        assert_eq!(engine.late_start_tolerance_ms, 0);
+        engine.handle(EngineCommand::SetLateStartToleranceMs(9000));
+        assert_eq!(engine.late_start_tolerance_ms, 4000);
+    }
+
+    #[test]
+    fn late_start_tolerance_lets_the_already_existing_clip_math_engage() {
+        // With tolerance=0 (today's behavior), a start past tx_latest_ms is
+        // simply refused -- never clipped. With a real tolerance configured,
+        // the SAME already-tested clip math (symbols_to_skip) now correctly
+        // computes a non-zero skip for a start that tolerance just let
+        // through, proving the two mechanisms compose correctly rather than
+        // needing a parallel clip implementation.
+        use super::tx_slot_eligible;
+        let mut engine = test_engine();
+        // Past audio_slack_ms itself (not just past tx_latest_ms) by more
+        // than one whole FT8 symbol period (160ms), so a real *whole*
+        // symbol must be clipped once this becomes eligible -- tx_latest_ms
+        // already sits ptt_delay_ms (100ms) *before* audio_slack_ms, so
+        // merely creeping past tx_latest_ms alone wouldn't yet cross into
+        // real lateness, and less than one symbol period of lateness would
+        // round down to a zero-symbol skip (symbols_to_skip truncates).
+        let just_past_audio_slack = engine.mode.audio_slack_ms() + 200;
+
+        // Not eligible at all under today's default (tolerance 0).
+        assert!(!tx_slot_eligible(true, None, 0, -1, just_past_audio_slack, engine.effective_tx_latest_ms()));
+
+        engine.handle(EngineCommand::SetLateStartToleranceMs(350));
+        // Now eligible -- within the widened window (100ms ptt-delay gap + 350ms tolerance covers the 200ms overage).
+        assert!(tx_slot_eligible(true, None, 0, -1, just_past_audio_slack, engine.effective_tx_latest_ms()));
+
+        // The lateness past audio_slack_ms (not past tx_latest_ms) is what
+        // the existing, already-tested clip math consumes.
+        let ms_late = (just_past_audio_slack - engine.mode.audio_slack_ms()).max(0);
+        assert!(ms_late > 0, "a late-but-now-eligible start must produce real lateness to clip");
+        let skip = cat_tones::symbols_to_skip(ms_late, engine.mode.symbol_period(), 79);
+        assert!(skip > 0, "that lateness must translate into a real leading-symbol skip");
+    }
+
+    #[test]
+    fn set_station_keeps_the_full_precision_grid_in_config_but_truncates_for_tx() {
+        // Real user-reported bug: entering an extended-precision grid (e.g.
+        // 8-char "EM71HF21") and saving it kept showing the truncated 4-char
+        // value back in Settings, because the persisted "my_grid" config
+        // value was being overwritten with the already-truncated locator.
+        // Matches Android's GeneralVariables: the stored grid is never
+        // truncated, only a dedicated accessor truncates it for the FT8
+        // exchange (which needs the protocol's fixed 4-char grid field).
+        let mut engine = test_engine();
+        engine.handle(EngineCommand::SetStation {
+            call: "AI5II".to_string(),
+            grid: "em71hf21".to_string(),
+        });
+        assert_eq!(engine.db.get_config("my_grid"), Some("EM71HF21".to_string()));
+        assert_eq!(engine.qso.my_grid, "EM71");
     }
 
     #[test]

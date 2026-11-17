@@ -60,6 +60,67 @@ pub fn clamp_tune_max_on_seconds(seconds: i64) -> i64 {
     }
 }
 
+// --- PTT Delay -----------------------------------------------------------
+
+/// Default/max for "PTT Delay" (ms) -- Android's own `pttDelay`
+/// default/range (0-190ms, a 20-step/10ms-increment slider in its UI).
+/// Feeds both the real PTT-settle sleep (`Engine`'s own `PTT_DELAY_MS`
+/// sleep sites) and `Mode::tx_latest_ms`'s eligibility window -- the two
+/// must never disagree, see that function's doc comment.
+pub const DEFAULT_PTT_DELAY_MS: i64 = crate::mode::DEFAULT_PTT_DELAY_MS;
+pub const MAX_PTT_DELAY_MS: i64 = 190;
+
+/// Clamp a configured PTT delay to `0..=MAX_PTT_DELAY_MS`. Unlike Tune's
+/// max-on timeout, `0` is a real, legitimate value here (a QSK rig with no
+/// settle time at all) -- it is not treated as "unset".
+pub fn clamp_ptt_delay_ms(ms: i64) -> i64 {
+    ms.clamp(0, MAX_PTT_DELAY_MS)
+}
+
+// --- Late-start Tolerance --------------------------------------------------
+
+/// Max for "Late-start Tolerance" (ms) -- Android's own
+/// `MAX_LATE_START_TOLERANCE_MS`. Android's *default* is 2000ms; desktop's
+/// own default is deliberately `0`, not ported alongside the range --
+/// `tx_slot_eligible`'s existing behavior (refuse to start at all once too
+/// late, never transmit a clipped waveform) is strictly safer than
+/// Android's "clip some leading audio and go anyway", and every desktop
+/// install has only ever had that safer behavior. Introducing this knob
+/// must not silently start clipping real transmissions for existing users
+/// -- same reasoning as `autoCqAfterQso` keeping desktop's own prior
+/// default instead of adopting Android's.
+pub const MAX_LATE_START_TOLERANCE_MS: i64 = 4000;
+
+/// Clamp a configured late-start tolerance to `0..=MAX_LATE_START_TOLERANCE_MS`.
+/// `0` is the real, safe default (see this section's own doc comment), not
+/// treated as "unset".
+pub fn clamp_late_start_tolerance_ms(ms: i64) -> i64 {
+    ms.clamp(0, MAX_LATE_START_TOLERANCE_MS)
+}
+
+#[cfg(test)]
+mod ptt_and_late_start_tests {
+    use super::*;
+
+    #[test]
+    fn ptt_delay_clamps_into_range() {
+        assert_eq!(clamp_ptt_delay_ms(-50), 0);
+        assert_eq!(clamp_ptt_delay_ms(0), 0);
+        assert_eq!(clamp_ptt_delay_ms(100), 100);
+        assert_eq!(clamp_ptt_delay_ms(190), 190);
+        assert_eq!(clamp_ptt_delay_ms(500), 190);
+    }
+
+    #[test]
+    fn late_start_tolerance_clamps_into_range_and_defaults_to_zero() {
+        assert_eq!(clamp_late_start_tolerance_ms(-100), 0);
+        assert_eq!(clamp_late_start_tolerance_ms(0), 0);
+        assert_eq!(clamp_late_start_tolerance_ms(2000), 2000);
+        assert_eq!(clamp_late_start_tolerance_ms(4000), 4000);
+        assert_eq!(clamp_late_start_tolerance_ms(9000), 4000);
+    }
+}
+
 /// True once a tune session started `elapsed_ms` ago should be force-stopped.
 pub fn tune_expired(elapsed_ms: i64, max_on_seconds: i64) -> bool {
     elapsed_ms >= max_on_seconds * 1000

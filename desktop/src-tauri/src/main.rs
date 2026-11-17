@@ -249,6 +249,16 @@ fn set_rx_latency_ms(state: State<AppState>, ms: i64) {
 }
 
 #[tauri::command]
+fn set_ptt_delay_ms(state: State<AppState>, ms: i64) {
+    state.engine.send(EngineCommand::SetPttDelayMs(ms));
+}
+
+#[tauri::command]
+fn set_late_start_tolerance_ms(state: State<AppState>, ms: i64) {
+    state.engine.send(EngineCommand::SetLateStartToleranceMs(ms));
+}
+
+#[tauri::command]
 fn refresh_status(state: State<AppState>) {
     state.engine.send(EngineCommand::RefreshStatus);
 }
@@ -319,6 +329,12 @@ fn free_text(state: State<AppState>, text: String) {
 #[tauri::command]
 fn list_log(state: State<AppState>, limit: i64, offset: i64) -> Vec<QsoRecord> {
     state.db.list_qsos(limit, offset)
+}
+
+/// Feeds the QSO Sheet's "Worked before" card -- see `Db::prior_qsos`.
+#[tauri::command]
+fn prior_qsos(state: State<AppState>, callsign: String) -> Vec<QsoRecord> {
+    state.db.prior_qsos(&callsign)
 }
 
 /// Server-side search/filter for the Logbook tab. `filter` is one of
@@ -1196,6 +1212,8 @@ fn main() {
             set_auto_cq_after_qso,
             set_clear_on_band_mode_change,
             set_rx_latency_ms,
+            set_ptt_delay_ms,
+            set_late_start_tolerance_ms,
             refresh_status,
             resync_time,
             set_clock_offset,
@@ -1209,6 +1227,7 @@ fn main() {
             stop_tune,
             free_text,
             list_log,
+            prior_qsos,
             search_log,
             log_count,
             worked_calls,

@@ -465,6 +465,35 @@ select option {
 .decode-empty-title { color: var(--muted); font-size: 16px; font-weight: 600; }
 .decode-empty-body { color: var(--text-faint); font-size: 13px; line-height: 18px; max-width: 360px; }
 
+/* Docked "Calling CQ" / active-QSO panel (see App.tsx's ActiveQsoPanelView,
+   activeQsoPanel.ts) -- replaces the decode list/empty-state while a CQ or
+   QSO is actually running. */
+.qso-panel { display: flex; flex-direction: column; height: 100%; padding: 10px 2px; }
+.qso-panel-header { display: flex; align-items: center; gap: 8px; padding: 0 8px 8px; }
+.qso-panel-title { color: var(--accent); font-size: 13px; font-weight: 700; }
+.qso-panel-power { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
+.qso-panel-log {
+  flex: 1; overflow-y: auto; border-radius: var(--radius-sm); background: var(--bg);
+  display: flex; flex-direction: column; gap: 2px; padding: 4px 0;
+}
+.qso-panel-waiting {
+  color: var(--text-faint); font-size: 11px; text-align: center; padding: 16px 0;
+}
+.qso-panel-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 13px;
+}
+.qso-panel-row.busy { opacity: 0.6; }
+.qso-panel-row-dir {
+  flex: none; font-size: 10px; font-weight: 700; border-radius: var(--radius-xs);
+  padding: 1px 4px;
+}
+.qso-panel-row-dir.tx { color: var(--accent); background: var(--accent-soft); }
+.qso-panel-row-dir.rx { color: var(--signal); background: var(--signal-soft); }
+.qso-panel-row-dir.busy { color: var(--muted); background: var(--panel-2); }
+.qso-panel-row-time { flex: none; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.qso-panel-row-text { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qso-panel-row-snr { flex: none; color: var(--signal); font-variant-numeric: tabular-nums; }
+
 /* The slot-boundary divider, with the UTC time/station-count label
    superimposed on the center of the bold line itself (rather than a
    separate border-top row above a text row below it) -- saves a line of
@@ -956,6 +985,90 @@ select option {
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .modal .check { display: flex; align-items: center; gap: 6px; }
 .modal .check input { width: auto; }
+
+/* QSO Sheet (see App.tsx's QsoSheetDialog, qsoSheet.ts) -- the "tap a
+   decode row" station-detail dialog with an explicit Call button. */
+.qso-sheet { width: 420px; display: flex; flex-direction: column; gap: 12px; }
+.qso-sheet-header { display: flex; align-items: flex-start; gap: 12px; }
+.qso-sheet-avatar {
+  width: 44px; height: 44px; border-radius: 50%; background: var(--panel-3);
+  display: flex; align-items: center; justify-content: center; flex: none;
+  color: var(--accent); font-weight: 700; font-size: 14px;
+}
+.qso-sheet-header-text { flex: 1; min-width: 0; }
+.qso-sheet-callrow { display: flex; align-items: center; gap: 8px; }
+.qso-sheet-call { font-size: 18px; font-weight: 700; color: var(--text); }
+.qso-sheet-location {
+  display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; margin-top: 2px;
+}
+.qso-sheet-qrz-link {
+  display: inline-block; margin-top: 4px; color: var(--signal); font-size: 11px;
+  font-weight: 600; text-decoration: underline; cursor: pointer;
+}
+.qso-sheet-stats { display: flex; gap: 8px; }
+.qso-stat-card {
+  flex: 1; background: var(--panel-2); border-radius: var(--radius-sm);
+  padding: 8px 4px; display: flex; flex-direction: column; align-items: center; text-align: center;
+}
+.qso-stat-label { color: var(--text-faint); font-size: 9px; font-weight: 600; letter-spacing: 0.04em; }
+.qso-stat-value { color: var(--text); font-weight: 700; font-size: 14px; margin-top: 3px; white-space: nowrap; }
+.qso-stat-subtitle { color: var(--text-faint); font-size: 9px; margin-top: 2px; }
+.qso-sheet-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.qso-sheet-row-label { color: var(--text-faint); font-weight: 500; }
+.qso-sheet-row-value { color: var(--text); font-weight: 600; }
+.qso-sheet-worked-before-title { color: var(--text-faint); font-size: 10px; font-weight: 500; display: flex; gap: 8px; align-items: center; }
+.qso-sheet-worked-before-count { color: var(--ok); font-weight: 700; font-size: 13px; }
+.qso-sheet-worked-before-last { color: var(--text); font-weight: 600; font-size: 13px; margin-top: 4px; }
+.qso-sheet-worked-before-bands { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.qso-sheet-path-map-card { padding: 0; overflow: hidden; }
+.qso-sheet-path-map { display: block; width: 100%; height: 150px; }
+.qso-sheet-sequence { display: flex; flex-direction: column; }
+.qso-sheet-sequence-header { color: var(--text-faint); font-size: 10px; font-weight: 600; letter-spacing: 0.1em; margin-bottom: 8px; }
+.qso-step { display: flex; align-items: flex-start; padding: 5px 0; }
+.qso-step-indicator { display: flex; flex-direction: column; align-items: center; width: 24px; flex: none; }
+.qso-step-circle {
+  width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; color: var(--text-faint); background: var(--panel-3); border: 1px solid var(--border);
+}
+.qso-step.complete .qso-step-circle { color: var(--ok); background: rgba(74,222,128,0.18); border-color: rgba(74,222,128,0.5); }
+.qso-step.current .qso-step-circle { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.qso-step-circle.pulse { animation: qso-step-pulse 0.9s ease-in-out infinite alternate; }
+@keyframes qso-step-pulse { from { box-shadow: 0 0 0 0 var(--accent-soft); } to { box-shadow: 0 0 0 4px var(--accent-soft); } }
+.qso-step-line { width: 1px; height: 12px; background: var(--border); margin-top: 2px; }
+.qso-step.complete .qso-step-line { background: rgba(74,222,128,0.3); }
+.qso-step-body { flex: 1; padding-left: 10px; }
+.qso-step-label-row { display: flex; align-items: center; gap: 6px; }
+.qso-step-label { font-size: 12px; font-weight: 600; color: var(--text-faint); }
+.qso-step.complete .qso-step-label, .qso-step.current .qso-step-label { color: var(--text); }
+.qso-step-dir { font-size: 9px; font-weight: 700; border-radius: 3px; padding: 1px 4px; color: var(--text-faint); }
+.qso-step-dir.tx { color: var(--tx); background: rgba(239,68,68,0.12); }
+.qso-step-dir.rx { color: var(--signal); background: var(--signal-soft); }
+.qso-step-preview { font-size: 10px; color: var(--text-faint); margin-top: 1px; }
+.qso-sheet-tx-banner {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--radius-sm);
+  background: var(--accent-soft); border: 1px solid var(--border-amber);
+}
+.qso-sheet-tx-banner.now { background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.3); }
+.qso-sheet-tx-banner-label {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.04em; color: var(--accent);
+  background: var(--accent-soft); border-radius: 3px; padding: 2px 5px;
+}
+.qso-sheet-tx-banner.now .qso-sheet-tx-banner-label { color: var(--tx); background: rgba(239,68,68,0.15); }
+.qso-sheet-tx-banner-text { font-size: 13px; font-weight: 600; color: var(--text); }
+.qso-sheet-live-status {
+  padding: 8px 12px; border-radius: var(--radius-sm); background: var(--elev);
+  color: var(--accent); font-weight: 600; font-size: 12px;
+}
+.qso-sheet-complete {
+  display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px;
+  border-radius: var(--radius-sm); background: rgba(74,222,128,0.1); color: var(--ok); font-weight: 600;
+}
+.qso-sheet-call-btn {
+  height: 44px; border-radius: var(--radius-md); border: none; background: var(--accent);
+  color: #07090f; font-weight: 700; font-size: 14px; cursor: pointer;
+}
+.qso-sheet-call-btn:disabled { opacity: 0.5; cursor: default; }
+.qso-sheet-call-btn:not(:disabled):hover { filter: brightness(1.08); }
 
 .import-dialog h3 { text-transform: uppercase; letter-spacing: 0.5px; }
 .import-dialog .bar {

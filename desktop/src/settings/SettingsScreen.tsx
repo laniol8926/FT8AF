@@ -52,6 +52,8 @@ export function SettingsScreen(props: {
   onHuntAvoidPileups: (v: boolean) => void;
   huntMinSnr: number | null;
   onHuntMinSnr: (v: number | null) => void;
+  holdTxFreq: boolean;
+  onHoldTxFreq: (v: boolean) => void;
   inputGain: number;
   onInputGain: (v: number) => void;
   txGain: number;
@@ -93,12 +95,15 @@ export function SettingsScreen(props: {
   onAlertOnQsoComplete: (v: boolean) => void;
   decodeDeep: boolean;
   onDecodeDeep: (v: boolean) => void;
+  distanceMiles: boolean;
+  onDistanceMiles: (v: boolean) => void;
 }) {
   const {
     onStatus, clock, onNtpDisciplineChange, onSettingsSaved, onRigLabel, onBandsChanged, operatingMode, rig,
     bands, dialHz, onBand, onMode, showVolumeSlider, onShowVolumeSlider,
     huntEnabled, onHuntEnabled,
     huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
+    holdTxFreq, onHoldTxFreq,
     inputGain, onInputGain, txGain, onTxGain, displayHz, onDisplayHz,
     onUpdateGridTable, gridSeedBusy, onAudioBandConfigChanged,
     highlightConfig, onHighlightConfig, workedMode, onWorkedMode, workedScope, onWorkedScope,
@@ -108,6 +113,7 @@ export function SettingsScreen(props: {
     watchCallsigns, onWatchCallsigns, alertNewDxcc, onAlertNewDxcc, alertNewState, onAlertNewState,
     alertOnCqReply, onAlertOnCqReply, alertOnQsoComplete, onAlertOnQsoComplete,
     decodeDeep, onDecodeDeep,
+    distanceMiles, onDistanceMiles,
   } = props;
 
   const [category, setCategory] = useState<Category | null>(null);
@@ -243,6 +249,8 @@ export function SettingsScreen(props: {
           onAlertOnCqReply={onAlertOnCqReply}
           alertOnQsoComplete={alertOnQsoComplete}
           onAlertOnQsoComplete={onAlertOnQsoComplete}
+          distanceMiles={distanceMiles}
+          onDistanceMiles={onDistanceMiles}
         />
       </SettingsDetailScaffold>
     );
@@ -276,6 +284,8 @@ export function SettingsScreen(props: {
           onHuntAvoidPileups={onHuntAvoidPileups}
           huntMinSnr={huntMinSnr}
           onHuntMinSnr={onHuntMinSnr}
+          holdTxFreq={holdTxFreq}
+          onHoldTxFreq={onHoldTxFreq}
         />
       </SettingsDetailScaffold>
     );

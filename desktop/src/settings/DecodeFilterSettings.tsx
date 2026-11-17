@@ -80,6 +80,8 @@ export function DecodeFilterSettings({
   onAlertOnCqReply,
   alertOnQsoComplete,
   onAlertOnQsoComplete,
+  distanceMiles,
+  onDistanceMiles,
 }: {
   highlightConfig: HighlightConfig;
   onHighlightConfig: (c: HighlightConfig) => void;
@@ -111,6 +113,8 @@ export function DecodeFilterSettings({
   onAlertOnCqReply: (v: boolean) => void;
   alertOnQsoComplete: boolean;
   onAlertOnQsoComplete: (v: boolean) => void;
+  distanceMiles: boolean;
+  onDistanceMiles: (v: boolean) => void;
 }) {
   const [openDialog, setOpenDialog] = useState<OpenDialog>(null);
 
@@ -238,7 +242,7 @@ export function DecodeFilterSettings({
               )}
             </>
           )}
-          <SettingsRow label="Distance in Miles" description="Show distances in miles instead of kilometers" toggle={false} onToggleChange={() => {}} disabled />
+          <SettingsRow label="Distance in Miles" description="Show distances in miles instead of kilometers" toggle={distanceMiles} onToggleChange={onDistanceMiles} />
           <SettingsRow label="Show beam heading" description="Add the great-circle bearing to each decode row, for pointing a directional antenna" toggle={false} onToggleChange={() => {}} disabled />
         </div>
       </div>
