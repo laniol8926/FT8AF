@@ -378,6 +378,23 @@ export default function App() {
   // per transmission, not de-duplicated by text).
   const isTransmitting = txState?.transmitting ?? false;
   const txMessageNow = txState?.message ?? "";
+
+  // Whether this TX run has keyed up at least once yet -- gates the docked
+  // panel for a BARE Call CQ only (see panelShouldShow below). Matches
+  // Android's own `keyedThisRun`/`LaunchedEffect(txActivated, keyedNow)`:
+  // pressing Call CQ with nobody targeted yet leaves the decode list up
+  // until the first over actually transmits, so there's no empty "Calling
+  // CQ / Waiting for messages" panel. Answering a station is unaffected --
+  // that already has a target the instant it's clicked (see
+  // panelShouldShow), same as Android's `txToCallsign?.haveTargetCallsign()`
+  // half of the same check.
+  const [keyedThisRun, setKeyedThisRun] = useState(false);
+  useEffect(() => {
+    if (!txActive) setKeyedThisRun(false);
+    else if (isTransmitting) setKeyedThisRun(true);
+  }, [txActive, isTransmitting]);
+  const panelShouldShow = txActive && (keyedThisRun || logTarget != null);
+
   useEffect(() => {
     const decision = decideTxLog(
       wasTransmittingRef.current,
@@ -1322,7 +1339,7 @@ export default function App() {
             onDenoise={onDenoise}
             showMessages={showMessages}
             onToggleMessages={onToggleMessages}
-            qsoActive={txActive}
+            qsoActive={panelShouldShow}
             qsoLog={qsoLogEntries}
             qsoTarget={logTarget}
             qsoTransmitting={isTransmitting}
