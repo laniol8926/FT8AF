@@ -326,6 +326,23 @@ export default function App() {
   const [txFreq, setTxFreq] = useState(1500);
   const [txGain, setTxGain] = useState(90); // TX level as a percentage (0–100)
   const [inputGain, setInputGain] = useState(100); // RX input gain as a percentage (0–100)
+  // TOPBAR tune-level control (next to the sync display): real gap, found
+  // live -- riding an FT-857D's ALC, walking a manual tuner, or letting an
+  // ATU cycle all need the drive level adjustable *while Tune's carrier is
+  // already keyed*, not only in Settings before starting (the user: "on the
+  // QMX it is always set to 100% but for my FT-857D it is an ALC adjustment
+  // so I don't over drive the transmitter"). Mirrors Settings -> Transmission's
+  // own tuneLevelIndependent/tuneLevel (read fresh here too, same config
+  // keys, rather than lifted -- that settings page remounts fresh every time
+  // the operator navigates into it, so there's no staleness risk in practice).
+  // engine.rs's apply_live_tune_gain is what actually makes a change here
+  // reach an already-running Tune carrier instantly.
+  const [tuneLevelIndependent, setTuneLevelIndependent] = useState(false);
+  const [tuneGainPct, setTuneGainPct] = useState(50);
+  useEffect(() => {
+    api.getConfig("tuneLevelIndependent").then((v) => setTuneLevelIndependent(v === "1"));
+    api.getConfig("tuneLevel").then((v) => setTuneGainPct(v ? Math.round(parseFloat(v) * 100) || 50 : 50));
+  }, []);
   const [rigLabel, setRigLabel] = useState(""); // optional display-name override
   const [bands, setBands] = useState<BandInfo[]>([]);
   const [dialHz, setDialHz] = useState<number>(14074000);
@@ -827,11 +844,15 @@ export default function App() {
   // updates immediately (setTxGain/setInputGain, not debounced) for smooth
   // visual feedback; only the backend call waits for a short pause in
   // dragging. Safe to delay for both: TX gain is only read when the *next*
-  // transmission starts (never applied to audio already playing), and RX
-  // gain landing ~120ms late has no practical effect either. This does change
-  // TX gain from "applied on the spot" to "applied after the drag settles" --
-  // deliberate, and invisible unless a slot boundary lands inside that window,
-  // in which case the previous level is used for one transmission.
+  // transmission starts (never applied to audio already playing -- the one
+  // deliberate exception is an already-running audio Tune, which reads a
+  // live gain every sample; still safe to debounce, since the operator is
+  // riding it by ear/meter over seconds, not depending on sub-120ms
+  // response), and RX gain landing ~120ms late has no practical effect
+  // either. This does change TX gain from "applied on the spot" to "applied
+  // after the drag settles" -- deliberate, and invisible unless a slot
+  // boundary lands inside that window, in which case the previous level is
+  // used for one transmission.
   // Held in refs so the debouncers survive re-renders (a fresh one per render
   // would never accumulate a burst), and cancelled on unmount so a drag still
   // in flight cannot fire IPC after teardown. See src/debounce.ts.
@@ -841,12 +862,16 @@ export default function App() {
   const debouncedSetRxGain = useRef(
     debounce((pct: number) => api.setRxGain(pct / 100), GAIN_DEBOUNCE_MS)
   ).current;
+  const debouncedSetTuneLevel = useRef(
+    debounce((pct: number) => api.setTuneLevel(pct / 100), GAIN_DEBOUNCE_MS)
+  ).current;
   useEffect(
     () => () => {
       debouncedSetTxGain.cancel();
       debouncedSetRxGain.cancel();
+      debouncedSetTuneLevel.cancel();
     },
-    [debouncedSetTxGain, debouncedSetRxGain]
+    [debouncedSetTxGain, debouncedSetRxGain, debouncedSetTuneLevel]
   );
 
 
@@ -1191,6 +1216,21 @@ export default function App() {
     debouncedSetRxGain(v);
   }
 
+  // The TopBar tune-level control (see tuneLevelIndependent's own doc
+  // comment): whichever value actually drives Tune right now -- tuneGainPct
+  // when the independent override is on, otherwise plain txGain -- mirroring
+  // engine.rs's own effective_tune_gain exactly, so the slider always shows
+  // and adjusts the same thing Tune is really using.
+  const tuneLevelPct = tuneLevelIndependent ? tuneGainPct : txGain;
+  function onTuneLevel(v: number) {
+    if (tuneLevelIndependent) {
+      setTuneGainPct(v);
+      debouncedSetTuneLevel(v);
+    } else {
+      onTxGain(v);
+    }
+  }
+
   // Settings -> Decode & Filters' persisted defaults -- applied ahead of the
   // manual pill filter below (both are real, independent filters, matching
   // Android: a Settings-level default plus a transient per-session pill).
@@ -1332,6 +1372,9 @@ export default function App() {
         }}
         onClearDecodes={() => setMessages([])}
         onRefresh={() => api.refreshStatus()}
+        tuneLevelPct={tuneLevelPct}
+        onTuneLevel={onTuneLevel}
+        tuneLevelIndependent={tuneLevelIndependent}
       />
       )}
       <div
@@ -2800,12 +2843,16 @@ function TopBar(props: {
   onCycleSortMode: () => void;
   onClearDecodes: () => void;
   onRefresh: () => void;
+  tuneLevelPct: number;
+  onTuneLevel: (v: number) => void;
+  tuneLevelIndependent: boolean;
 }) {
   const {
     cycle, bands, dialHz, onBand, operatingMode, onMode, myCall, myGrid, savedFreeText, onSaveFreeText,
     rig, clock, ntpDisciplineEnabled, rigLabel, txState, meter,
     onCq, onStop, onFreeText, onToggleTune, huntEnabled, onToggleHunt,
     sortMode, onCycleSortMode, onClearDecodes, onRefresh,
+    tuneLevelPct, onTuneLevel, tuneLevelIndependent,
   } = props;
   const [cqOptionsOpen, setCqOptionsOpen] = useState(false);
   const [cqModifier, setCqModifier] = useState(""); // "" = plain CQ, else e.g. "DX" or a custom 1-4 letter code
@@ -2936,7 +2983,20 @@ function TopBar(props: {
         <button className="icon-button" title="Clear the decode list" onClick={onClearDecodes}>🗑</button>
       </div>
 
-      <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} ntpDisciplineEnabled={ntpDisciplineEnabled} />
+      {/* Sync display shrunk to half width (user's own placement request) to
+          make room for the tune-level control beside it -- the one place in
+          the top bar that's reachable regardless of tab, so an operator
+          riding an ALC meter or walking a manual tuner through its range
+          never has to leave whatever they're watching to adjust it. */}
+      <div className="topbar-row sync-and-tune-row">
+        <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} ntpDisciplineEnabled={ntpDisciplineEnabled} />
+        <TuneLevelControl
+          pct={tuneLevelPct}
+          onChange={onTuneLevel}
+          independent={tuneLevelIndependent}
+          tuning={tuning}
+        />
+      </div>
     </div>
     {cqOptionsOpen && (
       <CqOptionsModal
@@ -3025,6 +3085,71 @@ function SyncRow({
         <div style={{ width: `${pct}%` }} />
       </div>
       <span className="seq muted">{secondsLeft != null ? `${secondsLeft}s` : "--"}</span>
+    </div>
+  );
+}
+
+/**
+ * TX/Tune level, always reachable next to the sync display (the user's own
+ * placement request) rather than buried in the "More" drawer -- real gap,
+ * found live: riding an FT-857D's ALC, walking a manual tuner, or letting
+ * an ATU cycle all need this adjustable *while Tune's carrier is already
+ * keyed*. Whichever value actually drives Tune (`independent` picks
+ * tuneGainPct vs. plain txGain -- see App's own `tuneLevelPct`/`onTuneLevel`)
+ * is what this shows and adjusts; engine.rs's `apply_live_tune_gain` is what
+ * makes a change here reach an already-running carrier instantly instead of
+ * only the next time Tune starts. The `•` and highlight appear only while
+ * actually tuning, so it's not mistaken for "always live" the rest of the
+ * time (e.g. during an FT8 over, which doesn't support live adjustment --
+ * see the TX-audio pipeline's own documented regression history for why
+ * that path isn't touched here).
+ */
+function TuneLevelControl({
+  pct, onChange, independent, tuning,
+}: {
+  pct: number;
+  onChange: (v: number) => void;
+  independent: boolean;
+  tuning: boolean;
+}) {
+  return (
+    <div
+      className={"tune-level-row" + (tuning ? " tune-level-live" : "")}
+      title={
+        independent
+          ? "Independent Tune level (Settings -> Transmission) -- live while Tune is running, e.g. to ride an ATU or walk a manual tuner"
+          : "TX level -- also drives Tune's carrier live (e.g. to ride ALC on a radio like the FT-857D). Turn on \"Independent tune level\" in Settings -> Transmission to use a separate value instead"
+      }
+    >
+      <span className="tune-level-label">
+        {independent ? "TUNE LVL" : "TX LVL"}
+        {tuning && <span className="tune-level-dot">•</span>}
+      </span>
+      <button
+        className="tx-volume-step"
+        aria-label="Decrease level"
+        onClick={() => onChange(Math.max(0, pct - 5))}
+      >
+        −
+      </button>
+      <input
+        type="range"
+        aria-label="TX/Tune level, percent"
+        min={0}
+        max={100}
+        step={1}
+        value={pct}
+        onChange={(e) => onChange(parseInt(e.target.value, 10))}
+        className="tx-volume-slider tune-level-slider"
+      />
+      <button
+        className="tx-volume-step"
+        aria-label="Increase level"
+        onClick={() => onChange(Math.min(100, pct + 5))}
+      >
+        +
+      </button>
+      <span className="tx-volume-value">{pct}%</span>
     </div>
   );
 }

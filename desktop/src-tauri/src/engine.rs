@@ -71,6 +71,15 @@ fn clamp_tx_gain(g: f32) -> f32 {
     g.clamp(0.0, 1.0)
 }
 
+/// Which gain actually drives Tune right now: the independent `tune_gain`
+/// when that override is on, otherwise the normal `tx_gain` -- the same
+/// choice `start_tune` makes when first keying, and `apply_live_tune_gain`
+/// makes again on every live adjustment, so an already-running carrier
+/// always tracks whichever slider the operator is actually on.
+fn effective_tune_gain(tune_level_independent: bool, tune_gain: f32, tx_gain: f32) -> f32 {
+    if tune_level_independent { tune_gain } else { tx_gain }
+}
+
 // Default RX input gain: unity (no change) -- a fresh install shouldn't
 // alter whatever level the operator's soundcard/interface already provides.
 const DEFAULT_RX_GAIN: f32 = 1.0;
@@ -796,9 +805,10 @@ struct CatToneTx {
 /// tuning — no FT8 message, no auto-release). One or the other depending on
 /// [`Engine::tx_via_cat_tones`], same split as a normal over.
 enum TuneHandle {
-    /// Looping steady-tone cpal stream; dropping it halts the carrier. Never
-    /// read -- held purely for this `Drop` side effect, hence `allow(dead_code)`.
-    Audio(#[allow(dead_code)] output::TunePlayback),
+    /// Looping steady-tone cpal stream; dropping it halts the carrier.
+    /// `apply_live_tune_gain` reads it to push a live TX-level change into
+    /// the already-running carrier (see that method's own doc comment).
+    Audio(output::TunePlayback),
     /// A single CAT `TA` command already sent; nothing more to do until
     /// key-up (`TA0;`), unlike a normal CAT-tone over's per-symbol clock.
     Cat,
@@ -1995,7 +2005,7 @@ impl Engine {
         }
         self.set_ptt(true);
         std::thread::sleep(Duration::from_millis(self.ptt_delay_ms as u64));
-        let tune_gain = if self.tune_level_independent { self.tune_gain } else { self.tx_gain };
+        let tune_gain = effective_tune_gain(self.tune_level_independent, self.tune_gain, self.tx_gain);
         if self.tx_via_cat_tones {
             if let Some(rig) = self.rig.as_mut() {
                 if let Err(e) = rig.send_raw_cat(&cat_tones::ta_command(self.tx_audio_hz as f64)) {
@@ -2017,6 +2027,23 @@ impl Engine {
         }
         self.tune_started_at = Some(Instant::now());
         self.publish_tx_state();
+    }
+
+    /// Push the operator's current TX level to an already-running audio Tune
+    /// (a no-op if Tune isn't active, or is active via CAT tones -- the QMX's
+    /// CAT-tone drive has no analog "volume" to adjust, confirmed by the
+    /// operator: "on the QMX it is always set to 100%"). Real gap, found
+    /// live: riding an FT-857D's ALC, walking a manual tuner, or letting an
+    /// ATU cycle all need the level adjustable *while the carrier is already
+    /// keyed* -- stopping Tune to change a Settings value and starting it
+    /// again would drop the carrier mid-cycle. Mirrors `start_tune`'s own
+    /// `tune_gain` selection exactly (independent tune level vs. the normal
+    /// TX gain), so whichever one the operator is actually adjusting is the
+    /// one that reaches the rig, regardless of which slider they're on.
+    fn apply_live_tune_gain(&mut self) {
+        if let Some(TuneHandle::Audio(tp)) = &self.tx_tune {
+            tp.set_gain(effective_tune_gain(self.tune_level_independent, self.tune_gain, self.tx_gain));
+        }
     }
 
     /// Send any CAT-tone symbols whose scheduled time has arrived, and finish
@@ -2519,6 +2546,9 @@ impl Engine {
             EngineCommand::SetTxGain(g) => {
                 self.tx_gain = clamp_tx_gain(g);
                 let _ = self.db.set_config("tx_gain", &self.tx_gain.to_string());
+                // Live while actively tuning, same reasoning as SetTuneLevel
+                // below -- see apply_live_tune_gain's own doc comment.
+                self.apply_live_tune_gain();
             }
             EngineCommand::SetRxGain(g) => {
                 self.rx_gain = clamp_rx_gain(g);
@@ -2584,10 +2614,16 @@ impl Engine {
             EngineCommand::SetTuneLevelIndependent(independent) => {
                 self.tune_level_independent = independent;
                 let _ = self.db.set_config("tuneLevelIndependent", if independent { "1" } else { "0" });
+                // Flipping this switches which value is actually driving an
+                // already-running Tune -- re-apply right away so the audio
+                // doesn't silently keep using whichever one was active before
+                // the toggle, until the operator happens to nudge a slider.
+                self.apply_live_tune_gain();
             }
             EngineCommand::SetTuneLevel(gain) => {
                 self.tune_gain = clamp_tx_gain(gain);
                 let _ = self.db.set_config("tuneLevel", &self.tune_gain.to_string());
+                self.apply_live_tune_gain();
             }
             EngineCommand::SetTxWatchdog(limit) => {
                 self.qso.no_reply_limit = limit;
@@ -2840,7 +2876,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_rx_gain, clamp_tx_gain, format_watts, reply_tx_audio_hz, rms_dbfs,
+        clamp_rx_gain, clamp_tx_gain, effective_tune_gain, format_watts, reply_tx_audio_hz, rms_dbfs,
         should_default_qmx_cat_tones_on, should_refresh_ptt, resolve_tx_audio_channel,
         waterfall_row_due, wf_boundary_row, CatToneTx, Engine, EngineCommand, EngineEvent, TuneHandle, CLIP_PEAK,
         DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ,
@@ -3252,6 +3288,26 @@ mod tests {
             assert_eq!(clamp_tx_gain(bad), DEFAULT_TX_GAIN);
             assert_eq!(clamp_rx_gain(bad), DEFAULT_RX_GAIN);
         }
+    }
+
+    #[test]
+    fn effective_tune_gain_follows_the_independent_toggle() {
+        assert_eq!(effective_tune_gain(false, 0.3, 0.9), 0.9); // normal TX gain drives Tune
+        assert_eq!(effective_tune_gain(true, 0.3, 0.9), 0.3); // independent override drives Tune
+    }
+
+    #[test]
+    fn apply_live_tune_gain_is_a_no_op_without_an_audio_tune_running() {
+        // Real gap, found live: riding an FT-857D's ALC, walking a manual
+        // tuner, or letting an ATU cycle all need the TX level adjustable
+        // *while Tune's carrier is already keyed* -- this just confirms the
+        // engine-side wiring doesn't panic/misfire when there's nothing to
+        // push the gain into yet (idle, or a CAT-tone tune, which has no
+        // analog level to adjust at all).
+        let mut engine = test_engine();
+        engine.apply_live_tune_gain(); // tx_tune is None
+        engine.tx_tune = Some(TuneHandle::Cat);
+        engine.apply_live_tune_gain(); // CAT tones: no-op, not a crash
     }
 
     #[test]

@@ -19,7 +19,7 @@
 //! just a looping steady tone, built and started in one call, stopped by
 //! dropping the handle.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -253,17 +253,40 @@ where
 /// dropping a [`PreparedTx`] does). No `is_done`/`abort`/timeout here --
 /// unlike a normal over there's nothing to finish or get stuck on; the
 /// operator (or the engine's `finalize_tx`) decides when to stop.
+///
+/// Gain is a live `Arc<AtomicU32>` (an f32's bits), read by the cpal callback
+/// on every sample -- unlike [`PreparedTx`]'s FT8 waveform, which bakes its
+/// gain into the buffer once and is never touched again. Real gap, found
+/// live: a Tune carrier is held for as long as it takes to ride an ATU or a
+/// radio's ALC (e.g. an FT-857D, where TX audio level *is* the drive level)
+/// or walk a manual tuner through its range -- all three need the level
+/// adjustable while the carrier is already keyed, not "stop Tune, change a
+/// setting, start Tune again," which would drop the carrier and restart
+/// whatever the ATU/tuner was mid-cycle on. [`set_gain`](Self::set_gain)
+/// updates it from the engine thread; [`build_tune_output`]'s callback reads
+/// it fresh every sample, so a drag takes effect essentially instantly.
 pub struct TunePlayback {
     _stream: cpal::Stream,
+    gain: Arc<AtomicU32>,
+}
+
+impl TunePlayback {
+    /// Change the live TX level while this Tune is still keyed. Clamped the
+    /// same as the FT8 path's gain (`[0.0, 1.0]`) -- see `apply_gain_and_clip`'s
+    /// doc comment for why the callback still clips every sample regardless.
+    pub fn set_gain(&self, gain: f32) {
+        self.gain.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
 }
 
 /// Build and immediately start a continuous steady-tone output stream at
 /// `tone_hz`, for antenna tuning (no FT8 message, no auto-release).
-/// `gain`/`channel` mirror [`prepare`]'s. Synthesized directly at
-/// the device's own sample rate -- no resampling, unlike the FT8 waveform
-/// path, since there's no fixed-rate source to match -- and trimmed to a
-/// whole number of tone cycles so the loop point has no phase discontinuity
-/// (an audible click every wrap otherwise).
+/// `gain`/`channel` mirror [`prepare`]'s -- `gain` is just the *initial*
+/// value here, live-adjustable afterward via [`TunePlayback::set_gain`].
+/// Synthesized directly at the device's own sample rate -- no resampling,
+/// unlike the FT8 waveform path, since there's no fixed-rate source to
+/// match -- and trimmed to a whole number of tone cycles so the loop point
+/// has no phase discontinuity (an audible click every wrap otherwise).
 pub fn prepare_tune(
     device_name: Option<&str>,
     tone_hz: f32,
@@ -278,26 +301,29 @@ pub fn prepare_tune(
     let channels = config.channels as usize;
     let device_rate = config.sample_rate.0;
 
-    let mut data = tune_loop_buffer(tone_hz.max(1.0), device_rate);
-    apply_gain_and_clip(&mut data, gain);
-    let buffer = Arc::new(data);
+    // Unity-amplitude buffer -- the callback applies `gain` live on every
+    // sample instead of it being baked in once here (see TunePlayback's own
+    // doc comment). `tune_loop_buffer` is already a bare sine, inherently
+    // within [-1.0, 1.0], so there's nothing to clip before gain is applied.
+    let buffer = Arc::new(tune_loop_buffer(tone_hz.max(1.0), device_rate));
     let cursor = Arc::new(AtomicUsize::new(0));
+    let gain = Arc::new(AtomicU32::new(gain.clamp(0.0, 1.0).to_bits()));
 
     let err_fn = |e| log::error!("audio output stream error: {e}");
     let stream = match sample_format {
         SampleFormat::F32 => {
-            build_tune_output::<f32>(&device, &config, channels, &buffer, &cursor, channel, err_fn)?
+            build_tune_output::<f32>(&device, &config, channels, &buffer, &cursor, &gain, channel, err_fn)?
         }
         SampleFormat::I16 => {
-            build_tune_output::<i16>(&device, &config, channels, &buffer, &cursor, channel, err_fn)?
+            build_tune_output::<i16>(&device, &config, channels, &buffer, &cursor, &gain, channel, err_fn)?
         }
         SampleFormat::U16 => {
-            build_tune_output::<u16>(&device, &config, channels, &buffer, &cursor, channel, err_fn)?
+            build_tune_output::<u16>(&device, &config, channels, &buffer, &cursor, &gain, channel, err_fn)?
         }
         other => anyhow::bail!("unsupported output sample format: {other:?}"),
     };
     stream.play()?;
-    Ok(TunePlayback { _stream: stream })
+    Ok(TunePlayback { _stream: stream, gain })
 }
 
 /// A buffer of whole tone cycles at `device_rate`, ~100 ms long: it loops
@@ -312,6 +338,14 @@ fn tune_loop_buffer(tone_hz: f32, device_rate: u32) -> Vec<f32> {
         .collect()
 }
 
+/// Single-sample counterpart of `apply_gain_and_clip`, for Tune's per-sample
+/// live gain (the whole buffer can't be pre-scaled once, since `gain` can
+/// change on any later sample -- see TunePlayback's own doc comment).
+/// Same unconditional clamp, same reasoning.
+fn scale_and_clip_sample(raw: f32, gain: f32) -> f32 {
+    (raw * gain).clamp(-1.0, 1.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_tune_output<T>(
     device: &cpal::Device,
@@ -319,6 +353,7 @@ fn build_tune_output<T>(
     channels: usize,
     buffer: &Arc<Vec<f32>>,
     cursor: &Arc<AtomicUsize>,
+    gain: &Arc<AtomicU32>,
     channel: i32,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> anyhow::Result<cpal::Stream>
@@ -327,12 +362,17 @@ where
 {
     let buffer = buffer.clone();
     let cursor = cursor.clone();
+    let gain = gain.clone();
     let stream = device.build_output_stream(
         config,
         move |out: &mut [T], _| {
+            // Read fresh every callback (not cached across the closure's
+            // lifetime) -- this is exactly what makes a live set_gain() call
+            // actually reach the DAC. See TunePlayback's own doc comment.
+            let g = f32::from_bits(gain.load(Ordering::Relaxed));
             for frame in out.chunks_mut(channels) {
                 let idx = cursor.load(Ordering::Relaxed);
-                let sample = buffer[idx];
+                let sample = scale_and_clip_sample(buffer[idx], g);
                 cursor.store((idx + 1) % buffer.len(), Ordering::Relaxed);
                 write_frame(frame, sample, channel);
             }
@@ -488,5 +528,36 @@ mod tests {
         assert_eq!(remaining_secs(48_000, 96_000, 48_000), 0.0);
         // Zero device rate can't divide-by-zero.
         assert!(remaining_secs(48_000, 0, 0).is_finite());
+    }
+
+    #[test]
+    fn scale_and_clip_sample_scales_then_clamps_like_the_buffer_version() {
+        // Same contract as apply_gain_and_clip, just one sample at a time --
+        // this is what lets Tune's gain change live, mid-carrier, instead of
+        // only being baked in once before the stream starts.
+        assert_eq!(scale_and_clip_sample(0.5, 1.0), 0.5);
+        assert_eq!(scale_and_clip_sample(2.0, 0.5), 1.0);
+        assert_eq!(scale_and_clip_sample(-2.0, 0.5), -1.0);
+        assert_eq!(scale_and_clip_sample(1.0, 1.05), 1.0); // overshoot still clamps at unity gain
+    }
+
+    #[test]
+    fn tune_playback_set_gain_is_live_and_clamped() {
+        // TunePlayback can't be constructed here without a real output
+        // device, so this exercises the same atomic-f32-bits mechanism
+        // set_gain uses directly -- the contract that actually matters:
+        // the callback's next read sees whatever was last stored, clamped
+        // to [0.0, 1.0] regardless of what the caller passed.
+        let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let store = |g: f32| gain.store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        let read = || f32::from_bits(gain.load(Ordering::Relaxed));
+
+        assert_eq!(read(), 1.0);
+        store(0.3);
+        assert_eq!(read(), 0.3);
+        store(-1.0); // a bad caller value clamps, doesn't underflow or panic
+        assert_eq!(read(), 0.0);
+        store(5.0);
+        assert_eq!(read(), 1.0);
     }
 }

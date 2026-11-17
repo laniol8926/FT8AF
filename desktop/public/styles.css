@@ -209,12 +209,28 @@ select option {
   font-weight: 700; font-size: 11px; letter-spacing: 0.04em; color: var(--accent);
 }
 
-/* DT/NTP sync row, below the title row. */
+/* DT/NTP sync row, below the title row. Shrunk to half width (sharing the
+   row with .tune-level-row) so the TX/Tune level control is always
+   reachable without leaving whatever tab/view the operator is on. */
+.sync-and-tune-row { gap: 16px; }
+.sync-and-tune-row > .sync-row { flex: 0 0 50%; min-width: 0; }
 .sync-row { gap: 10px; }
 .sync-source-badge { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.06em; vertical-align: middle; }
 .cycle-bar { flex: 1; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
 .cycle-bar > div { height: 100%; background: var(--accent); transition: width 0.2s linear; }
 .seq { font-variant-numeric: tabular-nums; }
+
+/* TX/Tune level control, beside the sync row -- see TuneLevelControl's own
+   doc comment. Reuses the More drawer's .tx-volume-* button/slider/value
+   styling for visual consistency; only this row's own label/dot and layout
+   are new. */
+.tune-level-row { flex: 0 0 50%; min-width: 0; display: flex; align-items: center; gap: 6px; }
+.tune-level-label {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.06em; color: var(--muted); white-space: nowrap;
+}
+.tune-level-dot { color: var(--tx); margin-left: 3px; }
+.tune-level-row.tune-level-live .tune-level-label { color: var(--tx); }
+.tune-level-slider { flex: 1; min-width: 0; }
 
 .tabs { display: flex; gap: 4px; padding: 8px 14px 0; background: var(--panel); }
 .tabs button { border-bottom: none; border-radius: 6px 6px 0 0; }
