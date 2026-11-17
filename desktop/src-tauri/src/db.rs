@@ -472,7 +472,18 @@ impl Db {
             // into the log the moment a QSO completes.
             conn.execute_batch("ALTER TABLE qso_log ADD COLUMN tx_pwr TEXT;")?;
         }
-        conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
+        // Never write a LOWER version than what's already there. Real
+        // incident: running an older branch's binary (its own SCHEMA_VERSION
+        // below this one) against a database a newer binary had already
+        // migrated unconditionally overwrote PRAGMA user_version downward --
+        // every column/table from the skipped migrations was still physically
+        // present, just no longer recorded as applied, so the next run of
+        // *this* binary tried to re-run them and crashed on "duplicate column
+        // name: tx_pwr". The schema itself is additive and idempotent-checked
+        // per migration; only this final bookkeeping write needs the guard.
+        if version < SCHEMA_VERSION {
+            conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
+        }
         Ok(())
     }
 
@@ -4061,6 +4072,55 @@ mod tests {
         let qsos = db.list_qsos(10, 0);
         assert_eq!(qsos.len(), 1, "existing rows must survive the migration");
         assert_eq!(qsos[0].tx_pwr, "");
+    }
+
+    #[test]
+    fn migrate_never_lowers_user_version_set_by_a_newer_binary() {
+        // Real incident: running an OLDER branch's binary (a lower
+        // SCHEMA_VERSION than this one) against a database this binary had
+        // already migrated unconditionally overwrote PRAGMA user_version
+        // down to that older binary's own version number -- every column/
+        // table was still physically present (migrations are additive and
+        // individually idempotent-checked), just no longer recorded as
+        // applied, so the *next* run of this binary saw the lowered version,
+        // tried to re-run its own already-applied migrations, and crashed on
+        // "duplicate column name: tx_pwr". Simulated here as a connection
+        // already at a version higher than this binary's own SCHEMA_VERSION
+        // (standing in for "a newer binary already migrated this") with the
+        // full real schema already present, so there's nothing left for this
+        // migrate() to legitimately do.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE qso_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call TEXT NOT NULL, gridsquare TEXT, mode TEXT, rst_sent TEXT,
+                rst_rcvd TEXT, qso_date TEXT, time_on TEXT, qso_date_off TEXT,
+                time_off TEXT, band TEXT, freq TEXT, station_callsign TEXT,
+                my_gridsquare TEXT, comment TEXT, created_at INTEGER,
+                qsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                synced_cloudlog INTEGER NOT NULL DEFAULT 0,
+                synced_qrz INTEGER NOT NULL DEFAULT 0,
+                qsl_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_rcvd INTEGER NOT NULL DEFAULT 0,
+                eqsl_sent INTEGER NOT NULL DEFAULT 0,
+                eqsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                qrz_qsl INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                tx_pwr TEXT
+            );
+            CREATE TABLE callsign_qth (callsign TEXT PRIMARY KEY, grid TEXT);
+            CREATE TABLE follow_callsigns (callsign TEXT PRIMARY KEY);
+            PRAGMA user_version = 99;
+            "#,
+        )
+        .unwrap();
+        let db = Db::from_conn(conn).unwrap();
+        let version: i64 = db.conn.lock().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 99, "a future/newer version must never be lowered by this binary's migrate()");
     }
 
     #[test]
