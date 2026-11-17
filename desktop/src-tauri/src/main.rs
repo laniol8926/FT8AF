@@ -230,6 +230,14 @@ fn set_max_73_sends(state: State<AppState>, cap: u32) {
     state.engine.send(EngineCommand::SetMax73Sends(cap));
 }
 
+/// Settings -> Transmission's "CQ Watchdog" -- how many unanswered CQ
+/// cycles before Call CQ gives itself up; 0 = unlimited (robot/unattended
+/// operation). No Android equivalent -- see `QsoEngine::cq_no_reply_limit`.
+#[tauri::command]
+fn set_cq_watchdog(state: State<AppState>, limit: u32) {
+    state.engine.send(EngineCommand::SetCqWatchdog(limit));
+}
+
 /// Settings -> Auto-Sequence's "Auto-CQ after QSO".
 #[tauri::command]
 fn set_auto_cq_after_qso(state: State<AppState>, enabled: bool) {
@@ -1209,6 +1217,7 @@ fn main() {
             set_tune_level,
             set_tx_watchdog,
             set_max_73_sends,
+            set_cq_watchdog,
             set_auto_cq_after_qso,
             set_clear_on_band_mode_change,
             set_rx_latency_ms,

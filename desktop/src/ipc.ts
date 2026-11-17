@@ -402,6 +402,7 @@ export const api = {
   /** Settings -> Transmission's "TX Watchdog" / "Max 73 Sends" (0 = unlimited/Auto). */
   setTxWatchdog: (limit: number) => invoke("set_tx_watchdog", { limit }),
   setMax73Sends: (cap: number) => invoke("set_max_73_sends", { cap }),
+  setCqWatchdog: (limit: number) => invoke("set_cq_watchdog", { limit }),
   /** Settings -> Auto-Sequence's "Auto-CQ after QSO". */
   setAutoCqAfterQso: (enabled: boolean) => invoke("set_auto_cq_after_qso", { enabled }),
   /** Settings -> Transmission's "Clear decodes on band/mode change". */

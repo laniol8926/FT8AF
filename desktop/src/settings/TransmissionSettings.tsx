@@ -14,7 +14,7 @@ const HUNT_PRIORITY_LABEL: Record<HuntPriority, string> = {
 };
 
 type OpenDialog =
-  | null | "stopAfter" | "max73" | "swrThreshold" | "alcLow" | "alcHigh"
+  | null | "stopAfter" | "cqWatchdog" | "max73" | "swrThreshold" | "alcLow" | "alcHigh"
   | "tuneMethod" | "tuneMaxOn" | "tuneLevel" | "huntPriority" | "huntMinSnr";
 
 const TUNE_METHOD_OPTIONS: { value: number; label: string }[] = [
@@ -61,6 +61,17 @@ const TUNE_METHOD_OPTIONS: { value: number; label: string }[] = [
  *   counters built into `qso.rs` this pass (desktop had no retry-limit
  *   concept of any kind before) -- see `qso::should_give_up_target`/
  *   `has_reached_max_73_sends`.
+ * - **CQ Watchdog**: real, and genuinely new to BOTH apps -- confirmed by
+ *   reading Android's `FT8TransmitSignal.java`: `noReplyLimit`/
+ *   `shouldGiveUpTarget` only ever apply once a target is picked, so a bare
+ *   Call CQ with nobody answering ran forever on both platforms (caught
+ *   live: 4 real CQ transmissions over 90s on a dummy load with no sign of
+ *   stopping). Deliberately a SEPARATE limit from TX Watchdog, not a reuse
+ *   of `noReplyLimit` -- an operator may want a flaky mid-QSO partner
+ *   dropped quickly while still letting a bare CQ run far longer (or
+ *   unlimited) waiting to be heard. `0` = unlimited, the default, since
+ *   unattended/"robot" CQ operation depends on it never giving up on its
+ *   own. See `qso::should_give_up_cq`/`QsoEngine::cq_no_reply_limit`.
  * - **TX Protection**: SWR Halt is real end-to-end (`tx_protection::
  *   should_halt_for_swr`, wired into the meter poll + `maybe_transmit`/
  *   `start_tune`), using a plain SWR ratio (e.g. "3.0") rather than
@@ -117,6 +128,7 @@ export function TransmissionSettings({
 
   const [clearOnChange, setClearOnChange] = useState(true);
   const [stopAfter, setStopAfter] = useState(0);
+  const [cqWatchdog, setCqWatchdog] = useState(0);
   const [max73, setMax73] = useState(0);
   const [swrHaltEnabled, setSwrHaltEnabled] = useState(false);
   const [swrThreshold, setSwrThreshold] = useState(3.0);
@@ -132,6 +144,7 @@ export function TransmissionSettings({
   useEffect(() => {
     api.getConfig("clearOnBandModeChange").then((v) => setClearOnChange(v !== "0"));
     api.getConfig("noReplyLimit").then((v) => setStopAfter(v ? parseInt(v, 10) || 0 : 0));
+    api.getConfig("cqNoReplyLimit").then((v) => setCqWatchdog(v ? parseInt(v, 10) || 0 : 0));
     api.getConfig("max73Sends").then((v) => setMax73(v ? parseInt(v, 10) || 0 : 0));
     api.getConfig("swrHaltEnabled").then((v) => setSwrHaltEnabled(v === "1"));
     api.getConfig("swrHaltThreshold").then((v) => setSwrThreshold(v ? parseFloat(v) || 3.0 : 3.0));
@@ -181,6 +194,12 @@ export function TransmissionSettings({
             description="Stop calling after N unanswered attempts"
             value={stopAfter === 0 ? "Off" : `${stopAfter} tries`}
             onClick={() => setOpenDialog("stopAfter")}
+          />
+          <SettingsRow
+            label="CQ Watchdog"
+            description="Stop calling CQ after N unanswered cycles with nobody replying -- 0/unlimited for unattended operation"
+            value={cqWatchdog === 0 ? "Unlimited" : `${cqWatchdog} cycles`}
+            onClick={() => setOpenDialog("cqWatchdog")}
           />
           <SettingsRow
             label="Max 73 Sends"
@@ -348,6 +367,21 @@ export function TransmissionSettings({
           onSave={(v) => {
             setStopAfter(v);
             api.setTxWatchdog(v);
+            setOpenDialog(null);
+          }}
+          onCancel={() => setOpenDialog(null)}
+        />
+      )}
+      {openDialog === "cqWatchdog" && (
+        <NumberInputDialog
+          title="CQ Watchdog"
+          description="Stop calling CQ after this many unanswered cycles (~15s each) with nobody replying. 0 = unlimited -- required for unattended/robot operation."
+          value={cqWatchdog}
+          min={0}
+          max={200}
+          onSave={(v) => {
+            setCqWatchdog(v);
+            api.setCqWatchdog(v);
             setOpenDialog(null);
           }}
           onCancel={() => setOpenDialog(null)}

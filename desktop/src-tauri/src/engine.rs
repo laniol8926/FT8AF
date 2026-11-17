@@ -533,6 +533,10 @@ pub enum EngineCommand {
     /// Settings -> Transmission's "Max 73 Sends" -- Android's `max73Sends`,
     /// 0 = Auto/off.
     SetMax73Sends(u32),
+    /// Settings -> Transmission's "CQ Watchdog" -- genuinely new, no Android
+    /// equivalent (see `QsoEngine::cq_no_reply_limit`'s doc comment). 0 =
+    /// unlimited, the deliberate default (unattended/"robot" CQ operation).
+    SetCqWatchdog(u32),
     /// Settings -> Auto-Sequence's "Auto-CQ after QSO" -- see `Engine::new`'s
     /// doc comment on why desktop's *default* differs from Android's own.
     SetAutoCqAfterQso(bool),
@@ -1102,6 +1106,7 @@ impl Engine {
         // own defaults).
         qso.no_reply_limit = db.get_config("noReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
         qso.max_73_sends = db.get_config("max73Sends").and_then(|s| s.parse().ok()).unwrap_or(0);
+        qso.cq_no_reply_limit = db.get_config("cqNoReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
         // Settings -> Auto-Sequence's "Auto-CQ after QSO" (Android's
         // `autoCQAfterQSO`, default **false**). Desktop's own default here
         // is deliberately kept at **true** when the key is unset -- this
@@ -2517,6 +2522,10 @@ impl Engine {
                 self.qso.max_73_sends = cap;
                 let _ = self.db.set_config("max73Sends", &cap.to_string());
             }
+            EngineCommand::SetCqWatchdog(limit) => {
+                self.qso.cq_no_reply_limit = limit;
+                let _ = self.db.set_config("cqNoReplyLimit", &limit.to_string());
+            }
             EngineCommand::SetAutoCqAfterQso(enabled) => {
                 self.qso.auto_return_to_cq = enabled;
                 let _ = self.db.set_config("autoCQAfterQSO", if enabled { "1" } else { "0" });
@@ -3605,5 +3614,15 @@ mod tests {
         engine.handle(EngineCommand::SetMax73Sends(2));
         assert_eq!(engine.qso.no_reply_limit, 5);
         assert_eq!(engine.qso.max_73_sends, 2);
+    }
+
+    #[test]
+    fn cq_watchdog_command_persists_into_qso_and_config_independent_of_tx_watchdog() {
+        let mut engine = test_engine();
+        engine.handle(EngineCommand::SetTxWatchdog(5));
+        engine.handle(EngineCommand::SetCqWatchdog(10));
+        assert_eq!(engine.qso.no_reply_limit, 5);
+        assert_eq!(engine.qso.cq_no_reply_limit, 10);
+        assert_eq!(engine.db.get_config("cqNoReplyLimit").as_deref(), Some("10"));
     }
 }

@@ -88,6 +88,22 @@ pub struct QsoEngine {
     /// Android's `GeneralVariables.max73Sends`/`hasReachedMax73Sends`.
     /// `0` = Auto/off (Android's own default).
     pub max_73_sends: u32,
+    /// Settings -> Transmission's "CQ Watchdog" -- how many unanswered CQ
+    /// cycles (no message addressed to us at all, same granularity as
+    /// `no_reply_limit`) before Call CQ gives itself up, same as pressing
+    /// Stop. Genuinely new: neither this app nor the Android fork has ever
+    /// had a give-up concept for a bare CQ with no target yet (confirmed by
+    /// reading `FT8TransmitSignal.java` -- `noReplyLimit`/`shouldGiveUpTarget`
+    /// only ever apply once a target is picked). Deliberately a SEPARATE
+    /// counter/limit from `no_reply_limit` rather than reusing it: an
+    /// operator may want a flaky mid-QSO partner dropped quickly while
+    /// still letting a bare CQ call run far longer (or forever) waiting to
+    /// be heard, and conflating the two would silently couple those two
+    /// unrelated intents. `0` = unlimited -- the deliberate default, since
+    /// this is new functionality with no prior behavior to preserve except
+    /// "runs until stopped," which is also exactly what an unattended/
+    /// "robot" CQ operation needs.
+    pub cq_no_reply_limit: u32,
 
     stage: TxStage,
     target: Option<String>,
@@ -106,6 +122,12 @@ pub struct QsoEngine {
     /// logged). Reset whenever the target changes or any reply advances the
     /// stage. Drives `no_reply_limit` / the "TX Watchdog" setting.
     no_reply_count: u32,
+    /// Consecutive slots, while calling bare CQ, with no message addressed
+    /// to us at all. Reset on `start_cq`/`stop` (via `reset_qso`) and on any
+    /// real reply to our CQ (same "advanced" check that resets
+    /// `no_reply_count`). Drives `cq_no_reply_limit` / the "CQ Watchdog"
+    /// setting.
+    cq_no_reply_count: u32,
     /// How many times `RR73`/`73` (stages `Rr73`/`Bye73`) has actually been
     /// transmitted for the current target (set in `notify_transmitted`,
     /// reset on target change). Drives `max_73_sends`.
@@ -162,6 +184,7 @@ impl QsoEngine {
             auto_return_to_cq: true,
             no_reply_limit: 0,
             max_73_sends: 0,
+            cq_no_reply_limit: 0,
             stage: TxStage::Idle,
             target: None,
             grid_rcvd: None,
@@ -171,6 +194,7 @@ impl QsoEngine {
             started_ms: 0,
             bye73_sent: false,
             no_reply_count: 0,
+            cq_no_reply_count: 0,
             final_ack_sends: 0,
             dormant: None,
             answering_dormant_repeat: false,
@@ -295,6 +319,7 @@ impl QsoEngine {
         self.started_ms = util::now_unix_ms();
         self.bye73_sent = false;
         self.no_reply_count = 0;
+        self.cq_no_reply_count = 0;
         self.final_ack_sends = 0;
     }
 
@@ -391,6 +416,7 @@ impl QsoEngine {
         );
         if advanced {
             self.no_reply_count = 0;
+            self.cq_no_reply_count = 0;
         } else {
             self.on_no_progress();
             return None;
@@ -478,7 +504,15 @@ impl QsoEngine {
                     self.give_up_target();
                 }
             }
-            TxStage::Cq | TxStage::Bye73 | TxStage::Idle => {}
+            TxStage::Cq => {
+                self.cq_no_reply_count = self.cq_no_reply_count.saturating_add(1);
+                if should_give_up_cq(self.cq_no_reply_limit, self.cq_no_reply_count) {
+                    // No target to fall back to -- this IS the CQ itself
+                    // giving up, same as the operator pressing Stop.
+                    self.stop();
+                }
+            }
+            TxStage::Bye73 | TxStage::Idle => {}
         }
     }
 
@@ -635,6 +669,14 @@ impl QsoEngine {
 /// reliance on its separate TX-supervision timeout for the unlimited case.
 pub fn should_give_up_target(no_reply_limit: u32, no_reply_count: u32) -> bool {
     no_reply_limit > 0 && no_reply_count >= no_reply_limit
+}
+
+/// CQ Watchdog cap -- see `QsoEngine::cq_no_reply_limit`'s doc comment for
+/// why this is a separate setting/counter from `should_give_up_target`'s.
+/// `0` = unlimited, same convention, so an unattended/"robot" CQ operation
+/// is unaffected unless the operator explicitly opts into a cap.
+pub fn should_give_up_cq(cq_no_reply_limit: u32, cq_no_reply_count: u32) -> bool {
+    cq_no_reply_limit > 0 && cq_no_reply_count >= cq_no_reply_limit
 }
 
 /// Max 73 Sends cap. Ported in spirit from Android's
@@ -918,6 +960,81 @@ mod tests {
         assert!(!has_reached_max_73_sends(0, 1000)); // Auto/off never caps here
         assert!(!has_reached_max_73_sends(3, 2));
         assert!(has_reached_max_73_sends(3, 3));
+    }
+
+    // --- CQ Watchdog (cq_no_reply_limit) ---
+
+    #[test]
+    fn should_give_up_cq_pure_cases() {
+        assert!(!should_give_up_cq(0, 1000)); // unlimited -- robot/unattended CQ never gives up
+        assert!(!should_give_up_cq(5, 4));
+        assert!(should_give_up_cq(5, 5));
+        assert!(should_give_up_cq(5, 6));
+    }
+
+    #[test]
+    fn cq_watchdog_stops_calling_cq_after_n_silent_cycles() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.cq_no_reply_limit = 2;
+        e.start_cq();
+        assert!(e.status().active);
+        assert_eq!(e.status().stage, TxStage::Cq);
+
+        // First silent cycle -- not given up yet, still calling.
+        assert!(e.process_rx(&[]).is_none());
+        assert!(e.status().active);
+        assert_eq!(e.status().stage, TxStage::Cq);
+
+        // Second silent cycle hits the limit -- stops entirely (no target to
+        // fall back to, unlike the mid-QSO TX Watchdog's "return to CQ").
+        assert!(e.process_rx(&[]).is_none());
+        assert!(!e.status().active);
+        assert_eq!(e.status().stage, TxStage::Idle);
+        assert_eq!(e.tx_message(), None);
+    }
+
+    #[test]
+    fn cq_watchdog_disabled_calls_cq_forever() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.cq_no_reply_limit = 0; // the "robot operation" default
+        e.start_cq();
+        for _ in 0..200 {
+            assert!(e.process_rx(&[]).is_none());
+        }
+        assert!(e.status().active, "unlimited CQ Watchdog must never give up");
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn a_real_reply_to_cq_resets_the_cq_watchdog_and_does_not_count_against_it() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.cq_no_reply_limit = 2;
+        e.start_cq();
+        assert!(e.process_rx(&[]).is_none()); // 1 silent cycle, one short of the cap
+
+        // A real answer to our CQ (a grid report) advances us into a QSO
+        // with that target, replying with our own signal report right
+        // away -- must reset the CQ-specific counter, not merely leave Cq
+        // stage.
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "FN42", "FN42", -5)]);
+        assert_eq!(e.status().stage, TxStage::Report);
+        assert!(e.status().active);
+    }
+
+    #[test]
+    fn cq_watchdog_is_independent_of_the_mid_qso_tx_watchdog() {
+        // A tight mid-QSO retry tolerance must not shorten how long a bare,
+        // unanswered CQ is allowed to run -- these are deliberately separate
+        // counters/limits (see cq_no_reply_limit's doc comment).
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 1; // give up on a silent target almost immediately
+        e.cq_no_reply_limit = 0; // but let a bare CQ run unlimited
+        e.start_cq();
+        for _ in 0..10 {
+            assert!(e.process_rx(&[]).is_none());
+        }
+        assert!(e.status().active, "no_reply_limit must not leak into the Cq stage");
+        assert_eq!(e.status().stage, TxStage::Cq);
     }
 
     #[test]
