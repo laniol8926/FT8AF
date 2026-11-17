@@ -1787,9 +1787,25 @@ public class DatabaseOpr extends SQLiteOpenHelper {
      * time a few minutes off). On the AI5II log (2026-11-02) ~7,400 of 52,951 QSOs were
      * such copies, so every QRZ.com/CQRLOG re-import brought them back as separate
      * QSOs. When the minute match finds nothing, a LoTW-style record joins a full row
-     * with the same call, date, band and mode within {@link #LOTW_TWIN_MINUTES}, and a
-     * full record joins (and fills in) such a LoTW-style row. A LoTW-style record with
-     * no full twin (e.g. UT5MB 2024-06-07) is a real QSO and is inserted as usual.
+     * with the same call, date, band and a compatible mode (exact, or either side a
+     * generic-family placeholder -- MFSK/MFSK8/PSK/DATA, literals inline in the SQL
+     * below) within {@link #LOTW_TWIN_MINUTES}, and a full record joins (and fills in)
+     * such a LoTW-style row. A LoTW-style record with no full twin (e.g. UT5MB
+     * 2024-06-07) is a real QSO and is inserted as usual.
+     *
+     * <p>The generic-family leniency: a program that round-trips a log through its own
+     * ADIF import/export (CQRLOG) can widen FT4/FT8 to the MFSK/MFSK8 family when it has
+     * no SUBMODE tag to recover the specific mode from ({@code resolveImportMode}
+     * already prefers SUBMODE when it IS present), while a fresh export from the
+     * original source (QRZ.com) still has it. Confirmed on a real ~54,500-QSO log via
+     * the desktop port's own fix for the identical problem ({@code checkIsQSL} already
+     * drops mode entirely for this reason -- see its own comment -- but this method
+     * never got the same treatment). Mode isn't dropped from the match entirely here
+     * like {@code checkIsQSL} does, though -- this match is already fuzzy on time (+/-
+     * {@link #LOTW_TWIN_MINUTES}), so a blanket drop risks merging two genuinely
+     * different real contacts (e.g. SSB and FT8 with the same call, close in time).
+     * Only a generic-family mismatch, a known export artifact rather than a real mode
+     * difference, is tolerated.
      */
     @SuppressLint("Range")
     private void matchLotwTwin(QSLRecord record) {
@@ -1799,11 +1815,17 @@ public class DatabaseOpr extends SQLiteOpenHelper {
         String side = incomingLotw
                 ? " and not " + LOTW_ROW_SQL
                 : " and " + LOTW_ROW_SQL;
+        String recordMode = String.valueOf(record.getMode());
+        // Symmetric: an exact match, or either side is a generic-family
+        // placeholder (checked against the same list twice -- once for the
+        // stored mode via SQL, once for the incoming mode via the ?4 param).
         Cursor cursor = db.rawQuery("select * from QSLTable WHERE (upper(call)=upper(?))"
-                        + " and (qso_date=?) and (upper(band)=upper(?)) and (upper(mode)=upper(?))"
+                        + " and (qso_date=?) and (upper(band)=upper(?))"
+                        + " and (upper(mode)=upper(?) or upper(mode) in ('MFSK','MFSK8','PSK','DATA')"
+                        + "      or upper(?) in ('MFSK','MFSK8','PSK','DATA'))"
                         + side,
                 new String[]{record.getToCallsign(), record.getQso_date()
-                        , String.valueOf(record.getBandLength()), String.valueOf(record.getMode())});
+                        , String.valueOf(record.getBandLength()), recordMode, recordMode});
         try {
             int best = -1;
             int bestGap = Integer.MAX_VALUE;
@@ -3333,6 +3355,9 @@ public class DatabaseOpr extends SQLiteOpenHelper {
                 }
                 if (name.equalsIgnoreCase("noReplyLimit")) {//
                     GeneralVariables.noReplyLimit = parseConfigInt(result, 0);
+                }
+                if (name.equalsIgnoreCase("cqNoReplyLimit")) {//CQ Watchdog; 0==unlimited
+                    GeneralVariables.cqNoReplyLimit = parseConfigInt(result, 0);
                 }
                 if (name.equalsIgnoreCase("max73Sends")) {//Max RR73/73 sends per QSO; 0==Auto
                     GeneralVariables.max73Sends = parseConfigInt(result, 0);

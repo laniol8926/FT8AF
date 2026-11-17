@@ -124,6 +124,54 @@ public class DatabaseOprLotwTwinTest {
     }
 
     @Test
+    public void lotwCopyWidenedToGenericMfskStillMerges() {
+        // Real bug, found live via the desktop port's own fix: a program
+        // round-tripping a log through its own ADIF export (CQRLOG) widens
+        // FT4/FT8 to the generic MFSK family when it has no SUBMODE tag to
+        // recover the specific mode from. Confirmed on the user's real
+        // ~54,500-QSO log: before this fix, 69 such FT4/MFSK pairs alone
+        // stayed stuck as permanent duplicates instead of merging.
+        opr.doInsertQSLData(adif("CALL", "W3XOX", "QSO_DATE", "20170728", "TIME_ON", "0100",
+                "TIME_OFF", "0101", "BAND", "20m", "MODE", "FT4",
+                "RST_SENT", "-06", "RST_RCVD", "-21"), null, false);
+        opr.doInsertQSLData(adif("CALL", "W3XOX", "QSO_DATE", "20170728", "TIME_ON", "0105",
+                "TIME_OFF", "0105", "BAND", "20m", "MODE", "MFSK",
+                "RST_SENT", "-21"), null, false);
+
+        assertThat(rows("W3XOX")).isEqualTo(1);
+        assertThat(field("W3XOX", "rst_rcvd")).isEqualTo("-21");
+    }
+
+    @Test
+    public void lotwCopyWidenedToGenericMfsk8StillMerges() {
+        // MFSK8 specifically: confirmed as its own literal MODE value (not
+        // just a submode) on several hundred real FT4 contacts in CQRLOG's
+        // export, same as MFSK.
+        opr.doInsertQSLData(adif("CALL", "W4XYZ", "QSO_DATE", "20170728", "TIME_ON", "0100",
+                "TIME_OFF", "0101", "BAND", "20m", "MODE", "FT4",
+                "RST_SENT", "-06", "RST_RCVD", "-21"), null, false);
+        opr.doInsertQSLData(adif("CALL", "W4XYZ", "QSO_DATE", "20170728", "TIME_ON", "0105",
+                "TIME_OFF", "0105", "BAND", "20m", "MODE", "MFSK8",
+                "RST_SENT", "-21"), null, false);
+
+        assertThat(rows("W4XYZ")).isEqualTo(1);
+    }
+
+    @Test
+    public void genericMfskCopyArrivingFirstStillMergesOnceTheFullRecordArrives() {
+        // Symmetric: the generic-mode copy inserted first (nothing to merge
+        // with yet), the specific-mode full record second.
+        opr.doInsertQSLData(adif("CALL", "W5ABC", "QSO_DATE", "20170728", "TIME_ON", "0105",
+                "TIME_OFF", "0105", "BAND", "20m", "MODE", "MFSK",
+                "RST_SENT", "-21"), null, false);
+        opr.doInsertQSLData(adif("CALL", "W5ABC", "QSO_DATE", "20170728", "TIME_ON", "0100",
+                "TIME_OFF", "0101", "BAND", "20m", "MODE", "FT4",
+                "RST_SENT", "-06", "RST_RCVD", "-21"), null, false);
+
+        assertThat(rows("W5ABC")).isEqualTo(1);
+    }
+
+    @Test
     public void lotwCopyOnAnotherModeOrTooFarAway_isNotMerged() {
         opr.doInsertQSLData(k3josFull(), null, false);
         opr.doInsertQSLData(adif("CALL", "K3JOS", "QSO_DATE", "20190617", "TIME_ON", "0116",
