@@ -4,6 +4,7 @@
 //! Tauri layer over command/event channels so the cpal `Stream`s (which are
 //! `!Send` on Windows) never leave this thread.
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -905,6 +906,20 @@ struct Engine {
     /// so it never keys a stale message ahead of a slow decode (the fresh one is
     /// keyed by `handle_decoded` when it arrives). See [`boundary_tx_ready`].
     pending_decodes: usize,
+    /// FIFO of the slot id each outstanding dispatch in `pending_decodes` was
+    /// actually captured for. Real bug, found live (CQ Watchdog set to 5,
+    /// gave up late or not at all with dead silence the whole time): the
+    /// decode worker runs on its own thread and the run loop only polls it
+    /// opportunistically, so a result can surface on a LATER tick than the
+    /// one that dispatched it -- if decoding takes long enough to cross a
+    /// slot boundary, that tick's own freshly-recomputed `slot_id` is one
+    /// slot newer than the audio actually was, flipping its parity and
+    /// making `handle_decoded`'s own-tx-slot skip silently treat the
+    /// partner's real silent slot as "ours," skipping the miss it should
+    /// have counted. Pushed alongside every dispatch, popped (not read) for
+    /// each drained result, so `handle_decoded` always gets the slot the
+    /// audio was actually captured for, however late the result arrives.
+    pending_decode_slots: VecDeque<i64>,
     /// Retained for event compatibility. This is fixed at zero: adjusting the
     /// receive clock after a decode can remove the next slot's leading sync block.
     rx_offset_ms: i64,
@@ -1241,6 +1256,7 @@ impl Engine {
             rx_gain,
             last_decoded_slot: -1,
             pending_decodes: 0,
+            pending_decode_slots: VecDeque::new(),
             rx_offset_ms,
             last_tick_ms: 0,
             last_ptt_on_sent: None,
@@ -1462,6 +1478,9 @@ impl Engine {
                     // Count it: if the decoder is already behind, the gate must
                     // stay closed until every outstanding slot has returned.
                     self.pending_decodes += 1;
+                    // Remember which slot this one's actually for -- see
+                    // `pending_decode_slots`'s own doc comment.
+                    self.pending_decode_slots.push_back(rx_slot_id);
                 }
             }
 
@@ -1474,7 +1493,15 @@ impl Engine {
                 // later slot keeps the boundary gate closed. saturating_sub guards
                 // against a stray batch arriving after a StopDecode reset.
                 self.pending_decodes = self.pending_decodes.saturating_sub(1);
-                self.handle_decoded(msgs, slot_id);
+                // The slot this batch was actually captured for -- NOT this
+                // tick's own `slot_id`, which is freshly recomputed from
+                // `now` every loop pass and can have already ticked over to
+                // the next slot by the time a slow decode's result surfaces.
+                // Falls back to `slot_id` only if the queue and the count
+                // above have ever drifted apart (should never happen; see
+                // `pending_decode_slots`'s doc comment).
+                let decoded_slot_id = self.pending_decode_slots.pop_front().unwrap_or(slot_id);
+                self.handle_decoded(msgs, decoded_slot_id);
             }
 
             // Boundary TX trigger: key a queued reply/CQ early in its slot (anywhere
@@ -1777,6 +1804,7 @@ impl Engine {
         self.qso.mode = mode.display_name().to_string();
         self.last_decoded_slot = -1;
         self.pending_decodes = 0;
+        self.pending_decode_slots.clear();
         self.txed_slot = -1;
         self.last_wf_slot = -1;
 
@@ -2431,6 +2459,7 @@ impl Engine {
                 // later CQ can key at its slot boundary without being blocked. Any
                 // batch still in the channel decrements from 0 via saturating_sub.
                 self.pending_decodes = 0;
+                self.pending_decode_slots.clear();
                 // Tell companion apps to wipe their decode band and forget the
                 // replay history — this is a genuine reset, not a per-cycle churn.
                 if self.udp.is_enabled() {
@@ -3891,6 +3920,33 @@ mod tests {
         }], 1);
 
         assert_eq!(engine.db.list_qsos(10, 0)[0].comment, "QSO by FT8AF");
+    }
+
+    #[test]
+    fn pending_decode_slots_preserves_dispatch_order_across_a_backlog() {
+        // Real bug, found live: "cq wathdog set to 5 but called cq 6 times
+        // and then i cancelled it" (dead silence the whole run -- ruling
+        // out a real reply resetting the counter). Root cause: the drain
+        // loop used to label every result with the CURRENT tick's own
+        // `slot_id` (freshly recomputed from `now`), not the slot its audio
+        // was actually captured for -- the decode worker runs on its own
+        // thread and is only polled opportunistically, so a result can
+        // surface a tick or more after the slot that dispatched it. If
+        // that crosses a slot boundary, the label is one slot too new,
+        // flipping its parity and making the own-tx-slot skip silently
+        // treat a genuine partner-silence miss as "our own slot" -- the
+        // watchdog counter then undercounts and gives up late or never.
+        // This FIFO is what fixes it: dispatch order must survive even
+        // with several slots outstanding at once (decoder badly behind),
+        // not just the single-outstanding-decode common case.
+        let mut engine = test_engine();
+        engine.pending_decode_slots.push_back(10);
+        engine.pending_decode_slots.push_back(11);
+        engine.pending_decode_slots.push_back(12);
+        assert_eq!(engine.pending_decode_slots.pop_front(), Some(10));
+        assert_eq!(engine.pending_decode_slots.pop_front(), Some(11));
+        assert_eq!(engine.pending_decode_slots.pop_front(), Some(12));
+        assert_eq!(engine.pending_decode_slots.pop_front(), None);
     }
 
     #[test]
