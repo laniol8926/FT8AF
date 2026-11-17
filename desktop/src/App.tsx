@@ -284,10 +284,14 @@ export default function App() {
   const wasActiveRef = useRef(false);
   const wasTransmittingRef = useRef(false);
   const pendingTxLogRef = useRef(false);
-  // QSO Sheet (qsoSheet.ts) -- the "tap a decode row" station-detail
-  // dialog with an explicit Call button; the row's tap no longer answers
-  // immediately, it opens this review step instead (see the onAnswer call
-  // site below).
+  // QSO Sheet (qsoSheet.ts) -- the station-detail dialog with an explicit
+  // Call button. Matches Android's real DecodeRow exactly: a single
+  // tap/click answers immediately (mainViewModel.callStation), and a
+  // long-press opens this sheet instead (right-click is desktop's
+  // equivalent gesture -- see the decode row's onContextMenu below).
+  // Earlier this session a single click opened this sheet instead of
+  // answering directly; confirmed against the real Android source
+  // (DecodeScreen.kt's onClick/onLongClick) and corrected live.
   const [qsoSheetMessage, setQsoSheetMessage] = useState<UiMessage | null>(null);
   const [rig, setRig] = useState<RigStatusEvent | null>(null);
   const [clock, setClock] = useState<ClockSyncEvent | null>(null);
@@ -541,6 +545,15 @@ export default function App() {
   // (not just inside Settings) because it drives the QSO Sheet's Call
   // button, not just the Settings row itself.
   const [holdTxFreq, setHoldTxFreq] = useState(true);
+
+  // Shared by the decode row's direct click and the QSO Sheet's Call
+  // button, so both paths send the exact same answer.
+  function answerStation(m: UiMessage) {
+    api.answer({
+      call_from: m.call_from, grid: m.grid, snr: m.snr,
+      delta_freq: holdTxFreq ? 0 : Math.round(m.freq_hz),
+    });
+  }
 
   function refreshWorkedCalls() {
     api.workedCalls(operatingMode).then((calls) => setWorkedCalls(new Set(calls)));
@@ -1299,7 +1312,8 @@ export default function App() {
               setTxFreq(hz);
               api.setBaseFreq(hz);
             }}
-            onAnswer={(m) => setQsoSheetMessage(m)}
+            onAnswer={answerStation}
+            onInfo={(m) => setQsoSheetMessage(m)}
             decoding={decoding}
             audio={audio}
             displayHz={displayHz}
@@ -1491,10 +1505,7 @@ export default function App() {
           txState={txState}
           distanceMiles={distanceMiles}
           onClose={() => setQsoSheetMessage(null)}
-          onCall={(m) => api.answer({
-            call_from: m.call_from, grid: m.grid, snr: m.snr,
-            delta_freq: holdTxFreq ? 0 : Math.round(m.freq_hz),
-          })}
+          onCall={answerStation}
         />
       )}
     </>
@@ -3851,6 +3862,7 @@ function DecodeScreen(props: {
   txFreq: number;
   onSelectFreq: (hz: number) => void;
   onAnswer: (m: UiMessage) => void;
+  onInfo: (m: UiMessage) => void;
   decoding: boolean;
   audio: InputLevelEvent | null;
   displayHz: number;
@@ -3871,7 +3883,7 @@ function DecodeScreen(props: {
     rightPane, messages, sortMode, myGrid, myCall, dialHz, txTarget, operatingMode, filter, setFilter,
     workedCalls, workedCallsAnyBand, workedGrids,
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, highlightConfig,
-    txFreq, onSelectFreq, onAnswer,
+    txFreq, onSelectFreq, onAnswer, onInfo,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
     qsoActive, qsoLog, qsoTarget, qsoTransmitting, qsoPowerWatts,
   } = props;
@@ -3989,7 +4001,13 @@ function DecodeScreen(props: {
                       (m.is_cq || m.to_me ? " clickable" : "")
                     }
                     onClick={() => (m.is_cq || m.to_me) && onAnswer(m)}
-                    title={m.is_cq || m.to_me ? "Click to answer" : ""}
+                    onContextMenu={(e) => {
+                      if (m.is_cq || m.to_me) {
+                        e.preventDefault();
+                        onInfo(m);
+                      }
+                    }}
+                    title={m.is_cq || m.to_me ? "Click to answer · right-click for station info" : ""}
                   >
                     <span className="decode-row-msg-slot">
                       {/* "→ CALLING" chip, matching Android's DecodeRowLabelChip
