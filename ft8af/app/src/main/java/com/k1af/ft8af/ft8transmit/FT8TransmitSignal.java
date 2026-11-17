@@ -721,6 +721,11 @@ public class FT8TransmitSignal {
         toCallsign = transmitCallsign;// set the call target
         //mutableToCallsign.postValue(toCallsign);// set the call target
 
+        // Working a station ends the idle CQ run, so the CQ Watchdog count starts
+        // over. Every caller pickup lands here and returns before the idle-CQ
+        // branch of parseMessageToFunctionInner, which never sees the change.
+        GeneralVariables.cqNoReplyCount = 0;
+
         // Starting a fresh QSO with the station the Max 73 Sends cap gated
         // (their new CQ/grid, or the user tapping their decode) lifts the gate.
         if (!cappedCallsign.isEmpty() && cappedCallsign.equals(transmitCallsign.callsign)) {
