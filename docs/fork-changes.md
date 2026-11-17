@@ -1,13 +1,37 @@
 # Changes on the laniol8926/FT8AF fork (`dev`)
 
 This is what the fork's `dev` branch adds on top of `patrickrb/FT8AF` `dev`,
-as of 2026-11-02. Upstream `dev` (70 commits) was merged in on 2026-10-27.
+as of 2026-11-11. Upstream `dev` was last merged in on 2026-11-11 (3c59b078).
 These changes enhance the app; they don't replace upstream behaviour. Where a
 control moved, the original is still in place. Layout changes are landscape
 only; portrait is as upstream.
 
 Pull requests already sent upstream are noted. Everything else is on the fork
 only.
+
+## Installing the fork build
+
+The newest Android build is always at this link (bookmark it on the phone):
+
+**https://github.com/laniol8926/FT8AF/releases/latest/download/FT8AF-AI5II.apk**
+
+Open it on the phone, let the download finish, tap the file to install. It
+installs over earlier fork builds and keeps your data. It can't replace an
+upstream (Play Store or upstream release) build without uninstalling that
+first, which clears the app's data, so export settings and the ADIF before.
+
+How the link keeps working, for whoever posts a release (Windows PC or the
+Quadra):
+
+- Tag `ai5ii-android-<commit>`, published as a normal release marked
+  **Latest** (not a pre-release; GitHub's `/releases/latest` skips those).
+- Two copies of the debug APK: `FT8AF-AI5II-fork-<commit>-debug.apk` (to tell
+  builds apart) and `FT8AF-AI5II.apk` (the fixed name the link uses).
+- `gh release create ai5ii-android-<commit> -R laniol8926/FT8AF --latest
+  --target <full sha> --notes-file notes.md FT8AF-AI5II-fork-<commit>-debug.apk FT8AF-AI5II.apk`
+  (`--target` needs the full 40-character SHA.)
+- Older releases stay on the Releases page as history; each one's notes list
+  what changed since the one before.
 
 ## QRP Labs QMX support
 
@@ -499,6 +523,14 @@ for the Hamlib version workaround needed there.
   LF on asset text files). Upstream PR #960, merged.
 - ADIF import: RST parsed leniently, invalid rows reported correctly, size
   cap raised to 200 MB. Upstream PRs #951 and #950, merged.
+- **Swiping the app away from Recents now exits it.** Before, RX decode, mic
+  capture and the wakelock kept running after the swipe (the RX foreground
+  service is a plain started service, and `MainViewModel` is a process-wide
+  singleton), until the app was force-stopped. `onTaskRemoved()` now runs the
+  same full shutdown as the notification's Exit button (stop TX/RX, disconnect
+  the rig, stop the recorder and service). `debug.log` shows
+  `RxForegroundService: exiting (task removed from Recents)`.
+  (`RxForegroundService`, 7e14191c)
 
 ## Testing notes
 
