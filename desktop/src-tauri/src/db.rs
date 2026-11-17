@@ -1380,13 +1380,17 @@ impl Db {
     const LOTW_TWIN_MINUTES: i32 = 15;
 
     /// Find a QSO one QSO's worth of data away: the same call (ci) + date +
-    /// band (ci) + mode (ci), within [`Self::LOTW_TWIN_MINUTES`] of
-    /// `imported`'s `TIME_ON` (nearest wins), and the *opposite*
-    /// [`is_lotw_style_record`]-ness from `imported`. Only called when
-    /// [`Self::find_duplicate_locked`] already found nothing — see
-    /// [`merge_matched_qso`]'s doc comment for why this exists and what a
-    /// match does. Ports Android's `DatabaseOpr.matchLotwTwin` exactly,
-    /// including its first-seen-wins tie-break (`ORDER BY id`, strict `<`).
+    /// band (ci) + a compatible mode (ci) -- exact, or either side a
+    /// [`GENERIC_MODE_FAMILIES`] placeholder -- within
+    /// [`Self::LOTW_TWIN_MINUTES`] of `imported`'s `TIME_ON` (nearest wins),
+    /// and the *opposite* [`is_lotw_style_record`]-ness from `imported`.
+    /// Only called when [`Self::find_duplicate_locked`] already found
+    /// nothing — see [`merge_matched_qso`]'s doc comment for why this exists
+    /// and what a match does. Ports Android's `DatabaseOpr.matchLotwTwin`,
+    /// including its first-seen-wins tie-break (`ORDER BY id`, strict `<`) --
+    /// except for the mode leniency, which Android's version still lacks
+    /// (confirmed: identical exact-mode SQL there), tracked in a port
+    /// request back to Android.
     fn find_lotw_twin_locked(conn: &Connection, imported: &QsoRecord) -> Option<QsoRecord> {
         let minute = minute_of_day(&imported.time_on)?;
         if imported.qso_date.trim().is_empty() {
@@ -1394,17 +1398,35 @@ impl Db {
         }
         let incoming_lotw = is_lotw_style_record(imported);
         let side = if incoming_lotw { "NOT" } else { "" };
+        // Same generic-mode-family leniency as find_duplicate_locked, and for
+        // the identical real-world reason (see GENERIC_MODE_FAMILIES' doc
+        // comment) -- confirmed missing here on the user's real ~54,500-QSO
+        // log: a full wipe + reimport of both the QRZ.com and CQRLOG exports
+        // left 1,986 LoTW-style rows permanently unmerged, the large majority
+        // (FT4/MFSK, FT4/MFSK8, PSK/PSK31, DATA/PSK31, ...) purely because
+        // this query required an *exact* mode match while its sibling
+        // (find_duplicate_locked) already didn't. Unlike that exact-minute
+        // match, this one is fuzzy on time (+/- LOTW_TWIN_MINUTES), so mode
+        // isn't dropped entirely -- only a generic-family placeholder on
+        // either side is treated as compatible with any specific mode,
+        // keeping a genuinely different real contact (e.g. SSB vs FT8, same
+        // call, close in time) from wrongly merging.
+        let generic_list: String =
+            GENERIC_MODE_FAMILIES.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT {QSO_SELECT_COLUMNS} FROM qso_log
              WHERE UPPER(call) = UPPER(?1) AND qso_date = ?2
-               AND UPPER(band) = UPPER(?3) AND UPPER(mode) = UPPER(?4)
+               AND UPPER(band) = UPPER(?3)
+               AND (UPPER(mode) = UPPER(?4) OR UPPER(mode) IN ({generic_list})
+                    OR UPPER(?4) IN ({generic_list}))
                AND {side} {LOTW_ROW_SQL}
              ORDER BY id ASC",
         );
         // prepare_cached: this runs on every record that misses the exact
         // duplicate match (see find_duplicate_locked's caching note) -- the
-        // cache key is the SQL text, and `side` only ever takes two values
-        // ("NOT" or ""), so this stays a 2-entry cache hit, not unbounded.
+        // cache key is the SQL text, and `side`/`generic_list` are each only
+        // ever one fixed value (side: 2 options; generic_list: constant), so
+        // this stays a small, bounded cache hit, not unbounded.
         let mut stmt = conn.prepare_cached(&sql).ok()?;
         let rows = stmt
             .query_map(
@@ -1712,9 +1734,14 @@ pub fn adif_record(r: &QsoRecord) -> String {
 /// program that round-trips a log through its own ADIF import/export can
 /// widen FT4/FT8 to the family name when it has no `SUBMODE` tag to recover
 /// the specific one from, while a fresh export from the original source still
-/// has it. [`merge_matched_qso`] prefers the specific name when the two
-/// disagree.
-const GENERIC_MODE_FAMILIES: &[&str] = &["MFSK", "PSK", "DATA"];
+/// has it. `MFSK8` added alongside `MFSK` after confirming it on the same
+/// real log (CQRLOG's own export used it as the literal `MODE` for several
+/// hundred real FT4 contacts). Used to loosen the mode comparison in both
+/// [`Db::find_duplicate_locked`] (exact-minute match) and
+/// [`Db::find_lotw_twin_locked`] (fuzzy +/- 15 min match) -- `merge_matched_qso`
+/// then prefers the specific name over a stored generic one once a full
+/// record with the real mode is seen.
+const GENERIC_MODE_FAMILIES: &[&str] = &["MFSK", "MFSK8", "PSK", "DATA"];
 
 fn is_generic_mode_family(mode: &str) -> bool {
     GENERIC_MODE_FAMILIES.contains(&mode.trim().to_ascii_uppercase().as_str())
@@ -3659,6 +3686,82 @@ mod tests {
         let summary = db.import_adif(copy);
         assert_eq!(summary, ImportSummary { imported: 1, duplicates: 0, skipped: 0 });
         assert_eq!(db.count(), 2, "different band -> not a twin, inserted separately");
+    }
+
+    #[test]
+    fn import_adif_lotw_twin_merges_despite_a_generic_mode_family_mismatch() {
+        // Real bug, found live: find_lotw_twin_locked required an *exact*
+        // mode match while its sibling find_duplicate_locked already didn't
+        // (see that function's doc comment) -- confirmed on the user's real
+        // ~54,500-QSO log: a full wipe + reimport of both the QRZ.com and
+        // CQRLOG exports left 1,986 LoTW-style rows stuck unmerged, the
+        // large majority a generic-family mode mismatch (69 FT4/MFSK pairs
+        // alone, within this same +/- 15 min twin window).
+        let db = Db::open_in_memory().unwrap();
+        let full = "<call:5>W3XOX <mode:3>FT4 <qso_date:8>20170728 <time_on:4>0100 \
+            <time_off:4>0101 <band:3>20m <rst_sent:3>-06 <rst_rcvd:3>-21 <eor>";
+        let copy = "<call:5>W3XOX <mode:4>MFSK <qso_date:8>20170728 <time_on:4>0105 \
+            <time_off:4>0105 <band:3>20m <rst_sent:3>-21 <eor>";
+        db.import_adif(full);
+        let summary = db.import_adif(copy);
+        assert_eq!(summary, ImportSummary { imported: 0, duplicates: 1, skipped: 0 });
+        assert_eq!(db.count(), 1, "generic-family mode mismatch must still merge into the full twin");
+    }
+
+    #[test]
+    fn import_adif_lotw_twin_merges_despite_generic_mode_mismatch_in_either_import_order() {
+        // Same as above but the generic-mode LoTW-style copy arrives FIRST
+        // (inserted standalone, nothing to merge with yet) and the full,
+        // specific-mode record arrives SECOND -- find_lotw_twin_locked's
+        // mode predicate must be symmetric (it is: it checks either side
+        // against GENERIC_MODE_FAMILIES, not just the stored or the
+        // incoming one specifically).
+        let db = Db::open_in_memory().unwrap();
+        let copy = "<call:5>W3XOX <mode:4>MFSK <qso_date:8>20170728 <time_on:4>0105 \
+            <time_off:4>0105 <band:3>20m <rst_sent:3>-21 <eor>";
+        let full = "<call:5>W3XOX <mode:3>FT4 <qso_date:8>20170728 <time_on:4>0100 \
+            <time_off:4>0101 <band:3>20m <rst_sent:3>-06 <rst_rcvd:3>-21 <eor>";
+        db.import_adif(copy);
+        let summary = db.import_adif(full);
+        assert_eq!(summary.duplicates, 1, "the full record must fill the earlier-inserted generic-mode row");
+        assert_eq!(db.count(), 1);
+        let rows = db.list_qsos(10, 0);
+        assert_eq!(rows[0].mode, "FT4", "fills with the specific mode, not left as the generic one");
+        assert!(!rows[0].rst_rcvd.is_empty(), "fills with the real received report too");
+    }
+
+    #[test]
+    fn import_adif_lotw_twin_merges_with_mfsk8_too() {
+        // MFSK8 specifically: confirmed as its own literal MODE value (not
+        // just a submode) on several hundred real FT4 contacts in CQRLOG's
+        // export -- added to GENERIC_MODE_FAMILIES alongside MFSK.
+        let db = Db::open_in_memory().unwrap();
+        let full = "<call:5>W3XOX <mode:3>FT4 <qso_date:8>20170728 <time_on:4>0100 \
+            <time_off:4>0101 <band:3>20m <rst_sent:3>-06 <rst_rcvd:3>-21 <eor>";
+        let copy = "<call:5>W3XOX <mode:5>MFSK8 <qso_date:8>20170728 <time_on:4>0105 \
+            <time_off:4>0105 <band:3>20m <rst_sent:3>-21 <eor>";
+        db.import_adif(full);
+        let summary = db.import_adif(copy);
+        assert_eq!(summary.duplicates, 1);
+        assert_eq!(db.count(), 1);
+    }
+
+    #[test]
+    fn import_adif_lotw_twin_still_refuses_a_genuinely_different_mode() {
+        // A real SSB contact and a real FT8 contact with the same call,
+        // band, and close in time are two DIFFERENT QSOs, not a generic-
+        // family widening artifact -- neither mode is in
+        // GENERIC_MODE_FAMILIES, so they must stay separate rather than
+        // merge. Proves the mode leniency above isn't a blanket drop.
+        let db = Db::open_in_memory().unwrap();
+        let full = "<call:5>N2SAL <mode:3>SSB <qso_date:8>20200605 <time_on:4>1752 \
+            <time_off:4>1753 <band:3>20m <rst_sent:2>59 <rst_rcvd:2>59 <eor>";
+        let copy = "<call:5>N2SAL <mode:3>FT8 <qso_date:8>20200605 <time_on:4>1753 \
+            <time_off:4>1753 <band:3>20m <rst_sent:3>-10 <eor>";
+        db.import_adif(full);
+        let summary = db.import_adif(copy);
+        assert_eq!(summary, ImportSummary { imported: 1, duplicates: 0, skipped: 0 });
+        assert_eq!(db.count(), 2, "genuinely different mode must not merge, even within the twin window");
     }
 
     #[test]
