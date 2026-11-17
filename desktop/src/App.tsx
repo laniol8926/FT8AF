@@ -373,6 +373,18 @@ export default function App() {
     setRxLog((existing) => mergeRxLog(existing, incoming));
   }, [messages, logTarget]);
 
+  // The QSO partner's own frequency -- a white line on the waterfall
+  // alongside the red TX marker, matching the fork's real Android feature
+  // ("White line on the QSO partner's frequency on every waterfall, beside
+  // the red TX markers"). `messages` is prepended newest-first, so the
+  // first match is their most recently heard frequency.
+  const targetFreqHz = useMemo(() => {
+    if (!logTarget) return null;
+    const upper = logTarget.toUpperCase();
+    const msg = messages.find((m) => m.call_from.toUpperCase() === upper);
+    return msg?.freq_hz ?? null;
+  }, [messages, logTarget]);
+
   // Synthesize one TX row per transmission, keyed off the rising edge of
   // `transmitting` -- see decideTxLog's own doc comment for why (one row
   // per transmission, not de-duplicated by text).
@@ -1342,6 +1354,7 @@ export default function App() {
             qsoActive={panelShouldShow}
             qsoLog={qsoLogEntries}
             qsoTarget={logTarget}
+            targetFreqHz={targetFreqHz}
             qsoTransmitting={isTransmitting}
             qsoPowerWatts={meter?.power_watts ?? null}
           />
@@ -1355,6 +1368,7 @@ export default function App() {
                 api.setBaseFreq(hz);
               }}
               displayHz={displayHz}
+              targetFreqHz={targetFreqHz}
             />
             <WaterfallStatusStrip
               txFreq={txFreq}
@@ -3336,10 +3350,14 @@ function WaterfallView({
   txFreq,
   onSelectFreq,
   displayHz,
+  targetFreqHz,
 }: {
   txFreq: number;
   onSelectFreq: (hz: number) => void;
   displayHz: number;
+  // The QSO partner's own last-heard frequency -- drawn as a white line
+  // beside the red TX marker, matching the fork's real Android feature.
+  targetFreqHz?: number | null;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -3355,6 +3373,9 @@ function WaterfallView({
   }
 
   const leftPct = (txFreq / displayHz) * 100;
+  // Same hz-to-pixel-fraction the canvas and the TX marker already use.
+  const targetLeftPct =
+    targetFreqHz != null ? (targetFreqHz / displayHz) * 100 : null;
 
   return (
     <div
@@ -3417,6 +3438,22 @@ function WaterfallView({
       >
         TX {txFreq} Hz
       </div>
+      {/* QSO partner's RX frequency marker (fork feature, ported from
+          Android: "White line on the QSO partner's frequency on every
+          waterfall, beside the red TX markers"). */}
+      {targetLeftPct != null && (
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: `${targetLeftPct}%`,
+            width: 2,
+            background: "#ffffff",
+            pointerEvents: "none",
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -3893,6 +3930,9 @@ function DecodeScreen(props: {
   qsoActive: boolean;
   qsoLog: QsoLogEntry[];
   qsoTarget: string | null;
+  // The QSO partner's own last-heard frequency -- a white waterfall line
+  // alongside the red TX marker (see WaterfallView).
+  targetFreqHz: number | null;
   qsoTransmitting: boolean;
   qsoPowerWatts: number | null;
 }) {
@@ -3902,7 +3942,7 @@ function DecodeScreen(props: {
     workedPrefixes, workedDxccPrefixes, workedCqZones, workedStates, highlightConfig,
     txFreq, onSelectFreq, onAnswer, onInfo,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
-    qsoActive, qsoLog, qsoTarget, qsoTransmitting, qsoPowerWatts,
+    qsoActive, qsoLog, qsoTarget, targetFreqHz, qsoTransmitting, qsoPowerWatts,
   } = props;
 
   // Default "time" mode keeps the existing full-history, per-slot-grouped
@@ -4104,7 +4144,7 @@ function DecodeScreen(props: {
             />
           ) : (
             <>
-              <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} displayHz={displayHz} />
+              <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} displayHz={displayHz} targetFreqHz={targetFreqHz} />
               <WaterfallStatusStrip
                 txFreq={txFreq}
                 decoding={decoding}
