@@ -2461,6 +2461,28 @@ public class FT8TransmitSignal {
             } else if (!dequeueNextCaller()) {
                 checkCQMeOrFollowCQMessage(messages);
             }
+            // CQ Watchdog: count a cycle toward cqNoReplyLimit only if we're
+            // STILL idle-CQ after the caller-pickup attempts above -- either
+            // one succeeding changed functionOrder away from 6, which is
+            // real progress and must reset the counter, same as a direct
+            // reply resets noReplyCount below. Same fairness exemptions as
+            // that counter: a weak-signal cycle isn't a real miss, and the
+            // cycle right after a Pause wasn't heard by anyone else either.
+            if (functionOrder == 6) {
+                if (!messages.get(0).isWeakSignal && !afterPause) {
+                    GeneralVariables.cqNoReplyCount++;
+                    GeneralVariables.fileLog(String.format("QSO: CQ no-reply %d/%d",
+                            GeneralVariables.cqNoReplyCount, GeneralVariables.cqNoReplyLimit));
+                    if (shouldGiveUpCq(GeneralVariables.cqNoReplyLimit, GeneralVariables.cqNoReplyCount)) {
+                        GeneralVariables.fileLog("QSO: CQ Watchdog limit reached ("
+                                + GeneralVariables.cqNoReplyCount + "/" + GeneralVariables.cqNoReplyLimit
+                                + ") -> stop calling CQ");
+                        setActivated(false);
+                    }
+                }
+            } else {
+                GeneralVariables.cqNoReplyCount = 0;
+            }
             return;
         }
 
@@ -2794,6 +2816,7 @@ public class FT8TransmitSignal {
             // Reset retry counters so a fresh run to the same callsign
             // doesn't inherit a stale noReplyCount from the previous session.
             GeneralVariables.noReplyCount = 0;
+            GeneralVariables.cqNoReplyCount = 0;
             finalAckSends = 0;
             cappedCallsign = "";
             lastNoReplyTarget = "";
@@ -2904,6 +2927,10 @@ public class FT8TransmitSignal {
     //@RequiresApi(api = Build.VERSION_CODES.N)
     public void resetToCQ() {
         resetTargetReport();
+        // A fresh CQ run (the operator's own Call CQ press, or returning to
+        // CQ after a completed/given-up QSO) starts the CQ Watchdog's count
+        // over, same as starting a new target resets noReplyCount.
+        GeneralVariables.cqNoReplyCount = 0;
         if (toCallsign == null) {
             //must determine my callsign type to set i3n3 !!!
             int i3 = GenerateFT8.checkI3ByCallsign(GeneralVariables.myCallsign);
@@ -3167,6 +3194,25 @@ public class FT8TransmitSignal {
      */
     static boolean shouldGiveUpTarget(int noReplyLimit, int noReplyCount) {
         return noReplyLimit > 0 && noReplyCount >= noReplyLimit;
+    }
+
+    /**
+     * CQ Watchdog: whether to stop calling CQ based on cqNoReplyLimit. Same
+     * "0 == unlimited" convention as {@link #shouldGiveUpTarget}, so an
+     * unattended/"robot" CQ operation is unaffected unless the operator
+     * explicitly opts into a cap. Deliberately a separate limit/counter from
+     * {@code noReplyLimit}/{@code noReplyCount} above -- those only ever
+     * apply once a target is picked; a bare CQ with nobody answering has no
+     * give-up concept of its own otherwise (confirmed: functionOrder == 6
+     * returns early, above, before any of the noReplyCount logic below it
+     * runs). Also distinct from the time-based {@code launchSupervision}
+     * ("TX Watchdog" in Settings): this is a count of unanswered CQ cycles,
+     * not elapsed minutes.
+     *
+     * <p>Package-visible for testing.
+     */
+    static boolean shouldGiveUpCq(int cqNoReplyLimit, int cqNoReplyCount) {
+        return cqNoReplyLimit > 0 && cqNoReplyCount >= cqNoReplyLimit;
     }
 
     /**
