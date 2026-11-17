@@ -315,7 +315,19 @@ impl Db {
                      ON qso_log(UPPER(call), qso_date, UPPER(band), UPPER(mode));",
             )?;
         }
-        conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
+        // Never write a LOWER version than what's already there. Real
+        // incident: this binary's older SCHEMA_VERSION unconditionally
+        // overwrote PRAGMA user_version down after running against a
+        // database a newer branch's binary had already migrated further --
+        // every column/table from the skipped migrations was still
+        // physically present, just no longer recorded as applied, so the
+        // next run of the newer binary tried to re-run them and crashed on
+        // "duplicate column name: tx_pwr". The schema itself is additive and
+        // idempotent-checked per migration; only this final bookkeeping
+        // write needs the guard.
+        if version < SCHEMA_VERSION {
+            conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;
+        }
         Ok(())
     }
 
@@ -1880,6 +1892,54 @@ mod tests {
             .unwrap()
             > 0;
         assert!(has_index, "v6 migration must create the LoTW-twin index");
+    }
+
+    #[test]
+    fn migrate_never_lowers_user_version_set_by_a_newer_binary() {
+        // Real incident: this binary's SCHEMA_VERSION (6) is lower than a
+        // sibling branch's (9, which adds tx_pwr/follow_callsigns). Running
+        // this binary against a database the newer one had already migrated
+        // unconditionally overwrote PRAGMA user_version down to 6 -- every
+        // column/table from the skipped v7-v9 migrations was still
+        // physically present, just no longer recorded as applied, so the
+        // next run of the NEWER binary saw version=6, tried to re-run its
+        // own already-applied migrations, and crashed on "duplicate column
+        // name: tx_pwr". Simulated here as a connection already at a version
+        // higher than this binary's own SCHEMA_VERSION, with a schema this
+        // binary's own migrations would be satisfied by, so there's nothing
+        // left for migrate() to legitimately do.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE qso_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call TEXT NOT NULL, gridsquare TEXT, mode TEXT, rst_sent TEXT,
+                rst_rcvd TEXT, qso_date TEXT, time_on TEXT, qso_date_off TEXT,
+                time_off TEXT, band TEXT, freq TEXT, station_callsign TEXT,
+                my_gridsquare TEXT, comment TEXT, created_at INTEGER,
+                qsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                synced_cloudlog INTEGER NOT NULL DEFAULT 0,
+                synced_qrz INTEGER NOT NULL DEFAULT 0,
+                qsl_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_rcvd INTEGER NOT NULL DEFAULT 0,
+                eqsl_sent INTEGER NOT NULL DEFAULT 0,
+                eqsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                qrz_qsl INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                tx_pwr TEXT
+            );
+            CREATE INDEX qso_log_lotw_twin_idx
+                ON qso_log(UPPER(call), qso_date, UPPER(band), UPPER(mode));
+            PRAGMA user_version = 99;
+            "#,
+        )
+        .unwrap();
+        let db = Db::from_conn(conn).unwrap();
+        let version: i64 = db.conn.lock().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 99, "a future/newer version must never be lowered by this binary's migrate()");
     }
 
     #[test]
