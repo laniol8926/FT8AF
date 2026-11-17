@@ -1,13 +1,37 @@
 # Changes on the laniol8926/FT8AF fork (`dev`)
 
 This is what the fork's `dev` branch adds on top of `patrickrb/FT8AF` `dev`,
-as of 2026-11-02. Upstream `dev` (70 commits) was merged in on 2026-10-27.
+as of 2026-11-11. Upstream `dev` was last merged in on 2026-11-11 (3c59b078).
 These changes enhance the app; they don't replace upstream behaviour. Where a
 control moved, the original is still in place. Layout changes are landscape
 only; portrait is as upstream.
 
 Pull requests already sent upstream are noted. Everything else is on the fork
 only.
+
+## Installing the fork build
+
+The newest Android build is always at this link (bookmark it on the phone):
+
+**https://github.com/laniol8926/FT8AF/releases/latest/download/FT8AF-AI5II.apk**
+
+Open it on the phone, let the download finish, tap the file to install. It
+installs over earlier fork builds and keeps your data. It can't replace an
+upstream (Play Store or upstream release) build without uninstalling that
+first, which clears the app's data, so export settings and the ADIF before.
+
+How the link keeps working, for whoever posts a release (Windows PC or the
+Quadra):
+
+- Tag `ai5ii-android-<commit>`, published as a normal release marked
+  **Latest** (not a pre-release; GitHub's `/releases/latest` skips those).
+- Two copies of the debug APK: `FT8AF-AI5II-fork-<commit>-debug.apk` (to tell
+  builds apart) and `FT8AF-AI5II.apk` (the fixed name the link uses).
+- `gh release create ai5ii-android-<commit> -R laniol8926/FT8AF --latest
+  --target <full sha> --notes-file notes.md FT8AF-AI5II-fork-<commit>-debug.apk FT8AF-AI5II.apk`
+  (`--target` needs the full 40-character SHA.)
+- Older releases stay on the Releases page as history; each one's notes list
+  what changed since the one before.
 
 ## QRP Labs QMX support
 
@@ -46,6 +70,7 @@ only.
 | **Stop After** counts a partner re-sending the message we answer (he didn't copy us), so "3" means three tries; only real progress resets it | `FT8TransmitSignal.isPartnerRepeat` |
 | Giving up at the Stop After limit follows Auto-CQ too: with nobody queued or watched to work, TX goes off instead of calling CQ; it never re-picks the station it gave up on | `giveUpTarget` |
 | **TX watchdog** refreshes when the QSO progresses or a station is tapped (it switched TX off mid-QSO); 1–4 minute options added; a timeout is logged | `doOnSecTimer`, `TransmissionSettings` |
+| **CQ Watchdog** (Settings → Transmission, 2026-11-16): TX goes off after N CQ cycles in a row with no caller; Unlimited (default) changes nothing. Weak-signal cycles and the cycle after Pause don't count; the count starts over when a caller is picked up, a new CQ run starts, or TX goes off. A cycle with no decodes at all isn't counted (TX watchdog covers a dead band by time). Ported from the Quadra session's desktop work; config key `cqNoReplyLimit` | `FT8TransmitSignal.shouldGiveUpCq`, `setTransmit`; upstream PR #1008 (open) |
 | **Auto-CQ after QSO decides what follows a logged QSO**, however it started: off → TX off (WSJT-X "Disable Tx after sending 73"), on → CQ. The QSO panel ✕ follows the same rule | `shouldStopAfterQso`, `userCancelQso` |
 | After TX stopped itself, a repeat from the station just logged (his R+report or RR73) is answered (RR73 / 73, at most twice) without logging the QSO again; a station ended by Max 73 Sends is left alone | `answerRepeatAfterLog`, `isSameQsoAsLogged` |
 | A late (deep-pass) reply swaps the over on the air within the late-start tolerance, not only inside the audio slack | `shouldRestartForNewOrder(..., lateStartToleranceMs)` |
@@ -271,6 +296,12 @@ late decodes too late to swap, receive-latency shifts, repeat answers.
   received) never overwrites a stored report. A LoTW-only QSO with no full
   record (e.g. UT5MB 2024-06-07) stays a QSO of its own. The logbook shows
   the "no report" values −120 / −100 blank. (`checkIsQSL`, `matchLotwTwin`)
+  Since 2026-11-16 the mode match also accepts a generic family on either
+  side (MFSK, MFSK8, PSK, DATA vs FT8, FT4, PSK31): CQRLOG exports FT8 as
+  MFSK without SUBMODE, which left LoTW-style copies unmerged (desktop re-import
+  of the AI5II log: 1,986 → 1,815 unmerged). Two different specific modes
+  (SSB vs FT8) still don't merge, since the time window is already ±15 min.
+  Not sent upstream: `matchLotwTwin` itself is fork-only.
 - **Import commits in batches** of 200 QSOs (yielding the database to the UI
   when it waits), instead of one flash write per statement: minutes became
   much faster on the phones. The file is streamed one record at a time.
@@ -499,6 +530,14 @@ for the Hamlib version workaround needed there.
   LF on asset text files). Upstream PR #960, merged.
 - ADIF import: RST parsed leniently, invalid rows reported correctly, size
   cap raised to 200 MB. Upstream PRs #951 and #950, merged.
+- **Swiping the app away from Recents now exits it.** Before, RX decode, mic
+  capture and the wakelock kept running after the swipe (the RX foreground
+  service is a plain started service, and `MainViewModel` is a process-wide
+  singleton), until the app was force-stopped. `onTaskRemoved()` now runs the
+  same full shutdown as the notification's Exit button (stop TX/RX, disconnect
+  the rig, stop the recorder and service). `debug.log` shows
+  `RxForegroundService: exiting (task removed from Recents)`.
+  (`RxForegroundService`, 7e14191c)
 
 ## Testing notes
 

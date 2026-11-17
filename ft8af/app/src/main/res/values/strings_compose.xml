@@ -164,6 +164,10 @@
     <!-- Plain-language CAT chip labels for the redesigned TX strip -->
     <string name="cat_status_linked">Radio linked</string>
     <string name="cat_status_not_linked">Radio not linked</string>
+    <!-- Confirmation shown when Call CQ is tapped while the radio isn't linked (#989) -->
+    <string name="cq_radio_not_linked_title">Radio not linked</string>
+    <string name="cq_radio_not_linked_message">FT8AF can\'t reach your radio, so it may not key up or be on the right frequency. Check the radio connection (or tap the Radio not linked chip to retry) before calling CQ.</string>
+    <string name="cq_radio_not_linked_confirm">Call CQ anyway</string>
 
     <!-- ===== Hunt options sheet ===== -->
     <string name="hunt_priority_title">HUNT PRIORITY</string>
@@ -748,6 +752,10 @@
     <string name="settings_tx_volume_desc" formatted="false">Transmit audio level (hardware buttons ±5%)</string>
     <string name="settings_show_volume_slider">Show Volume Slider</string>
     <string name="settings_show_volume_slider_desc">Display TX volume slider on main screen</string>
+    <string name="settings_restore_media_volume">Restore Media Volume</string>
+    <string name="settings_restore_media_volume_desc">For phones that lower the volume on their own. Saves the current media volume when turned on and raises it back at startup and before each TX. Turn off and on to save a new level.</string>
+    <string name="settings_restore_media_volume_saved">Saved media volume: %1$d of %2$d</string>
+    <string name="restore_media_volume_capped">Android limited media volume to %1$d of %2$d. Raise it once from Android\'s volume panel, outside FT8AF, and accept the hearing warning.</string>
     <string name="settings_controls_drawer">Controls Drawer</string>
     <string name="settings_controls_drawer_desc">Collapse the operate controls into a bottom sheet you pull up. Off shows the full control strip at all times.</string>
     <string name="controls_drawer_expand">Expand controls</string>
@@ -772,6 +780,10 @@
     <string name="settings_tx_watchdog_desc">Auto-stop transmit after timeout</string>
     <string name="settings_stop_after">Stop After</string>
     <string name="settings_stop_after_desc">Stop calling after N unanswered attempts</string>
+    <string name="settings_cq_watchdog">CQ Watchdog</string>
+    <string name="settings_cq_watchdog_desc">Stop calling CQ after N unanswered cycles with nobody replying -- separate from TX Watchdog\'s timeout and Stop After\'s mid-QSO limit. Unlimited for unattended operation.</string>
+    <string name="settings_cycles_format">%1$d cycles</string>
+    <string name="settings_unlimited">Unlimited</string>
     <string name="settings_max_73">Max 73 Sends</string>
     <string name="settings_max_73_desc">Maximum RR73/73 transmissions per contact before moving on</string>
     <string name="settings_max_73_auto">Auto</string>
@@ -895,6 +907,13 @@
     <string name="rx_service_channel_desc">Keeps FT8 decoding running while the app is in the background or the screen is off</string>
     <string name="rx_service_title">FT8AF is receiving</string>
     <string name="rx_service_text">Decoding in the background</string>
+    <string name="rig_handoff_yielded">Radio handed to %1$s — open FT8AF to take it back</string>
+    <string name="rig_handoff_took_over">Took the radio over from %1$s</string>
+    <string name="radio_take_control">Take control of radio</string>
+    <string name="radio_take_control_hint">Use this if the radio is not responding or another app has it. It takes the radio from other apps, asks again for any missing USB permission, and reconnects the radio and its audio.</string>
+    <string name="radio_take_control_asking">Taking control of the radio. Android is asking for a missing permission — tap Allow.</string>
+    <string name="radio_take_control_all_granted">All permissions are already granted — nothing to ask. Reconnecting the radio…</string>
+    <string name="radio_take_control_no_usb">All permissions are granted, but no USB radio or sound card was found. Check the cable.</string>
 
     <!-- ===== Settings: logging &amp; awards ===== -->
     <string name="settings_save_swl_decodes">Save SWL Decodes</string>
@@ -1134,10 +1153,12 @@
     <string name="tune_stopped_timeout">Tune stopped after %1$d s</string>
     <string name="tune_blocked_tx">Stop the CQ/QSO before tuning</string>
     <string name="tune_unavailable_route">Tune is not yet supported on this audio route</string>
-    <string name="tune_atu_started">Rig antenna tuner started</string>
+    <string name="tune_atu_started">Rig antenna tuner started (the rig controls how long it runs)</string>
     <string name="tune_atu_unavailable">Rig tuner unavailable — connect a CAT radio with an internal tuner</string>
     <string name="settings_tune_method">Tune method</string>
     <string name="settings_tune_method_desc">Automatic starts the rig\'s internal tuner over CAT when available, otherwise plays the low power tone</string>
+    <string name="settings_tune_timeout">Tune timeout</string>
+    <string name="settings_tune_timeout_desc">Hard cap on the tone carrier, counted from when it comes on. A rig antenna tuner runs as long as the rig needs</string>
     <string name="tune_method_automatic">Automatic</string>
     <string name="tune_method_internal">Internal tuner</string>
     <string name="tune_method_tone">Low power tone</string>

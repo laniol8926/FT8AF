@@ -170,6 +170,11 @@ public class GeneralVariables {
 
     public static boolean showTxVolumeSlider = true;//Show inline TX volume slider on main screen
     public static MutableLiveData<Boolean> mutableShowTxVolumeSlider = new MutableLiveData<>(true);
+    //Restore media volume at startup and before TX (issue #985), defaults off.
+    // volatile: written from the config-load thread + Settings toggle, read from
+    // the TX keying thread. Level is the saved STREAM_MUSIC index, -1 = none saved.
+    public static volatile boolean restoreMediaVolume = false;
+    public static volatile int restoreMediaVolumeLevel = -1;
 
     public static boolean controlsDrawerEnabled = true;//Operate controls as a collapsing bottom-sheet drawer (design 3a/3b)
     public static MutableLiveData<Boolean> mutableControlsDrawerEnabled = new MutableLiveData<>(true);
@@ -602,6 +607,10 @@ public class GeneralVariables {
     public static int instructionSet = 0;//Instruction set: 0=ICOM, 1=Yaesu gen 2, 2=Yaesu gen 3
     public static int bandListIndex = -1;//Radio band index value
     public static MutableLiveData<Integer> mutableBandChange = new MutableLiveData<>();//Band index change
+    //Dial frequency (Hz) the rig last reported. Every off-plan frequency shares one ad-hoc
+    //band-list slot (issue #978), so mutableBandChange keeps the same index while the
+    //operator tunes off-plan; observe this too wherever the displayed dial must follow.
+    public static MutableLiveData<Long> mutableBandFreq = new MutableLiveData<>();
     //Band names (e.g. "6m","60m") the user has hidden from the band pickers. Empty = show all.
     //Persisted in config as a comma-separated list under the key "excludedBands".
     public static volatile java.util.HashSet<String> excludedBands = new java.util.HashSet<>();
@@ -631,6 +640,22 @@ public class GeneralVariables {
     // sends, so it also bounds the loops where the partner keeps transmitting
     // (re-sent R+report / RR73) and the no-reply counter never accumulates.
     public static int max73Sends = 0;
+
+    // CQ Watchdog: how many unanswered CQ cycles (no one calling us at all,
+    // function order 6 / idle CQ) before TX gives itself up entirely.
+    // 0 == unlimited, the default -- unattended/"robot" CQ operation depends
+    // on this never giving up on its own. Deliberately SEPARATE from
+    // noReplyLimit/noReplyCount above: those only ever apply once a target is
+    // picked (mid-QSO silence) -- a bare CQ with nobody answering ran forever
+    // before this, confirmed live on the desktop port (4 real CQ
+    // transmissions over 90s on a dummy load with no sign of stopping).
+    // Also distinct from launchSupervision (Settings' own "TX Watchdog"): that
+    // is a time-based (minutes) supervision timeout that already covers an
+    // idle CQ too, but on wall-clock time rather than a count of CQ cycles --
+    // this adds the count-based control alongside it, not instead of it.
+    public static int cqNoReplyLimit = 0;
+
+    public static int cqNoReplyCount = 0;//Number of consecutive unanswered CQ cycles
 
     //The following 4 parameters are for ICOM network connection
     public static String icomIp = "255.255.255.255";

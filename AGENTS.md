@@ -59,9 +59,11 @@ bash -lc 'java -version; cargo --version; command -v sdkmanager'
 ```
 
 **Repository map:** `ft8af/` is the Android Gradle project; `desktop/` is
-React/TypeScript + Tauri/Rust; `ios/` is SwiftUI + SwiftPM. All three reference
+React/TypeScript + Tauri/Rust. Both reference
 the tracked C DSP core in `ft8af/app/src/main/cpp/`; don't duplicate it or edit
 the vendored `ft8_lib` without checking its pin and native regression tests.
+The ham-radio apps do not target iOS/iPadOS: the USB control they need is
+unavailable there. The retired iOS source and CI have been removed.
 
 **Fast headless checks** (run from the repository root after setup, in a new
 login shell; these require no device, display, or external service):
@@ -105,9 +107,8 @@ Kotlin compiler daemon. Default daemon settings exhausted the 6 GiB workload
 limit during Robolectric startup in validation. Avoid concurrent Rust and
 Android builds. Rerun `.agents/setup` after changing dependency manifests.
 
-**Limits:** Linux orbs cannot build the iOS app or run Apple-framework Swift
-tests; use a macOS/Xcode runner or `.github/workflows/ios.yml`. Orbs have no
-KVM: do not install an Android emulator here. Android UI/instrumentation needs
+**Limits:** Orbs have no KVM: do not install an Android emulator here.
+Android UI/instrumentation needs
 a connected Android runner/device or the existing CI emulator job. RF/PTT,
 USB audio/serial, and radio timing require real hardware; a passing host suite
 is not hardware validation. Never run transmit/tune tests against a live rig
@@ -122,7 +123,17 @@ a PR.
 
 **All PRs target the `dev` branch.** After finishing the code for any work item,
 open a pull request against `dev` (do the work on a feature branch, then
-`gh pr create --base dev`). Don't merge straight to `main`.
+`gh pr create --base dev`). Don't merge straight to `main`: the only PR into
+`main` is the dev → main release PR (there is no `staging` branch any more;
+see `docs/release-pipeline.md`).
+
+**The software factory.** Specs go in as GitHub issues labelled
+`factory:ready`; the loop in `.claude/skills/ft8af-factory/SKILL.md` builds
+each one in its own worktree, proves it with tests and emulator evidence,
+merges it into `dev`, and releases dev → main to the Play internal track.
+Patrick tests that build on his phone and promotes it to production himself.
+Each user-facing feature that reaches production is then announced on the
+ft8af.app blog and FT8AF's social accounts (`.claude/skills/feature-announce/`).
 
 **Use a git worktree for every separate line of work.** Don't switch branches in
 your primary checkout — branch-switching there collides with anything else in
@@ -154,10 +165,14 @@ id first in the slug, e.g. `fix/bur-12-cq-button-stuck`.
 
 ### Pull requests
 
-- **Agents never merge.** Open the PR against `dev`, then stop. The maintainer
-  merges. They test on a phone only for `needs-device-test` PRs (see "Device
-  testing" below); for everything else they merge on the CI, code review, and
-  QA evidence.
+- **Who merges.** An interactive agent opens the PR against `dev` and stops;
+  the maintainer merges. The software-factory loop has Patrick's standing
+  authority (2026-11-13) to merge its own feature PRs into `dev` once
+  `pr-gate` is green, code review is answered and QA evidence is posted, and
+  to merge the dev → main release PR once every check on it passed. That merge
+  publishes to Play **internal** only. Nobody but Patrick promotes to
+  production, creates an `android-v*` / `desktop-v*` tag, or runs the
+  production ship.
 - **Fill in every section of the PR template**
   (`.github/pull_request_template.md`): the debug APK link, a 3-6 step
   manual test checklist with expected results, what changed, risks, and what was
@@ -173,22 +188,23 @@ id first in the slug, e.g. `fix/bur-12-cq-button-stuck`.
 - **CI must be green.** That means `android-gate` (unit tests and the release
   build) plus, on PRs that touch `ft8af/**` or `ham-radio-core/**`, `Debug APK for manual testing`.
 - **Get a code review before QA.** Once CI is green, request a Copilot review
-  first. If Copilot doesn't respond (it can run out of credits), run Claude's
+  first, **once per PR** (reviews are expensive: fix what's valid, answer and
+  resolve every thread, never re-request). If Copilot doesn't respond (it can run out of credits), run Claude's
   `code-review` skill on the PR instead. Address or answer every finding before
   handing off to QA, and fill in the "Code review" section of the template
   with the reviewer you used.
 - **Label PRs that come from Discord feedback** with `from-discord`, and link
   the Discord message or the tracking task in "What changed".
-- **QA attaches evidence.** After code review, QA installs the debug APK on an
-  emulator, runs the PR's manual test checklist, and posts screenshots or a
+- **QA attaches evidence.** After code review, QA (the factory loop does its
+  own) installs the debug APK on an emulator, runs the PR's manual test checklist, and posts screenshots or a
   short screen recording to the PR. A PR without that evidence isn't ready
   for the maintainer.
 
 ### Device testing
 
 The maintainer doesn't install every PR's APK. Device testing happens once per
-release batch, on the Play internal build that `staging` produces, which holds
-every PR merged into `dev` since the last batch. Per-PR device testing is only
+release batch, on the Play internal build that the dev → main release
+produces, which holds every PR merged into `dev` since the last release. Per-PR device testing is only
 for changes an emulator can't check. Label those PRs `needs-device-test`:
 
 - transmit, PTT, or anything that keys the radio
@@ -201,7 +217,10 @@ for changes an emulator can't check. Label those PRs `needs-device-test`:
 The author applies the label and says why in the template's "Device test"
 section. QA checks the label against the diff and adds it if it's missing.
 When in doubt, add it. Everything else (UI, decode/display logic, settings,
-CI, docs) merges on CI + code review + QA evidence.
+CI, docs) merges on CI + code review + QA evidence. A `needs-device-test` PR
+may still merge into `dev` and ride the next internal release; the release PR
+lists every one of them under "Test on your phone" so the batch device test
+covers them before anything is promoted to production.
 
 `from-discord` fixes are confirmed by the reporter: once the fix reaches a Play
 testing track, `discord-play-track-watch` posts to Discord and the reporter
@@ -218,8 +237,8 @@ extract the decision/geometry logic into a plain top-level `internal` function
 or class (e.g. `buildQsoLog`, `QsoPathProjection`) and test that. Keep the
 Composable a thin wrapper that just calls the extracted logic.
 
-The same rule applies to the iOS and desktop apps: SwiftUI views and
-`App.tsx` stay thin wrappers over plain, testable functions.
+The same rule applies to the desktop app: `App.tsx` stays a thin wrapper over
+plain, testable functions.
 
 ### Android
 
@@ -268,37 +287,6 @@ recorded slot through the real decode pipeline, which can spot to PSKReporter
 or start the auto-sequencer). On a physical device the flows skip themselves,
 but the uninstall still happens. The screenshots land on the device in
 `/data/local/tmp/ft8af-flows/`.
-
-### iOS (`ios/`, macOS only)
-
-Pure logic goes in the `FT8AFKit` Swift package (`ios/FT8AFKit/Sources/…`),
-with XCTest suites under `ios/FT8AFKit/Tests/`. These run on the host Mac with
-no simulator, but need full Xcode for XCTest:
-
-```
-cd ios/FT8AFKit && swift test
-```
-
-With only the Command Line Tools installed, `swift test` fails with
-`unable to resolve module dependency: 'XCTest'`. `swift build` still works
-there, and compiles everything except the tests.
-
-App-level tests (`ios/FT8AF/FT8AFTests`) need full Xcode (not just the
-Command Line Tools) and XcodeGen (`brew install xcodegen`). Regenerate the
-project after adding files or targets:
-
-```
-cd ios/FT8AF && xcodegen generate
-xcodebuild test -project FT8AF.xcodeproj -scheme FT8AF \
-  -destination 'platform=iOS Simulator,name=<an installed iPhone simulator>' \
-  CODE_SIGNING_ALLOWED=NO
-```
-
-(Unverified: this `xcodebuild test` command follows CI's `xcodebuild build`
-invocation but hasn't yet been run on a Mac with full Xcode.)
-
-CI (`.github/workflows/ios.yml`) runs `swift test` but only *builds* the app;
-it does not run `FT8AFTests` yet, so run them locally.
 
 ### Desktop (`desktop/`, Tauri)
 

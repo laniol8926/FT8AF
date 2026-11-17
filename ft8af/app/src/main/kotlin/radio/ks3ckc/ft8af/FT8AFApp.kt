@@ -53,6 +53,8 @@ import com.k1af.ft8af.rigs.BaseRigOperation
 import radio.ks3ckc.ft8af.theme.BgApp
 import radio.ks3ckc.ft8af.ui.components.ActiveQsoPanel
 import radio.ks3ckc.ft8af.ui.components.shouldShowCatChip
+import radio.ks3ckc.ft8af.ui.components.shouldConfirmCqWithoutRadio
+import radio.ks3ckc.ft8af.ui.components.RadioNotLinkedCqDialog
 import radio.ks3ckc.ft8af.ui.components.CqOptionsSheet
 import radio.ks3ckc.ft8af.ui.components.canEnableFieldDay
 import radio.ks3ckc.ft8af.ui.components.shouldPersistFreeText
@@ -110,6 +112,29 @@ internal fun qsoPanelOverlaysContent(tab: FT8AFTab): Boolean = tab == FT8AFTab.W
  */
 internal fun shouldArmHuntOnStartup(huntEnabled: Boolean, callsign: String?): Boolean =
     huntEnabled && !callsign.isNullOrEmpty()
+
+/**
+ * Band name (wavelength) for the TxStrip pill at the current dial [freq].
+ *
+ * Prefers the band-list entry at [bandIndex], but ONLY when that entry's frequency
+ * still matches [freq]. Editing a custom dial rebuilds the band list
+ * ([OperationBand.getBandsFromFile]), which drops the in-memory ad-hoc slot and can
+ * shift indices; while the rig sits off-plan the cached [bandIndex] can then point at a
+ * now-valid-but-wrong entry, so trusting it blindly would show the correct MHz next to
+ * the wrong band name (#979). When the indexed entry no longer matches, fall back to an
+ * entry that matches the dial, then to the wavelength computed from [freq].
+ *
+ * Pure decision logic, unit-tested without the Compose/Android runtime.
+ */
+internal fun txPillBandName(
+    bandList: List<OperationBand.Band>,
+    bandIndex: Int,
+    freq: Long,
+): String {
+    val byIndex = bandList.getOrNull(bandIndex)?.takeIf { it.band == freq }?.waveLength
+    val byFreq = bandList.firstOrNull { it.band == freq }?.waveLength
+    return byIndex ?: byFreq ?: BaseRigOperation.getMeterFromFreq(freq) ?: ""
+}
 
 @Composable
 fun FT8AFApp(mainViewModel: MainViewModel) {
@@ -252,6 +277,8 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
 
     // CQ Options sheet state — long-press the CQ button to open.
     var showCqOptions by remember { mutableStateOf(false) }
+    // A Call CQ held back by the "Radio not linked" confirmation; null when none is pending.
+    var pendingCqStart by remember { mutableStateOf<(() -> Unit)?>(null) }
     var cqModifier by remember { mutableStateOf(GeneralVariables.toModifier ?: "") }
     var isFreeTextMode by remember { mutableStateOf(false) }
     // Seed the live free-text field and the saved custom-CQ from persisted config
@@ -326,11 +353,16 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
     // Pill label combines MHz frequency and band name, e.g. "14.074 MHz · 20m".
     // bandIndex is observed so the pill recomposes when the user retunes.
     val bandIndex by GeneralVariables.mutableBandChange.observeAsState(GeneralVariables.bandListIndex)
-    val freq = GeneralVariables.band
-    val bandName = OperationBand.bandList.getOrNull(bandIndex)?.waveLength
-        ?: OperationBand.bandList.firstOrNull { it.band == freq }?.waveLength
-        ?: BaseRigOperation.getMeterFromFreq(freq)
-        ?: ""
+    // Off-plan rig reports all reuse one band-list slot (#978), so bandIndex stays put
+    // while the operator tunes off-plan; reading the reported dial keeps the pill
+    // following it. GeneralVariables.band stays the source of truth, because picker
+    // taps and the config load set it without posting a rig report.
+    val reportedFreq by GeneralVariables.mutableBandFreq.observeAsState(GeneralVariables.band)
+    val freq = if (reportedFreq == GeneralVariables.band) reportedFreq else GeneralVariables.band
+    // Resolve via a helper that ignores a stale bandIndex (one that no longer matches the
+    // dial after a band-list rebuild while off-plan, #979) rather than trusting the index
+    // blindly.
+    val bandName = txPillBandName(OperationBand.bandList, bandIndex, freq)
     val frequencyLabel = buildString {
         append(formatMhz(freq))
         append(" MHz")
@@ -447,22 +479,32 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
         mainViewModel.baseRig?.connector?.setRFVolume(txVolume)
         saveOutputLevelForCurrentBand(mainViewModel.databaseOpr, txVolume)
     }
+    // Start a CQ, first asking for confirmation if the radio isn't linked (#989).
+    val startCqGuarded: (() -> Unit) -> Unit = { start ->
+        if (shouldConfirmCqWithoutRadio(controlMode, catState)) {
+            pendingCqStart = start
+        } else {
+            start()
+        }
+    }
     val onCallCQAction: () -> Unit = {
         if (GeneralVariables.myCallsign.isNullOrEmpty()) {
             Toast.makeText(context, context.getString(R.string.app_set_callsign_first), Toast.LENGTH_SHORT).show()
-        } else if (isFreeTextMode && freeTextMessage.isNotBlank()) {
-            // Free text is a one-shot (WSJT-X Tx5 style): send it once,
-            // immediately, then the engine auto-stops — it is an alternative
-            // to a 73, not a repeating CQ. Consume the armed free text so the
-            // next tap calls a normal CQ instead of re-sending it.
-            mainViewModel.ft8TransmitSignal.sendFreeTextOnce(freeTextMessage)
-            isFreeTextMode = false
-            freeTextMessage = ""
-        } else {
-            mainViewModel.ft8TransmitSignal.setTransmitFreeText(false)
-            mainViewModel.ft8TransmitSignal.userResetToCQ()
-            mainViewModel.ft8TransmitSignal.setActivated(true)
-            GeneralVariables.resetLaunchSupervision()
+        } else startCqGuarded {
+            if (isFreeTextMode && freeTextMessage.isNotBlank()) {
+                // Free text is a one-shot (WSJT-X Tx5 style): send it once,
+                // immediately, then the engine auto-stops — it is an alternative
+                // to a 73, not a repeating CQ. Consume the armed free text so the
+                // next tap calls a normal CQ instead of re-sending it.
+                mainViewModel.ft8TransmitSignal.sendFreeTextOnce(freeTextMessage)
+                isFreeTextMode = false
+                freeTextMessage = ""
+            } else {
+                mainViewModel.ft8TransmitSignal.setTransmitFreeText(false)
+                mainViewModel.ft8TransmitSignal.userResetToCQ()
+                mainViewModel.ft8TransmitSignal.setActivated(true)
+                GeneralVariables.resetLaunchSupervision()
+            }
         }
     }
     val onStopAction: () -> Unit = {
@@ -1047,6 +1089,17 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             },
         )
 
+        // Confirm a Call CQ tapped while the radio isn't linked (#989).
+        RadioNotLinkedCqDialog(
+            visible = pendingCqStart != null,
+            onConfirm = {
+                val start = pendingCqStart
+                pendingCqStart = null
+                start?.invoke()
+            },
+            onDismiss = { pendingCqStart = null },
+        )
+
         // CQ Options — modifier presets, free text, and Field Day configuration.
         CqOptionsSheet(
             visible = showCqOptions,
@@ -1172,7 +1225,7 @@ fun FT8AFApp(mainViewModel: MainViewModel) {
             onCallCQ = {
                 if (GeneralVariables.myCallsign.isNullOrEmpty()) {
                     Toast.makeText(context, context.getString(R.string.app_set_callsign_first), Toast.LENGTH_SHORT).show()
-                } else {
+                } else startCqGuarded {
                     if (isFreeTextMode && freeTextMessage.isNotBlank()) {
                         mainViewModel.ft8TransmitSignal.setFreeText(freeTextMessage)
                         mainViewModel.ft8TransmitSignal.setTransmitFreeText(true)

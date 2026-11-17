@@ -182,10 +182,13 @@ public class MainViewModel extends ViewModel {
 
     //public int decoded_counter = 0;//total decoded count
     public final ArrayList<Ft8Message> ft8Messages = new ArrayList<>();//message list
-    // "Clear every cycle": a wipe marked at the cycle start and applied with that
-    // cycle's first decodes (see beforeListen / appendToMessageList). Guarded by
+    // "Clear every cycle": a wipe armed at the cycle start and applied with that
+    // cycle's first decodes (see beforeListen / appendToMessageList). Holds the slot
+    // utc the clear was armed for (0 = none pending) so that a straggling late/deep
+    // decode pass from the PREVIOUS slot can't consume the clear armed for the next
+    // slot and leave its decodes appended onto the old slot's list (#976). Guarded by
     // ft8Messages.
-    private boolean pendingCycleClear = false;
+    private long pendingClearSlotUtc = 0;
     public UtcTimer utcTimer;//timer for sync-triggered actions.
 
     // Self-syncing clock (opt-in): per-slot median-DT estimator that trims
@@ -402,9 +405,10 @@ public class MainViewModel extends ViewModel {
                     , BaseRigOperation.getFrequencyAllInfo(freq)));
             //write frequency changes back to global variables
             // Compare the meter (wavelength) band, not the band-list index:
-            // OperationBand.getIndexByFreq() appends a new entry for any previously-
-            // unseen frequency, so a small in-band dial move changes the index even
-            // though the band is the same. Wavelength only changes on a real band hop.
+            // an off-plan frequency maps to OperationBand's single ad-hoc slot, so the
+            // index can stay put across a real band hop (14.2 -> 7.1 MHz, both off-plan)
+            // and changes on in-band moves between dials. Wavelength only changes on a
+            // real band hop.
             String oldWaveLength = BaseRigOperation.getMeterFromFreq(GeneralVariables.band);
             GeneralVariables.band = freq;
             // Observing a frequency is not the same as choosing one. Adopt it as the dial
@@ -433,6 +437,7 @@ public class MainViewModel extends ViewModel {
             }
             GeneralVariables.bandListIndex = OperationBand.getIndexByFreq(freq);
             GeneralVariables.mutableBandChange.postValue(GeneralVariables.bandListIndex);
+            GeneralVariables.mutableBandFreq.postValue(freq);
             String newWaveLength = BaseRigOperation.getMeterFromFreq(freq);
 
             // A real band hop invalidates the clear-CQ-slot occupancy history —
@@ -721,11 +726,15 @@ public class MainViewModel extends ViewModel {
                     // silent slot still empties the list.
                     boolean clearedNow = false;
                     synchronized (ft8Messages) {
-                        if (pendingCycleClear) {
+                        if (pendingClearSlotUtc != 0) {
                             ft8Messages.clear();
                             clearedNow = true;
                         }
-                        pendingCycleClear = true;
+                        // Arm the clear for THIS cycle, keyed by its slot utc. The first
+                        // decode pass of this slot applies it; a straggler from the previous
+                        // slot (smaller utc) is rejected in appendToMessageList, so it can't
+                        // consume this cycle's clear (#976).
+                        pendingClearSlotUtc = utc;
                     }
                     decodeCycleState.resetCount();
                     mutable_Decoded_Counter.postValue(0);
@@ -877,7 +886,7 @@ public class MainViewModel extends ViewModel {
                     // the waterfall, then stop here. Everything below this point acts
                     // on decodes (sequencer, databases, spotting) and must not see an
                     // own-callsign message, and `messages` is empty anyway.
-                    appendToMessageList(display);
+                    appendToMessageList(display, utc);
                     publishFt8MessageList();
                     finishDisplayPass(display, decoded.size(), isDeep);
                     resolveEchoLocations(display);
@@ -904,7 +913,7 @@ public class MainViewModel extends ViewModel {
                     }
                 }
 
-                appendToMessageList(display);
+                appendToMessageList(display, utc);
                 publishFt8MessageList();//post an immutable snapshot so the UI recomposes immediately
                 // Displayed DT. NOT the slot's raw mean (the `time_sec` argument, kept for
                 // the diagnostic below): a mean is at the mercy of one late station's DT, and
@@ -1468,8 +1477,8 @@ public class MainViewModel extends ViewModel {
      * True only when the auto-clear option is on AND the meter (wavelength) band
      * actually changed, so a no-op band re-select or a small in-band dial report from
      * the rig doesn't clear. Compares wavelength rather than the band-list index
-     * because {@link OperationBand#getIndexByFreq} appends a new entry for any unseen
-     * frequency, so the index can change within a single band. Pure decision logic,
+     * because {@link OperationBand#getIndexByFreq} reuses one ad-hoc slot for every
+     * off-plan frequency, so the index doesn't track the band. Pure decision logic,
      * unit-tested without the Android runtime.
      */
     public static boolean shouldClearOnBandChange(boolean enabled, String oldWaveLength, String newWaveLength) {
@@ -1543,28 +1552,50 @@ public class MainViewModel extends ViewModel {
      * Append one decode pass's messages to the displayed list, trimming it back
      * to the display cap under the same lock.
      *
-     * <p>"Clear every cycle" mode marks a clear as pending in {@code beforeListen}
-     * (start of the cycle); the first pass to get here applies it, wiping the old
-     * slot and adding the new one under the same lock, so the UI never sees an
-     * empty list in between. The excess-trim must hold the same monitor: it
-     * removes from the list, and an unguarded removal can race the snapshot copy
-     * in {@link #publishFt8MessageList()}.
+     * <p>"Clear every cycle" mode arms a clear for the new cycle's slot utc in
+     * {@code beforeListen} (start of the cycle); the first pass OF THAT SLOT applies
+     * it, wiping the old slot and adding the new one under the same lock, so the UI
+     * never sees an empty list in between. A straggling late/deep pass from the
+     * previous slot carries the older slot utc and is rejected by
+     * {@link #shouldApplyPendingClear}, so it augments the slot already shown rather
+     * than consuming the next slot's clear (#976). The excess-trim must hold the same
+     * monitor: it removes from the list, and an unguarded removal can race the
+     * snapshot copy in {@link #publishFt8MessageList()}.
      *
      * @param messages the pass's display list — with full duplex on this includes
      *                 our own transmission's echoes, which is why nothing else in
      *                 the decode pipeline is fed from it (see
      *                 {@link FullDuplexMonitor})
+     * @param slotUtc  the utc of the slot this pass decoded (matches the
+     *                 {@code beforeListen} utc for the same slot)
      */
-    private void appendToMessageList(ArrayList<Ft8Message> messages) {
+    private void appendToMessageList(ArrayList<Ft8Message> messages, long slotUtc) {
         synchronized (ft8Messages) {
-            if (pendingCycleClear) {
-                pendingCycleClear = false;
+            // Apply the deferred "clear every cycle" wipe only for the slot it was armed
+            // for (or a newer one). A straggling late/deep pass from an earlier slot
+            // (slotUtc < pendingClearSlotUtc) must NOT consume it, or the next real pass
+            // of this slot would append onto the previous slot's decodes (#976).
+            if (shouldApplyPendingClear(pendingClearSlotUtc, slotUtc)) {
+                pendingClearSlotUtc = 0;
                 if (GeneralVariables.clearDecodesEveryCycle) ft8Messages.clear();
             }
             ft8Messages.addAll(messages);
             //remove excess messages; FT8CN limits the total displayable messages
             GeneralVariables.trimToMessageCount(ft8Messages);
         }
+    }
+
+    /**
+     * Whether a decode pass delivering slot {@code passSlotUtc} should apply (and
+     * consume) a "clear every cycle" wipe armed for slot {@code pendingClearSlotUtc}.
+     * True only when a clear is pending ({@code != 0}) and the pass belongs to the
+     * armed cycle or a newer one. A straggler from an earlier slot
+     * ({@code passSlotUtc < pendingClearSlotUtc}) returns false, so it can't consume
+     * the next slot's clear. Pure decision logic, unit-tested without the Android
+     * runtime.
+     */
+    static boolean shouldApplyPendingClear(long pendingClearSlotUtc, long passSlotUtc) {
+        return pendingClearSlotUtc != 0 && passSlotUtc >= pendingClearSlotUtc;
     }
 
     /**
@@ -3167,6 +3198,190 @@ public class MainViewModel extends ViewModel {
         }
         setCatConnectionState(CatConnectionState.CONNECTING);
         baseRig.getConnector().connect();
+    }
+
+    /** A transmission or tune carrier is on the air (rig-handoff view). */
+    public boolean isTransmittingForHandoff() {
+        return ft8TransmitSignal != null
+                && (ft8TransmitSignal.isTransmitting() || ft8TransmitSignal.isTuning());
+    }
+
+    /**
+     * Stop whatever is on the air because a sibling app is taking the rig over, and
+     * disarm auto-TX so the next cycle does not key a rig we no longer hold.
+     */
+    public void stopTransmitForHandoff() {
+        if (ft8TransmitSignal == null) return;
+        ft8TransmitSignal.stopTune();
+        ft8TransmitSignal.setTransmitting(false);
+        ft8TransmitSignal.setActivated(false);
+    }
+
+    /**
+     * Let go of the rig for a sibling app: close the CAT link (which also ends its
+     * auto-reconnect loop) and rebuild the audio input, which — with
+     * {@code RigHandoffGate} already set — comes back up on the phone's own input
+     * instead of the rig's USB audio. The rebuild runs off the main thread because it
+     * joins the old capture thread.
+     */
+    public void releaseRigForHandoff() {
+        fileLog("RigHandoff: releasing rig (connected=" + isRigConnected() + ")");
+        // Armed auto-TX would otherwise fire next cycle with no rig: PTT to a closed
+        // port and the tones out of the phone speaker.
+        if (ft8TransmitSignal != null) {
+            ft8TransmitSignal.setActivated(false);
+        }
+        // A PTT-off that never reached the rig must be settled while the port is still
+        // open; after disconnect() there is nothing left to send it through.
+        retryPendingUnkey();
+        if (baseRig != null && baseRig.getConnector() != null) {
+            baseRig.getConnector().disconnect();
+        }
+        Thread t = new Thread(this::reinitializeAudioInput, "RigHandoffRelease");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Take the rig back after a handoff (or after a sibling confirmed it let go).
+     * Deliberately gentle: a healthy link and a live USB audio stream are left alone, so
+     * a redundant call never punches a capture gap into a decode in progress.
+     */
+    public void reclaimRigAfterHandoff() {
+        boolean connected = isRigConnected();
+        boolean usbAudioWanted = com.k1af.ft8af.handoff.RigHandoffGate.mayOpenUsbAudioInput(
+                GeneralVariables.audioInputDeviceId, GeneralVariables.usbAudioInputVendorId);
+        boolean usbAudioLive = hamRecorder != null
+                && hamRecorder.getMicRecorder().isUsingUsbDirect();
+        fileLog("RigHandoff: reclaiming rig (connected=" + connected
+                + " usbAudioWanted=" + usbAudioWanted + " usbAudioLive=" + usbAudioLive + ")");
+        if (!connected) {
+            if (baseRig != null && baseRig.getConnector() != null) {
+                reconnectRig();
+            } else {
+                // Never connected this process: let the port scan drive auto-connect.
+                getUsbDevice();
+            }
+        }
+        if (usbAudioWanted && !usbAudioLive) {
+            Thread t = new Thread(this::reinitializeAudioInput, "RigHandoffReclaim");
+            t.setDaemon(true);
+            t.start();
+        }
+    }
+
+    /**
+     * The operator's "Take control of radio" button: a hard reset of this app's hold on
+     * the rig. Claims the rig from sibling apps, stops anything on the air, drops the
+     * CAT link, asks again for every USB permission this app needs and does not hold
+     * (ignoring the dialog cooldown), then reconnects the rig and rebuilds the audio
+     * input. See {@link com.k1af.ft8af.handoff.RigHardReset}.
+     *
+     * @return what was found and what is missing, so the button can tell the operator
+     *         whether a permission prompt is coming or everything was already allowed
+     */
+    public com.k1af.ft8af.handoff.RigHardReset.Result hardResetRigConnection() {
+        fileLog("RigReset: hard reset requested (connected=" + isRigConnected()
+                + " yieldedTo=" + com.k1af.ft8af.handoff.RigHandoffGate.yieldedTo() + ")");
+        // 1. Claim the rig: opens the gate and tells the siblings to let go.
+        com.k1af.ft8af.handoff.RigHandoffController handoff =
+                com.k1af.ft8af.handoff.RigHandoff.get();
+        if (handoff != null) {
+            handoff.onForegrounded(System.currentTimeMillis());
+        }
+        // 2. Tear down. An owed PTT-off goes out while the port is still open.
+        stopTransmitForHandoff();
+        retryPendingUnkey();
+        final boolean hadConnector = baseRig != null && baseRig.getConnector() != null;
+        if (hadConnector) {
+            baseRig.getConnector().disconnect();
+        }
+        // 3. Permissions. The serial device is asked for by the reconnect below.
+        UsbPermissionThrottle.forgetAll();
+        final boolean usbCable = GeneralVariables.connectMode == ConnectMode.USB_CABLE;
+        final java.util.List<com.k1af.ft8af.handoff.RigHardReset.UsbId> attached = attachedUsbIds(usbCable);
+        final int found = com.k1af.ft8af.handoff.RigHardReset.rigDevices(attached).size();
+        final int missing = com.k1af.ft8af.handoff.RigHardReset.missingPermission(attached).size();
+        fileLog("RigReset: rig USB devices found=" + found + " missingPermission=" + missing);
+        final int asked = requestMissingUsbAudioPermissions(attached);
+        // 4. Reconnect once the siblings have had time to release.
+        final com.k1af.ft8af.handoff.RigHardReset.Reconnect plan =
+                com.k1af.ft8af.handoff.RigHardReset.planReconnect(
+                        usbCable, hadConnector);
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            fileLog("RigReset: reconnecting (" + plan + ", permissionDialogs=" + asked + ")");
+            switch (plan) {
+                case SCAN_USB:
+                    getUsbDevice();
+                    break;
+                case RECONNECT_EXISTING:
+                    reconnectRig();
+                    break;
+                default:
+                    break;
+            }
+            // Unconditional, unlike the gentle reclaim: this is the hard reset.
+            Thread t = new Thread(this::reinitializeAudioInput, "RigHardReset");
+            t.setDaemon(true);
+            t.start();
+        }, com.k1af.ft8af.handoff.RigHardReset.RECONNECT_DELAY_MS);
+        return new com.k1af.ft8af.handoff.RigHardReset.Result(found, missing, usbCable);
+    }
+
+    /**
+     * Every attached USB device, tagged with how this app would use it: the operator's
+     * configured audio device, and (in USB-cable mode) a serial port for the CAT link.
+     */
+    private java.util.List<com.k1af.ft8af.handoff.RigHardReset.UsbId> attachedUsbIds(boolean usbCable) {
+        java.util.List<com.k1af.ft8af.handoff.RigHardReset.UsbId> ids = new ArrayList<>();
+        Context context = GeneralVariables.getMainContext();
+        if (context == null) return ids;
+        UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        if (usbManager == null) return ids;
+        java.util.List<CableSerialPort.SerialPort> ports = usbCable
+                ? CableSerialPort.listSerialPorts(context)
+                : new ArrayList<CableSerialPort.SerialPort>();
+        for (UsbDevice d : usbManager.getDeviceList().values()) {
+            boolean audio = GeneralVariables.isConfiguredUsbAudioInput(
+                    d.getVendorId(), d.getProductId())
+                    || GeneralVariables.isConfiguredUsbAudioOutput(
+                    d.getVendorId(), d.getProductId());
+            boolean serial = false;
+            for (CableSerialPort.SerialPort p : ports) {
+                if (p.deviceId == d.getDeviceId()) {
+                    serial = true;
+                    break;
+                }
+            }
+            ids.add(new com.k1af.ft8af.handoff.RigHardReset.UsbId(d.getVendorId(), d.getProductId(),
+                    audio, serial, usbManager.hasPermission(d)));
+        }
+        return ids;
+    }
+
+    /**
+     * Raise a permission dialog for each configured USB audio device this app may not
+     * open. A grant rebinds the audio input (see {@link #requestUsbPermissionIfNeeded}).
+     */
+    private int requestMissingUsbAudioPermissions(
+            java.util.List<com.k1af.ft8af.handoff.RigHardReset.UsbId> attached) {
+        Context context = GeneralVariables.getMainContext();
+        if (context == null) return 0;
+        UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+        if (usbManager == null) return 0;
+        int asked = 0;
+        for (com.k1af.ft8af.handoff.RigHardReset.UsbId id : com.k1af.ft8af.handoff.RigHardReset.audioDevicesToAsk(attached)) {
+            for (UsbDevice d : usbManager.getDeviceList().values()) {
+                if (d.getVendorId() == id.vendorId && d.getProductId() == id.productId) {
+                    fileLog(String.format("RigReset: asking USB permission for audio %04X:%04X",
+                            id.vendorId, id.productId));
+                    requestUsbPermissionIfNeeded(d);
+                    asked++;
+                    break;
+                }
+            }
+        }
+        return asked;
     }
 
     /**
