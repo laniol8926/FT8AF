@@ -6,6 +6,7 @@ import {
   mergeRxLog,
   qsoHeaderText,
   qsoLogKey,
+  seedCqEntry,
   type QsoLogEntry,
 } from "./activeQsoPanel";
 import type { UiMessage } from "./ipc";
@@ -32,34 +33,34 @@ function msg(overrides: Partial<UiMessage> = {}): UiMessage {
 
 describe("buildQsoLog", () => {
   it("returns empty for an empty target", () => {
-    expect(buildQsoLog([msg()], "")).toEqual([]);
+    expect(buildQsoLog([msg()], "", 0)).toEqual([]);
   });
 
   it("classifies a message from the target to us as rx", () => {
-    const result = buildQsoLog([msg({ to_me: true, snr: -7 })], "RA3XYZ");
+    const result = buildQsoLog([msg({ to_me: true, snr: -7 })], "RA3XYZ", 0);
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("rx");
     expect(result[0].snr).toBe(-7);
   });
 
   it("classifies a message from the target to someone else as busy", () => {
-    const result = buildQsoLog([msg({ to_me: false })], "RA3XYZ");
+    const result = buildQsoLog([msg({ to_me: false })], "RA3XYZ", 0);
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("busy");
   });
 
   it("ignores unrelated traffic", () => {
-    const result = buildQsoLog([msg({ call_from: "JA1XYZ", to_me: false })], "RA3XYZ");
+    const result = buildQsoLog([msg({ call_from: "JA1XYZ", to_me: false })], "RA3XYZ", 0);
     expect(result).toEqual([]);
   });
 
   it("target match is case insensitive", () => {
-    const result = buildQsoLog([msg({ call_from: "ra3xyz" })], "RA3XYZ");
+    const result = buildQsoLog([msg({ call_from: "ra3xyz" })], "RA3XYZ", 0);
     expect(result).toHaveLength(1);
   });
 
   it("excludes a CQ/DE/QRZ call from the target -- not busy, not rx (#254)", () => {
-    const result = buildQsoLog([msg({ is_cq: true, to_me: false })], "RA3XYZ");
+    const result = buildQsoLog([msg({ is_cq: true, to_me: false })], "RA3XYZ", 0);
     expect(result).toEqual([]);
   });
 
@@ -67,8 +68,52 @@ describe("buildQsoLog", () => {
     const result = buildQsoLog(
       [msg({ utc_ms: 2_000 }), msg({ utc_ms: 1_000 })],
       "RA3XYZ",
+      0,
     );
     expect(result.map((e) => e.utcMs)).toEqual([2_000, 1_000]); // preserves input order; merge sorts
+  });
+
+  it("excludes anything older than sinceMs -- a station's activity from before this run started", () => {
+    // Real bug, found live: answering a station immediately flooded the
+    // panel with that station's OLDER activity (minutes-old chatter from
+    // before this run even began), since `messages` is the app's whole
+    // rolling decode history with no time floor.
+    const result = buildQsoLog(
+      [msg({ utc_ms: 500, to_me: false }), msg({ utc_ms: 1_500, to_me: false })],
+      "RA3XYZ",
+      1_000,
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].utcMs).toBe(1_500);
+  });
+
+  it("still shows activity from the target with someone else, decoded after the run started", () => {
+    // The flip side of the fix above, explicitly confirmed by the user: if
+    // he doesn't answer but works someone else instead, we should keep
+    // seeing that -- we're still trying to reach him until he answers, we
+    // cancel, or he comes back to us.
+    const result = buildQsoLog([msg({ utc_ms: 5_000, to_me: false })], "RA3XYZ", 1_000);
+    expect(result).toHaveLength(1);
+    expect(result[0].direction).toBe("busy");
+  });
+});
+
+describe("seedCqEntry", () => {
+  it("is null with no seed", () => {
+    expect(seedCqEntry(null, "RA3XYZ")).toBeNull();
+  });
+
+  it("is null when the seed is from someone other than the target (stale from a prior run)", () => {
+    expect(seedCqEntry(msg({ call_from: "JA1XYZ", is_cq: true }), "RA3XYZ")).toBeNull();
+  });
+
+  it("surfaces the seed CQ's own text/time/snr even though it predates the run", () => {
+    const entry = seedCqEntry(msg({ call_from: "RA3XYZ", is_cq: true, utc_ms: 500, text: "CQ RA3XYZ KN55" }), "RA3XYZ");
+    expect(entry).toEqual({ direction: "busy", utcMs: 500, text: "CQ RA3XYZ KN55", snr: -10 });
+  });
+
+  it("target match is case insensitive", () => {
+    expect(seedCqEntry(msg({ call_from: "ra3xyz", is_cq: true }), "RA3XYZ")).not.toBeNull();
   });
 });
 

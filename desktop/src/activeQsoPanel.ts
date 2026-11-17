@@ -56,14 +56,23 @@ export function qsoLogKey(entry: QsoLogEntry): string {
  * `decideTxLog`. Matches Android's `buildQsoLog` exactly, simplified by
  * desktop already carrying `to_me`/`is_cq` per-message (no need to
  * re-derive `checkIsMyCallsign`/`checkIsCQ` here).
+ *
+ * `sinceMs` excludes anything older than the current run -- real bug,
+ * found live: `messages` is the app's whole rolling decode history, so
+ * without this floor, answering a station immediately flooded the panel
+ * with that station's *older* activity (a QSO he'd worked minutes earlier,
+ * before this run even started), not just what happens from here on.
+ * Callers pass the moment the run started (or the seed CQ's own
+ * timestamp -- see `seedCqEntry`), not a fixed window.
  */
-export function buildQsoLog(messages: UiMessage[], target: string): QsoLogEntry[] {
+export function buildQsoLog(messages: UiMessage[], target: string, sinceMs: number): QsoLogEntry[] {
   if (!target) return [];
   const upperTarget = target.toUpperCase();
   const entries: QsoLogEntry[] = [];
   for (const m of messages) {
     if (m.call_from.toUpperCase() !== upperTarget) continue;
     if (m.is_cq) continue;
+    if (m.utc_ms < sinceMs) continue;
     entries.push({
       direction: m.to_me ? "rx" : "busy",
       utcMs: m.utc_ms,
@@ -72,6 +81,22 @@ export function buildQsoLog(messages: UiMessage[], target: string): QsoLogEntry[
     });
   }
   return entries;
+}
+
+/**
+ * The one deliberate exception to `buildQsoLog`'s "no CQs" rule: the exact
+ * CQ the operator clicked to answer him in the first place. Without it, the
+ * single most relevant line -- *why* the panel is now "Waiting for
+ * <target>" -- never appeared, even though it's what the panel header text
+ * promises the operator is responding to. Only ever shown once, as the
+ * log's opening entry -- a later bare CQ from him while we're still waiting
+ * stays excluded, per the existing rule (he's not "busy," and we already
+ * know he's there). `null` if `seedCq` is absent or is from someone other
+ * than `target` (stale from a previous run the caller forgot to clear).
+ */
+export function seedCqEntry(seedCq: UiMessage | null, target: string): QsoLogEntry | null {
+  if (!seedCq || seedCq.call_from.toUpperCase() !== target.toUpperCase()) return null;
+  return { direction: "busy", utcMs: seedCq.utc_ms, text: seedCq.text, snr: seedCq.snr };
 }
 
 /** Upper bound on accumulated RX/BUSY rows for one target -- matches

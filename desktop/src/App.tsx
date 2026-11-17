@@ -89,7 +89,7 @@ import {
   type QsoStatus as QsoStatusName,
 } from "./qsoStatus";
 import {
-  buildQsoLog, decideTxLog, formatTxLogText, mergeRxLog, qsoHeaderText, type QsoLogEntry,
+  buildQsoLog, decideTxLog, formatTxLogText, mergeRxLog, qsoHeaderText, seedCqEntry, type QsoLogEntry,
 } from "./activeQsoPanel";
 import {
   buildQsoSteps, computeBeamHeadings, computeCurrentStepIndex, computeDistanceText,
@@ -284,6 +284,13 @@ export default function App() {
   const wasActiveRef = useRef(false);
   const wasTransmittingRef = useRef(false);
   const pendingTxLogRef = useRef(false);
+  // The exact CQ the operator clicked to answer (see activeQsoPanel.ts's
+  // seedCqEntry) -- stashed here, not state, since it's read once at the
+  // next rising edge and must never itself trigger a render. rxLogSinceMs
+  // is that same rising edge's floor for buildQsoLog, so a station's
+  // older activity (from before this run started) never floods the panel.
+  const seedCqRef = useRef<UiMessage | null>(null);
+  const rxLogSinceMsRef = useRef(0);
   // QSO Sheet (qsoSheet.ts) -- the station-detail dialog with an explicit
   // Call button. Matches Android's real DecodeRow exactly: a single
   // tap/click answers immediately (mainViewModel.callStation), and a
@@ -352,24 +359,35 @@ export default function App() {
   // true edge of status.active, matching Android's own
   // `LaunchedEffect(isActivated, continuousLog)`.
   const txActive = txState?.status.active ?? false;
+  const logTarget = txState?.status.target ?? null;
   useEffect(() => {
     if (txActive && !wasActiveRef.current) {
-      setRxLog([]);
+      // Real bug, found live: answering a station's CQ showed that
+      // station's OLDER activity (minutes-old chatter from before this run
+      // even started) instead of the one message that actually matters --
+      // his CQ, the reason the panel now reads "Waiting for <call>" -- which
+      // buildQsoLog deliberately never shows on its own (#254: a bare CQ
+      // isn't "busy"). Seed the log with exactly that one CQ when there is
+      // one (a manual Answer click), and set the floor fresh decodes are
+      // judged against from here on, so older history never floods back in.
+      const seeded = seedCqEntry(seedCqRef.current, logTarget ?? "");
+      setRxLog(seeded ? [seeded] : []);
+      rxLogSinceMsRef.current = Date.now();
+      seedCqRef.current = null;
       setTxLog([]);
       wasTransmittingRef.current = false;
       pendingTxLogRef.current = false;
     }
     wasActiveRef.current = txActive;
-  }, [txActive]);
+  }, [txActive, logTarget]);
 
   // Fold this snapshot's decodes from the live target into the durable RX/
   // BUSY log. Reads the raw (unfiltered) `messages`, not the decode list's
   // currently-visible subset -- an unrelated filter chip (e.g. Show Only
   // CQ) must never hide the other station's half of our own QSO.
-  const logTarget = txState?.status.target ?? null;
   useEffect(() => {
     if (!logTarget) return;
-    const incoming = buildQsoLog(messages, logTarget);
+    const incoming = buildQsoLog(messages, logTarget, rxLogSinceMsRef.current);
     setRxLog((existing) => mergeRxLog(existing, incoming));
   }, [messages, logTarget]);
 
@@ -578,6 +596,11 @@ export default function App() {
   // Shared by the decode row's direct click and the QSO Sheet's Call
   // button, so both paths send the exact same answer.
   function answerStation(m: UiMessage) {
+    // Stash the CQ being answered so the panel-reset effect above can seed
+    // the log with it (see seedCqRef's own doc comment) -- only meaningful
+    // when it actually is his CQ; answering a direct reply to us has
+    // nothing to seed, that message already shows up as a normal rx row.
+    if (m.is_cq) seedCqRef.current = m;
     api.answer({
       call_from: m.call_from, grid: m.grid, snr: m.snr,
       delta_freq: holdTxFreq ? 0 : Math.round(m.freq_hz),
