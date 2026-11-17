@@ -1554,7 +1554,24 @@ impl Engine {
             self.now(),
         );
 
-        if let Some(QsoOutcome::Completed(mut record)) = self.qso.process_rx(&decoded) {
+        // Own-slot skip: on a slot assigned to OUR transmit parity, the
+        // partner structurally can't be replying (FT8 QSOs alternate by
+        // parity -- half of every full round trip is "our turn," where
+        // nobody else transmits). Real bug, found live: without this,
+        // every real round trip counted as TWO misses instead of one
+        // (one for the partner's genuine silence, one for our own
+        // trivially-empty transmit slot), so the TX Watchdog/"Stop
+        // After" (no_reply_count) and the CQ Watchdog (cq_no_reply_count)
+        // both gave up at roughly HALF their configured limit -- e.g.
+        // "3" produced only ~1-2 real retries, not 3. Mirrors Android's
+        // own equivalent guard (`parseMessageToFunction`'s own-slot
+        // early-out, `msgList.get(0).getSequence() == sequential`).
+        // `tx_parity` is `None` until we've transmitted at least once
+        // this run, so nothing is skipped before our first over.
+        let is_own_tx_slot = self.tx_parity == Some(slot_id.rem_euclid(2));
+        let qso_outcome = if is_own_tx_slot { None } else { self.qso.process_rx(&decoded) };
+
+        if let Some(QsoOutcome::Completed(mut record)) = qso_outcome {
             // The operator's current power setting at the moment the QSO
             // completes (ADIF TX_PWR) -- matches Android's own
             // QSLTable.tx_pwr. `qso.rs` builds the record without DB/config
@@ -2773,6 +2790,7 @@ mod tests {
     };
     use crate::audio::channel_select;
     use crate::db::Db;
+    use crate::qso::TxStage;
     use crate::dsp::DecodedMessage;
     use crate::qmx_cat_tones as cat_tones;
     use crate::mode::{Mode, DEFAULT_PTT_DELAY_MS};
@@ -3624,5 +3642,60 @@ mod tests {
         assert_eq!(engine.qso.no_reply_limit, 5);
         assert_eq!(engine.qso.cq_no_reply_limit, 10);
         assert_eq!(engine.db.get_config("cqNoReplyLimit").as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn own_tx_parity_slot_is_not_counted_as_a_tx_watchdog_miss() {
+        // Real bug, found live: every decoded slot -- including our OWN
+        // transmit slot, where the partner structurally can't be replying
+        // (FT8 alternates by parity) -- was passed to qso.process_rx, so a
+        // full round trip (our slot + theirs) counted as TWO misses
+        // instead of one. "Stop After 3" gave up after only ~1-2 real
+        // retries, not 3.
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(),
+            call_from: "N2JFD".into(),
+            grid: "FM09".into(),
+            snr: -10,
+            ..Default::default()
+        });
+        assert_eq!(engine.qso.status().stage, TxStage::Grid);
+        engine.qso.no_reply_limit = 3;
+        engine.tx_parity = Some(0); // we transmit on even slots, they on odd
+
+        engine.handle_decoded(vec![], 0); // ours -- must not count
+        engine.handle_decoded(vec![], 1); // theirs, silent -- 1st real miss
+        engine.handle_decoded(vec![], 2); // ours -- must not count
+        engine.handle_decoded(vec![], 3); // theirs, silent -- 2nd real miss
+        assert_eq!(
+            engine.qso.status().stage,
+            TxStage::Grid,
+            "must still be retrying after only 2 real misses, not given up early"
+        );
+        engine.handle_decoded(vec![], 4); // ours -- must not count
+        engine.handle_decoded(vec![], 5); // theirs, silent -- 3rd real miss -> give up
+        assert_eq!(
+            engine.qso.status().stage,
+            TxStage::Cq,
+            "gives up at exactly 3 real retries, matching the configured limit"
+        );
+    }
+
+    #[test]
+    fn own_tx_parity_slot_is_not_counted_as_a_cq_watchdog_miss() {
+        // Same bug, same fix, for the idle-CQ counter.
+        let mut engine = test_engine();
+        engine.qso.start_cq();
+        engine.qso.cq_no_reply_limit = 2;
+        engine.tx_parity = Some(0);
+
+        engine.handle_decoded(vec![], 0); // ours -- must not count
+        engine.handle_decoded(vec![], 1); // theirs, silent -- 1st real miss
+        assert!(engine.qso.active, "must still be calling CQ after only 1 real miss");
+        engine.handle_decoded(vec![], 2); // ours -- must not count
+        engine.handle_decoded(vec![], 3); // theirs, silent -- 2nd real miss -> give up
+        assert!(!engine.qso.active, "gives up at exactly 2 real misses, matching the configured limit");
     }
 }
