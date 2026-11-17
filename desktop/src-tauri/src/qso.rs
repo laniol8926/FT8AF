@@ -217,9 +217,10 @@ impl QsoEngine {
     }
 
     /// The scheduler calls this after the current `tx_message` has actually been
-    /// handed to the transmitter. It only matters for the courtesy "73": it marks
-    /// the Bye73 as sent so the next `process_rx` may wrap the QSO up. For every
-    /// other stage the sequencer advances on received replies, so this is a no-op.
+    /// *handed to the transmitter* (keyed, not yet finished playing) --
+    /// it only matters for the courtesy "73": it marks the Bye73 as sent.
+    /// For every other stage the sequencer advances on received replies,
+    /// so this is a no-op.
     pub fn notify_transmitted(&mut self) {
         if self.stage == TxStage::Bye73 {
             self.bye73_sent = true;
@@ -231,6 +232,27 @@ impl QsoEngine {
         // both are counted for parity with Android's own order-4/5 counter.
         if matches!(self.stage, TxStage::Rr73 | TxStage::Bye73) {
             self.final_ack_sends = self.final_ack_sends.saturating_add(1);
+        }
+    }
+
+    /// The scheduler calls this once the courtesy 73's transmission has
+    /// actually *finished* keying (PTT dropped) -- `engine.rs`'s
+    /// `finalize_tx`, the one place every TX mode (audio and CAT-tone)
+    /// already detects "the waveform/symbols are done." Wraps the QSO up
+    /// right then, instead of waiting for the next decoded slot's
+    /// `process_rx` call to notice `bye73_sent` (up to ~30s later -- a real
+    /// UX bug, found live: the operator missed 2-3 decode cycles after
+    /// every single QSO while the docked panel stayed up with nothing left
+    /// to do). A no-op unless we're genuinely still at Bye73 with the
+    /// message already confirmed sent, so calling this after every TX
+    /// completion (including ones that have nothing to do with a QSO, e.g.
+    /// a bare CQ or Tune) is harmless. `process_rx`'s own Bye73 check is
+    /// left in place as a fallback -- stage will simply no longer be Bye73
+    /// by the time it runs, so it's a no-op there once this has already
+    /// fired.
+    pub fn finish_if_bye73_sent(&mut self) {
+        if self.stage == TxStage::Bye73 && self.bye73_sent {
+            self.finish_qso();
         }
     }
 
@@ -354,12 +376,14 @@ impl QsoEngine {
             return None;
         }
 
-        // A courtesy "73" is queued (RReport -> RR73, or a manual Tx5). Only wrap
-        // up (return to CQ / stop) once it has *actually* been transmitted — the
-        // scheduler signals that via `notify_transmitted`. If it hasn't gone out
-        // yet (missed TX window, rig busy, encode failure), leave the message
-        // queued so the scheduler retransmits it next slot instead of clobbering
-        // it. Either way we don't act on incoming traffic while a 73 is pending.
+        // A courtesy "73" is queued (RReport -> RR73, or a manual Tx5). Normally
+        // already wrapped up by now -- `finish_if_bye73_sent` fires the instant
+        // the 73's transmission actually finishes (engine.rs's `finalize_tx`),
+        // not here. This is the fallback for the one case that can't: if it
+        // hasn't gone out yet (missed TX window, rig busy, encode failure),
+        // leave the message queued so the scheduler retransmits it next slot
+        // instead of clobbering it. Either way we don't act on incoming traffic
+        // while a 73 is pending.
         if self.stage == TxStage::Bye73 {
             if self.bye73_sent {
                 self.finish_qso();

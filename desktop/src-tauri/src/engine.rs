@@ -2041,6 +2041,17 @@ impl Engine {
         // had_tune, if TuneHandle::Audio, drops its TunePlayback here (end of
         // scope), halting the looping carrier.
         if had_audio || had_cat || had_tune.is_some() {
+            // The courtesy 73's transmission just finished (audio or
+            // CAT-tone, never Tune -- Tune never touches qso.rs at all) --
+            // wrap the QSO up right now rather than waiting for the next
+            // decoded slot's process_rx to notice. Real UX bug, found live:
+            // that wait cost the operator 2-3 missed decode cycles after
+            // every single QSO. A no-op unless we're genuinely still at
+            // Bye73 with the message confirmed sent, so this is harmless
+            // after any other kind of transmission.
+            if had_audio || had_cat {
+                self.qso.finish_if_bye73_sent();
+            }
             self.set_ptt(false);
             self.publish_tx_state();
         }
@@ -2784,19 +2795,19 @@ mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, format_watts, reply_tx_audio_hz, rms_dbfs,
         should_default_qmx_cat_tones_on, should_refresh_ptt, resolve_tx_audio_channel,
-        waterfall_row_due, wf_boundary_row, Engine, EngineCommand, EngineEvent, TuneHandle, CLIP_PEAK,
+        waterfall_row_due, wf_boundary_row, CatToneTx, Engine, EngineCommand, EngineEvent, TuneHandle, CLIP_PEAK,
         DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ,
         MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::audio::channel_select;
     use crate::db::Db;
-    use crate::qso::TxStage;
-    use crate::dsp::DecodedMessage;
+    use crate::qso::{QsoOutcome, TxStage};
+    use crate::dsp::{encode, DecodedMessage};
     use crate::qmx_cat_tones as cat_tones;
     use crate::mode::{Mode, DEFAULT_PTT_DELAY_MS};
     use crate::rig::{RigBackend, QRPLABS_QMX_HAMLIB_MODEL};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn tx_audio_channel_auto_detects_left_for_a_qmx_when_unset() {
@@ -3681,6 +3692,109 @@ mod tests {
             TxStage::Cq,
             "gives up at exactly 3 real retries, matching the configured limit"
         );
+    }
+
+    #[test]
+    fn own_tx_parity_slot_skip_does_not_delay_a_bye73_completion() {
+        // Checked carefully after a user report ("panel did not return to
+        // decoding" after a logged QSO with Auto-CQ off): does skipping
+        // process_rx on our own transmit-parity slot ever delay or drop the
+        // Bye73 -> finish_qso() completion check? It must not -- bye73_sent
+        // is set by notify_transmitted (called from maybe_transmit, entirely
+        // independent of the process_rx skip), and the completion check
+        // itself always lands on the PARTNER's parity (the slot after ours),
+        // which this fix never skips.
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.auto_return_to_cq = false;
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(),
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            ..Default::default()
+        });
+        // DX reports us, then sends RR73 -- advances straight to Bye73.
+        engine.qso.process_rx(&[DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "-12".into(), snr: -8, ..Default::default()
+        }]);
+        let outcome = engine.qso.process_rx(&[DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
+        }]);
+        assert!(matches!(outcome, Some(QsoOutcome::Completed(_))));
+        assert_eq!(engine.qso.status().stage, TxStage::Bye73);
+        assert!(engine.qso.active, "still armed to send the courtesy 73");
+
+        // The scheduler actually transmits the 73 (our parity slot).
+        engine.qso.notify_transmitted();
+        engine.tx_parity = Some(0);
+
+        // Our own next slot -- process_rx must be skipped, but that must not
+        // matter: nothing to complete here, the real check lands on theirs.
+        engine.handle_decoded(vec![], 2);
+        assert!(engine.qso.active, "must not have finished yet -- wrong (our) parity");
+
+        // Their slot: the real completion check fires here, undelayed.
+        engine.handle_decoded(vec![], 3);
+        assert!(!engine.qso.active, "must finish (Auto-CQ off) on the very next non-skipped slot");
+        assert_eq!(engine.qso.status().stage, TxStage::Idle);
+
+        // And it must STAY off -- further decodes (either parity) must not
+        // reactivate anything.
+        engine.handle_decoded(vec![], 4);
+        engine.handle_decoded(vec![], 5);
+        assert!(!engine.qso.active, "must stay off, not get re-armed by later slots");
+    }
+
+    #[test]
+    fn finalize_tx_ends_the_qso_the_instant_the_73_finishes_transmitting() {
+        // Real UX bug, found live: "after logging a qso the panel did not
+        // return to decoding... after i sent my 73." The QSO was only ever
+        // wrapped up by the NEXT decoded slot noticing bye73_sent (up to
+        // ~30s, 2-3 missed decode cycles) -- finalize_tx (the one place
+        // audio AND CAT-tone TX both already detect "the transmission just
+        // finished") must do it immediately instead, with no decoded slot
+        // involved at all.
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.auto_return_to_cq = false;
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "FN42".into(), snr: -5, ..Default::default()
+        });
+        engine.qso.process_rx(&[DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "-12".into(), snr: -8, ..Default::default()
+        }]);
+        let outcome = engine.qso.process_rx(&[DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
+        }]);
+        assert!(matches!(outcome, Some(QsoOutcome::Completed(_))));
+        assert_eq!(engine.qso.status().stage, TxStage::Bye73);
+
+        // The scheduler keys the 73 (notify_transmitted, same as the real
+        // start_transmit -> notify_transmitted call in maybe_transmit) and
+        // the CAT-tone transmission is now in flight.
+        engine.qso.notify_transmitted();
+        engine.tx_cat = Some(CatToneTx {
+            tones: [0; encode::FT4_NN],
+            len: 0,
+            symbol_period: 0.16,
+            base_hz: 1500.0,
+            start: Instant::now(),
+            sent_through: 0,
+            skip_until: 0,
+        });
+        assert!(engine.qso.active, "still finishing the over, not done yet");
+
+        // The transmission finishes -- no decoded slot anywhere in sight.
+        engine.finalize_tx();
+
+        assert!(!engine.qso.active, "must end the instant the 73 finishes transmitting");
+        assert_eq!(engine.qso.status().stage, TxStage::Idle);
     }
 
     #[test]
