@@ -239,7 +239,10 @@ fn spawn_listener(sock: &UdpSocket, cmd_tx: Sender<EngineCommand>) -> Result<Lis
 fn to_command(buf: &[u8]) -> Option<EngineCommand> {
     match codec::parse_inbound(buf)? {
         codec::Inbound::Reply { call, grid, snr, delta_freq } => Some(EngineCommand::Answer(
-            AnswerArgs { call_from: call, grid, snr, delta_freq },
+            // WSJT-X's Reply packet carries no decode timestamp, so this
+            // falls back to the click-time parity -- see `AnswerArgs::
+            // msg_utc_ms`'s own doc comment.
+            AnswerArgs { call_from: call, grid, snr, delta_freq, msg_utc_ms: None },
         )),
         // We only support a global halt; `auto_only` doesn't map to a separate
         // manual-TX path here, so any halt request stops TX.

@@ -414,6 +414,22 @@ pub struct AnswerArgs {
     /// answer" sends) means "keep the current TX offset".
     #[serde(default)]
     pub delta_freq: u32,
+    /// The target's own decoded-message timestamp (`UiMessage.utc_ms` /
+    /// `SlotMessage.utcMs` on the frontend) -- lets us derive "opposite the
+    /// DX" from the slot HE actually transmitted in, rather than whatever
+    /// slot we happen to be in at click time. The two usually agree, but
+    /// decode results land ~13s into a 15s slot, leaving the operator only
+    /// a couple of seconds to react before the slot boundary; if the click
+    /// (and this command's arrival) lands just past it, `self.cur_parity()`
+    /// would be one slot later than his CQ -- i.e. the SAME parity as him,
+    /// not opposite -- locking our whole QSO onto the wrong slot. Confirmed
+    /// live: "my first call to him was in the correct slot but every
+    /// transmission after that was in the wrong slot" / "he is transmitting
+    /// in an odd slot but so am i". `None` (any caller that doesn't have a
+    /// decode timestamp handy, e.g. a future UDP-driven Reply) falls back to
+    /// the old click-time behavior.
+    #[serde(default)]
+    pub msg_utc_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -944,6 +960,37 @@ struct Engine {
     /// time a CQ/QSO starts (`StartCq` seeds `tx_parity` from this instead of
     /// `None`); it never overrides an already-locked in-progress QSO's parity.
     preferred_tx_parity: Option<i64>,
+    /// Captured just before `Answer` overwrites `preferred_tx_parity` to
+    /// reply opposite a CQing station, so it can be put back once the
+    /// excursion ends -- QSO completed (`QsoOutcome::Completed`) or a
+    /// watchdog forced it to stop (`QsoOutcome::GaveUpTarget`). Real UX
+    /// requirement, stated live: "should the slot setting only change for
+    /// the duration of the QSO or potential QSO and then revert to its
+    /// original setting" -- your own habitual CQ-calling slot is a personal
+    /// collision-avoidance choice, unrelated to whichever slot a particular
+    /// station happened to use, so it shouldn't silently drift to whoever
+    /// you last answered.
+    ///
+    /// `None` = no restore owed (operating on our own habitual parity, not
+    /// mid-answer). `Some(x)` = restore `preferred_tx_parity` to `x` once
+    /// the excursion concludes. Deliberately NOT re-captured by a second
+    /// `Answer` while already pending (e.g. manually abandoning one target
+    /// to answer a different one) -- the ORIGINAL pre-excursion value must
+    /// survive however many stations the excursion spans, not just the
+    /// most recent one. Also deliberately NOT applied to `tx_parity`
+    /// itself (the active lock) -- only to the *preference* that seeds the
+    /// next fresh `StartCq`. `tx_parity` only ever changes via an explicit
+    /// activation command, never automatically when a watchdog gives up
+    /// (`give_up_target` flips `qso.rs`'s own stage back to Cq internally,
+    /// without going through `EngineCommand::StartCq`) -- so a late reply
+    /// reopening a just-abandoned target (the exact scenario flagged live:
+    /// "what would happen if I've reverted to the message panel because
+    /// I've given up but get a late reply from him") still finds
+    /// `tx_parity` untouched and correct, never the reverted preference.
+    /// An explicit `SetTxPeriod` cancels a pending restore outright (see
+    /// its own handler) -- the operator manually changing their preference
+    /// mid-excursion means "until I change it" has already happened.
+    preferred_tx_parity_restore: Option<Option<i64>>,
     /// Whether this run has actually keyed a real over yet -- set `false` by
     /// every activation command (StartCq/Answer/SetStage/FreeText), `true`
     /// only inside `maybe_transmit`'s success branch. Real bug, found live
@@ -1288,6 +1335,7 @@ impl Engine {
             last_ptt_on_sent: None,
             tx_parity: None,
             preferred_tx_parity: None,
+            preferred_tx_parity_restore: None,
             has_transmitted_this_run: false,
             clock_offset_ms: saved_offset.unwrap_or(0),
             time_synced: saved_offset.is_some(),
@@ -1643,17 +1691,22 @@ impl Engine {
         let is_own_tx_slot = !self.has_transmitted_this_run
             || self.tx_parity == Some(slot_id.rem_euclid(2));
         // TEMPORARY diagnostic (CQ Watchdog "called CQ 4 times, limit 3"
-        // report) -- remove once a real trace confirms or rules this out.
-        if self.qso.status().stage == crate::qso::TxStage::Cq {
-            eprintln!(
-                "[cq-watchdog] handle_decoded slot={slot_id} parity={} tx_parity={:?} own_slot={is_own_tx_slot} n_decoded={} active={}",
-                slot_id.rem_euclid(2), self.tx_parity, decoded.len(), self.qso.active,
-            );
-        }
+        // report; widened for the 15s-apart double-transmission report,
+        // now confirmed on Answer too, not just bare CQ) -- remove once a
+        // real trace confirms or rules this out.
+        eprintln!(
+            "[retx] handle_decoded stage={:?} slot={slot_id} parity={} tx_parity={:?} own_slot={is_own_tx_slot} n_decoded={} active={}",
+            self.qso.status().stage, slot_id.rem_euclid(2), self.tx_parity, decoded.len(), self.qso.active,
+        );
         let qso_outcome = if is_own_tx_slot { None } else { self.qso.process_rx(&decoded) };
 
-        if let Some(QsoOutcome::Completed(record)) = qso_outcome {
-            self.log_completed_qso(record);
+        match qso_outcome {
+            Some(QsoOutcome::Completed(record)) => {
+                self.restore_preferred_tx_parity_if_owed();
+                self.log_completed_qso(record);
+            }
+            Some(QsoOutcome::GaveUpTarget) => self.restore_preferred_tx_parity_if_owed(),
+            None => {}
         }
         self.maybe_transmit(slot_id);
         self.publish_tx_state();
@@ -1801,14 +1854,14 @@ impl Engine {
             into_cycle_ms_now,
             self.effective_tx_latest_ms(),
         );
-        // TEMPORARY diagnostic (15s-apart double-transmission report) --
-        // remove once a real trace confirms or rules this out.
-        if self.qso.status().stage == crate::qso::TxStage::Cq {
-            eprintln!(
-                "[cq-watchdog] maybe_transmit ENTRY slot={slot_id} tx_parity={:?} txed_slot={} into_cycle_ms={into_cycle_ms_now} eligible={eligible} has_tx={}",
-                self.tx_parity, self.txed_slot, self.has_transmitted_this_run,
-            );
-        }
+        // TEMPORARY diagnostic (15s-apart double-transmission report, now
+        // confirmed on Answer too, not just bare CQ) -- remove once a real
+        // trace confirms or rules this out. Widened to every stage: the
+        // earlier Cq-only gate would have missed this entirely.
+        eprintln!(
+            "[retx] maybe_transmit ENTRY stage={:?} slot={slot_id} tx_parity={:?} txed_slot={} into_cycle_ms={into_cycle_ms_now} eligible={eligible} has_tx={} active={}",
+            self.qso.status().stage, self.tx_parity, self.txed_slot, self.has_transmitted_this_run, self.qso.active,
+        );
         if !eligible {
             return;
         }
@@ -1817,11 +1870,10 @@ impl Engine {
         self.tx_parity = Some(slot_id.rem_euclid(2));
         self.txed_slot = slot_id;
         if let Some(msg) = self.qso.tx_message().map(|s| s.to_string()) {
-            // TEMPORARY diagnostic (CQ Watchdog "called CQ 4 times, limit 3"
-            // report) -- remove once a real trace confirms or rules this out.
-            if self.qso.status().stage == crate::qso::TxStage::Cq {
-                eprintln!("[cq-watchdog] maybe_transmit firing slot={slot_id} msg={msg:?}");
-            }
+            // TEMPORARY diagnostic (widened -- see maybe_transmit ENTRY's
+            // own comment) -- remove once a real trace confirms or rules
+            // this out.
+            eprintln!("[retx] maybe_transmit FIRING slot={slot_id} parity={} msg={msg:?}", slot_id.rem_euclid(2));
             if self.start_transmit(&msg) {
                 // The ONLY reliable "a real over has actually gone out this
                 // run" signal -- see `has_transmitted_this_run`'s own doc
@@ -1835,6 +1887,7 @@ impl Engine {
                 // (see QsoEngine::notify_transmitted's own doc comment) --
                 // logged the same way as any other completion.
                 if let Some(QsoOutcome::Completed(record)) = self.qso.notify_transmitted() {
+                    self.restore_preferred_tx_parity_if_owed();
                     self.log_completed_qso(record);
                 }
                 // Publish the instant a real over actually keys -- matches
@@ -1865,6 +1918,16 @@ impl Engine {
     /// Parity (0/1) of the slot we're currently in.
     fn cur_parity(&self) -> i64 {
         self.cur_slot().rem_euclid(2)
+    }
+
+    /// Put `preferred_tx_parity` back to its pre-excursion value if
+    /// `Answer` left one pending -- call on every `QsoOutcome::Completed`
+    /// or `QsoOutcome::GaveUpTarget`. See `preferred_tx_parity_restore`'s
+    /// own doc comment for why this never touches `tx_parity` itself.
+    fn restore_preferred_tx_parity_if_owed(&mut self) {
+        if let Some(original) = self.preferred_tx_parity_restore.take() {
+            self.preferred_tx_parity = original;
+        }
     }
 
     /// Switch operating mode (FT8/FT4) -- see `EngineCommand::SetMode`.
@@ -2818,6 +2881,12 @@ impl Engine {
                 self.publish_rig_status();
             }
             EngineCommand::SetTxPeriod(parity) => {
+                // The operator explicitly changing their own preference mid-
+                // excursion IS "until i change it" happening -- cancel any
+                // pending answer-excursion restore outright, rather than
+                // later clobbering this deliberate choice back to whatever
+                // it was before the excursion began.
+                self.preferred_tx_parity_restore = None;
                 self.preferred_tx_parity = parity;
                 self.publish_tx_state();
             }
@@ -2849,20 +2918,33 @@ impl Engine {
                     snr: args.snr,
                     ..Default::default()
                 };
-                // Reply opposite the DX: the operator is clicking during the slot
-                // after the CQ, so pin TX to this slot's parity and key up right
-                // away if we're still inside the window — matching WSJT-X.
-                self.tx_parity = Some(self.cur_parity());
-                // Also update the *preference* (not just this run's lock), so the
-                // NEXT CQ start (e.g. via Auto-CQ after this QSO) keeps using
-                // whichever slot answering this station required, instead of
-                // reverting to whatever was set before. Real UX requirement,
-                // stated live: "the odd/even slot setting is to get adjusted to
-                // what is needed to reply to that station and it should remain
-                // as the selected slot until i change it or choose to answer a
-                // station in a different time slot" -- the latter is exactly
-                // this same line firing again with a new parity, overwriting it.
-                self.preferred_tx_parity = Some(self.cur_parity());
+                // Reply opposite the DX. Prefer deriving this from his OWN
+                // decoded slot (see `AnswerArgs::msg_utc_ms`'s doc comment --
+                // this is the live bug fix for "every transmission after the
+                // first was in the wrong slot" / "he is transmitting in an
+                // odd slot but so am i") -- only fall back to "whatever slot
+                // we're in right now" when no timestamp was supplied.
+                let reply_parity = match args.msg_utc_ms {
+                    Some(his_ms) => {
+                        let his_parity = his_ms.div_euclid(self.mode.cycle_ms()).rem_euclid(2);
+                        1 - his_parity
+                    }
+                    None => self.cur_parity(),
+                };
+                self.tx_parity = Some(reply_parity);
+                // Also update the *preference* (not just this run's lock), so a
+                // CQ started mid-excursion (e.g. manually abandoning this target
+                // to answer a different one) keeps using whichever slot that
+                // required -- reverted back to the pre-excursion value once this
+                // excursion actually ends (QSO completed or a watchdog gives up),
+                // see `preferred_tx_parity_restore`'s own doc comment. Don't
+                // recapture the restore point if one's already pending: the
+                // ORIGINAL value has to survive however many stations this
+                // excursion spans, not just the most recent one.
+                if self.preferred_tx_parity_restore.is_none() {
+                    self.preferred_tx_parity_restore = Some(self.preferred_tx_parity);
+                }
+                self.preferred_tx_parity = Some(reply_parity);
                 self.has_transmitted_this_run = false;
                 self.qso.answer(&msg);
                 // Fork: look the partner up on QRZ now, so its state is
@@ -3181,6 +3263,7 @@ mod tests {
             grid: "FN42".into(),
             snr: -5,
             delta_freq: 0,
+            msg_utc_ms: None,
         }));
         assert_eq!(engine.tx_parity, Some(parity_before));
         assert_eq!(
@@ -3194,6 +3277,125 @@ mod tests {
         engine.qso.stop();
         engine.handle(EngineCommand::StartCq);
         assert_eq!(engine.tx_parity, Some(parity_before));
+    }
+
+    #[test]
+    fn answering_derives_parity_from_the_targets_own_slot_not_click_time() {
+        // Live bug: "my first call to him was in the correct slot but every
+        // transmission after that was in the wrong slot" / "he is
+        // transmitting in an odd slot but so am i". Root cause: the operator
+        // reacting to a decode a little late (decode results land ~13s into
+        // a 15s slot) can click Answer one slot after the DX's own CQ --
+        // `self.cur_parity()` at that moment is then the SAME parity as the
+        // DX, not opposite. `msg_utc_ms` (the decode's own timestamp) lets us
+        // derive the reply parity from the DX's actual slot instead.
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+
+        let cycle_ms = engine.mode.cycle_ms();
+        let his_slot = engine.cur_slot() + 10; // any slot, far from "now"
+        let his_parity = his_slot.rem_euclid(2);
+        let his_decode_ms = his_slot * cycle_ms + (cycle_ms - 2000); // decoded late in his slot
+
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            delta_freq: 0,
+            msg_utc_ms: Some(his_decode_ms),
+        }));
+
+        let expected_reply_parity = 1 - his_parity;
+        assert_eq!(engine.tx_parity, Some(expected_reply_parity));
+        assert_eq!(engine.preferred_tx_parity, Some(expected_reply_parity));
+    }
+
+    #[test]
+    fn tx_watchdog_give_up_restores_the_pre_answer_tx_period_preference() {
+        // Real UX requirement, stated live: "should the slot setting only
+        // change for the duration of the QSO or potential QSO and then
+        // revert to its original setting" -- confirmed for the exception
+        // path specifically ("a normal end of QSO is not where the problem
+        // would be it's what happens on the exceptions"): the TX Watchdog
+        // forcing an end to a silent target must put the operator's own
+        // habitual CQ-calling parity back, not leave it pinned to whatever
+        // the abandoned station needed.
+        let mut engine = test_engine();
+        engine.handle(EngineCommand::SetTxPeriod(Some(0))); // home preference: Even
+        engine.qso.no_reply_limit = 2;
+
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            delta_freq: 0,
+            msg_utc_ms: None,
+        }));
+        engine.has_transmitted_this_run = true;
+        engine.tx_parity = Some(1); // reply derived as Odd for this excursion
+        assert_eq!(engine.preferred_tx_parity, Some(1), "excursion value, not yet reverted");
+
+        engine.handle_decoded(vec![], 0); // ours -- must not count
+        engine.handle_decoded(vec![], 1); // theirs, silent -- 1st real miss
+        assert_eq!(engine.preferred_tx_parity, Some(1), "not given up yet, still mid-excursion");
+        engine.handle_decoded(vec![], 2); // ours -- must not count
+        engine.handle_decoded(vec![], 3); // theirs, silent -- 2nd real miss -> give up
+        assert_eq!(engine.qso.status().stage, TxStage::Cq);
+        assert_eq!(
+            engine.preferred_tx_parity,
+            Some(0),
+            "watchdog give-up must restore the pre-answer home preference"
+        );
+
+        // Crucially, the ACTIVE lock used for any late reply from the
+        // abandoned station is untouched by the restore -- see
+        // `preferred_tx_parity_restore`'s own doc comment for why this
+        // matters: "what would happen if I've reverted to the message
+        // panel because I've given up but get a late reply from him."
+        assert_eq!(engine.tx_parity, Some(1), "active lock stays correct for a late reply, unlike the preference");
+    }
+
+    #[test]
+    fn qso_completion_restores_the_pre_answer_tx_period_preference() {
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.handle(EngineCommand::SetTxPeriod(Some(0))); // home preference: Even
+
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            delta_freq: 0,
+            msg_utc_ms: None,
+        }));
+        engine.tx_parity = Some(1);
+        assert_eq!(engine.preferred_tx_parity, Some(1));
+
+        // Drive the QSO to completion via the real engine entry point.
+        engine.qso.process_rx(&[DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "-12".into(), snr: -8, ..Default::default()
+        }]); // -> Report
+        engine.qso.process_rx(&[DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "RR73".into(), snr: -8, ..Default::default()
+        }]); // -> Bye73
+        engine.has_transmitted_this_run = true;
+        engine.txed_slot = -999;
+        if let Some(QsoOutcome::Completed(record)) = engine.qso.notify_transmitted() {
+            engine.restore_preferred_tx_parity_if_owed();
+            engine.log_completed_qso(record);
+        } else {
+            panic!("expected the RR73-send to complete and log the QSO");
+        }
+
+        assert_eq!(
+            engine.preferred_tx_parity,
+            Some(0),
+            "QSO completion must restore the pre-answer home preference"
+        );
     }
 
     #[test]

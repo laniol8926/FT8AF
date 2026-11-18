@@ -70,6 +70,13 @@ pub struct QsoStatus {
 pub enum QsoOutcome {
     /// A QSO finished and should be logged.
     Completed(QsoRecord),
+    /// The TX Watchdog ("Stop After" N no-reply) or Max 73 Sends cap forced
+    /// an end to the current target -- no record to log, but the engine
+    /// still needs to know so it can revert any excursion-scoped state (see
+    /// `Engine::preferred_tx_parity_restore`'s doc comment). Never produced
+    /// by the bare-CQ give-up (`TxStage::Cq`'s branch of `on_no_progress`)
+    /// -- that one has no target/answer excursion to unwind.
+    GaveUpTarget,
 }
 
 #[derive(Debug, Clone)]
@@ -503,8 +510,11 @@ impl QsoEngine {
             None => {
                 // No reply at all this slot -- same as a non-advancing
                 // reply, see `advanced` below.
-                self.on_no_progress();
-                return None; // scheduler retransmits (or we just gave up above)
+                return if self.on_no_progress() {
+                    Some(QsoOutcome::GaveUpTarget)
+                } else {
+                    None // scheduler retransmits
+                };
             }
         };
 
@@ -536,8 +546,11 @@ impl QsoEngine {
             self.no_reply_count = 0;
             self.cq_no_reply_count = 0;
         } else {
-            self.on_no_progress();
-            return None;
+            return if self.on_no_progress() {
+                Some(QsoOutcome::GaveUpTarget)
+            } else {
+                None
+            };
         }
 
         match self.stage {
@@ -618,12 +631,17 @@ impl QsoEngine {
     /// with something that never confirms (e.g. re-sending his own
     /// report) would otherwise never trip the cap, since presence of
     /// *any* message used to keep resetting the counter.
-    fn on_no_progress(&mut self) {
+    /// Returns whether `give_up_target` fired this call -- a watchdog
+    /// forced an end to the current target -- so `process_rx`'s callers
+    /// can report `QsoOutcome::GaveUpTarget` and unwind excursion-scoped
+    /// engine state (see that variant's doc comment).
+    fn on_no_progress(&mut self) -> bool {
         match self.stage {
             TxStage::Grid | TxStage::Report | TxStage::RReport => {
                 self.no_reply_count = self.no_reply_count.saturating_add(1);
                 if should_give_up_target(self.no_reply_limit, self.no_reply_count) {
                     self.give_up_target();
+                    return true;
                 }
             }
             TxStage::Rr73 => {
@@ -631,6 +649,7 @@ impl QsoEngine {
                     self.max_73_sends == 0 && self.final_ack_sends >= RR73_GIVEUP_CYCLES_FAILSAFE;
                 if has_reached_max_73_sends(self.max_73_sends, self.final_ack_sends) || unlimited_failsafe {
                     self.give_up_target();
+                    return true;
                 }
             }
             TxStage::Cq => {
@@ -651,6 +670,7 @@ impl QsoEngine {
             }
             TxStage::Bye73 | TxStage::Idle => {}
         }
+        false
     }
 
     /// Android's `answerRepeatAfterLog`: TX is dormant after cleanly
@@ -1345,8 +1365,10 @@ mod tests {
         // Two silent slots -- not given up yet.
         assert!(e.process_rx(&[]).is_none());
         assert_eq!(e.status().stage, TxStage::Grid);
-        assert!(e.process_rx(&[]).is_none());
-        // The 2nd silent slot hits the limit and gives up -> back to CQ.
+        // The 2nd silent slot hits the limit and gives up -> back to CQ,
+        // signaling the engine so it can unwind excursion-scoped state
+        // (e.g. a pending `preferred_tx_parity` restore).
+        assert!(matches!(e.process_rx(&[]), Some(QsoOutcome::GaveUpTarget)));
         assert_eq!(e.status().stage, TxStage::Cq);
         assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
     }

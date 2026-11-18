@@ -429,7 +429,7 @@ export const api = {
   startCq: () => invoke("start_cq"),
   /** `delta_freq`: audio offset (Hz) to answer on, 0 (default) = keep the
    *  current TX offset -- see Settings -> Transmission's "Hold TX freq". */
-  answer: (args: { call_from: string; grid: string; snr: number; delta_freq?: number }) =>
+  answer: (args: { call_from: string; grid: string; snr: number; delta_freq?: number; msg_utc_ms?: number }) =>
     invoke("answer", { args }),
   setStage: (stage: TxStage) => invoke("set_stage", { stage }),
   stopTx: () => invoke("stop_tx"),
