@@ -536,13 +536,41 @@ for the Hamlib version workaround needed there.
     `has_transmitted_this_run` flag (set only in `maybe_transmit`'s success
     branch) tracks the real signal directly; without it the watchdog gave
     up one real CQ transmission earlier than its configured limit.
-  - **TX Period didn't stick after answering a station**: `Answer` only
-    locked the transient `tx_parity` for that one run; the lasting
+  - **TX Period didn't adjust to the station being answered**: `Answer`
+    only locked the transient `tx_parity` for that one run; the lasting
     *preference* (`preferred_tx_parity`, what the next CQ start reuses,
     e.g. via Auto-CQ after the QSO) was left alone, silently reverting to
-    whatever was set before. `Answer` now updates both, so the slot
-    adjusts to whichever station is being answered and stays there until
-    changed or a different station is answered in a different slot.
+    whatever was set before. `Answer` now updates both for the duration of
+    that answer excursion (one or more stations, if the operator abandons
+    one to answer another before it resolves), then restores the
+    preference back to the operator's own habitual CQ-calling slot once
+    the excursion actually ends — on `QsoOutcome::Completed` or a new
+    `QsoOutcome::GaveUpTarget` (the TX Watchdog or Max 73 Sends forcing an
+    end), via `Engine::preferred_tx_parity_restore`. Deliberately never
+    touches the *active* `tx_parity` lock itself, only the preference: a
+    watchdog give-up flips `qso.rs`'s own stage back to Cq internally
+    without going through `EngineCommand::StartCq`, so a late reply
+    reopening a just-abandoned target still finds `tx_parity` correct —
+    the specific edge case checked live before building this ("what would
+    happen if I've reverted to the message panel because I've given up
+    but get a late reply from him"). An explicit `SetTxPeriod` cancels a
+    pending restore outright, since the operator manually changing their
+    preference mid-excursion is the existing "until i change it" rule
+    firing.
+  - **Answer derived "opposite the DX" from click time, not the DX's own
+    slot**: confirmed live with two screenshots — "my first call to him
+    was in the correct slot but every transmission after that was in the
+    wrong slot" / "he is transmitting in an odd slot but so am i". Decode
+    results land ~13s into a 15s slot, so a slightly late operator click
+    can land one slot after the DX's CQ — the *same* parity as the DX, not
+    opposite — pinning the whole QSO onto the wrong slot from the start.
+    `AnswerArgs` gained `msg_utc_ms` (the target's own decoded-message
+    timestamp, already available at all three frontend Answer call sites:
+    the decode row, Hunt auto-answer, and the Map screen's CQ marker);
+    `Answer` now derives the reply parity from the DX's actual slot
+    instead of whatever slot we happen to be in when the command arrives.
+    The one caller with no decode timestamp (a UDP-driven WSJT-X Reply
+    request) falls back to the old click-time behavior.
   - **Docked panel staying up for one extra retry cycle** after a QSO was
     already logged (the caller's RR73-sent side, still quietly retrying/
     waiting for an optional courtesy 73 in the background): a new
