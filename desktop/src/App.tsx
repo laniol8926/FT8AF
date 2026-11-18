@@ -1459,6 +1459,7 @@ export default function App() {
               }}
               displayHz={displayHz}
               targetFreqHz={targetFreqHz}
+              isTransmitting={isTransmitting}
             />
             <WaterfallStatusStrip
               txFreq={txFreq}
@@ -3524,6 +3525,7 @@ function WaterfallView({
   onSelectFreq,
   displayHz,
   targetFreqHz,
+  isTransmitting,
 }: {
   txFreq: number;
   onSelectFreq: (hz: number) => void;
@@ -3531,6 +3533,14 @@ function WaterfallView({
   // The QSO partner's own last-heard frequency -- drawn as a white line
   // beside the red TX marker, matching the fork's real Android feature.
   targetFreqHz?: number | null;
+  // Disables the click-to-set-TX-frequency control while a real over is in
+  // flight. Not a safety requirement -- the in-progress transmission's own
+  // waveform/CAT-tone sequence is already frozen at TX start and can't be
+  // affected by this control either way -- but a click here used to be
+  // silently accepted and queued for the *next* over with no visible
+  // effect on this one, which is misleading. Confirmed live, operator
+  // request: "disable it while transmitting."
+  isTransmitting?: boolean;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -3539,6 +3549,7 @@ function WaterfallView({
   }, []);
 
   function handleClick(e: MouseEvent<HTMLDivElement>) {
+    if (isTransmitting) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
     const hz = Math.round(frac * displayHz);
@@ -3567,10 +3578,10 @@ function WaterfallView({
       style={{
         position: "relative", width: "100%", flex: 1, minHeight: 0,
         display: "flex", flexDirection: "column",
-        marginBottom: 8, cursor: "crosshair",
+        marginBottom: 8, cursor: isTransmitting ? "not-allowed" : "crosshair",
       }}
       onClick={handleClick}
-      title="Click to set TX frequency"
+      title={isTransmitting ? "TX frequency locked while transmitting" : "Click to set TX frequency"}
     >
       <WaterfallScale displayHz={displayHz} />
       <canvas
@@ -4317,7 +4328,7 @@ function DecodeScreen(props: {
             />
           ) : (
             <>
-              <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} displayHz={displayHz} targetFreqHz={targetFreqHz} />
+              <WaterfallView txFreq={txFreq} onSelectFreq={onSelectFreq} displayHz={displayHz} targetFreqHz={targetFreqHz} isTransmitting={qsoTransmitting} />
               <WaterfallStatusStrip
                 txFreq={txFreq}
                 decoding={decoding}
