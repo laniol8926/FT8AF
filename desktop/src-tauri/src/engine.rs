@@ -1598,7 +1598,7 @@ impl Engine {
                 now.rem_euclid(self.mode.cycle_ms()),
                 self.effective_tx_latest_ms(),
             ) {
-                self.maybe_transmit(slot_id);
+                self.maybe_transmit();
             }
 
             // Drop PTT as soon as the TX waveform finishes clocking out (or a
@@ -1707,7 +1707,7 @@ impl Engine {
             Some(QsoOutcome::GaveUpTarget) => self.restore_preferred_tx_parity_if_owed(),
             None => {}
         }
-        self.maybe_transmit(slot_id);
+        self.maybe_transmit();
         self.publish_tx_state();
     }
 
@@ -1829,7 +1829,7 @@ impl Engine {
     /// 12.64 s waveform still fits before the next boundary. Idempotent per slot
     /// (`txed_slot` guard), so calling it from both `handle_decoded` and a command
     /// handler in the same slot transmits at most once.
-    fn maybe_transmit(&mut self, slot_id: i64) {
+    fn maybe_transmit(&mut self) {
         // SWR Halt's lockout blocks every new transmission -- CQ, a QSO
         // reply, or a courtesy 73 alike -- until explicitly cleared. Gating
         // here (the one place every activation path funnels through, see
@@ -1841,6 +1841,26 @@ impl Engine {
         if self.swr_lockout {
             return;
         }
+        // ALWAYS the true, freshly-computed current slot -- never a caller-
+        // supplied one. Real bug, confirmed live with two screenshots and a
+        // full diagnostic trace: `handle_decoded`'s tail call used to pass
+        // its OWN `slot_id` parameter straight through (correct for ITS
+        // purpose -- decode/watchdog attribution of a specific slot's
+        // audio, which must stay accurate even when decode processing
+        // falls behind). But the CAT-tone TX path (`qmxCatTones`) blocks
+        // this same thread for the FULL ~12.64s of a transmission, one
+        // `rig_send_raw` per symbol -- so by the time a queued command or a
+        // backlogged decode result finally gets processed, real time can
+        // already be a full slot (or more) past the one it was labeled
+        // for. `tx_slot_eligible`'s `into_cycle_ms` check can't tell the
+        // difference: it's a bare modulo, so "106ms into slot 511" looks
+        // exactly like "106ms into slot 510" -- it would let a transmission
+        // key up believing it's still inside slot 510's window, while the
+        // radio actually keys up during REAL slot 511, which can be the
+        // SAME parity as the DX instead of opposite. Always deriving the
+        // slot fresh here closes that gap: a stale caller value can at
+        // worst cause a missed/retried check, never a mistimed key-up.
+        let slot_id = self.cur_slot();
         // All the keying rules — active QSO, locked-parity alternation, once per
         // slot, and early enough in the cycle to fit the waveform — live in the pure
         // `tx_slot_eligible` so the run loop's boundary trigger shares them exactly.
@@ -2909,7 +2929,7 @@ impl Engine {
                 self.qso.start_cq();
                 // Start CQ this very slot if we're still inside the window;
                 // otherwise the first transmission lands at the next free slot.
-                self.maybe_transmit(self.cur_slot());
+                self.maybe_transmit();
                 self.publish_tx_state();
             }
             EngineCommand::Answer(args) => {
@@ -2963,14 +2983,14 @@ impl Engine {
                 // cached by the time the QSO is logged. Mirrors
                 // `FT8TransmitSignal.java`'s one real call site.
                 self.qrz_xml.prefetch(&self.db, &msg.call_from);
-                self.maybe_transmit(self.cur_slot());
+                self.maybe_transmit();
                 self.publish_tx_state();
             }
             EngineCommand::SetStage(stage) => {
                 self.tx_parity = None;
                 self.has_transmitted_this_run = false;
                 self.qso.set_stage(stage);
-                self.maybe_transmit(self.cur_slot());
+                self.maybe_transmit();
                 self.publish_tx_state();
             }
             EngineCommand::StopTx => {
@@ -2986,7 +3006,7 @@ impl Engine {
                 self.tx_parity = None;
                 self.has_transmitted_this_run = false;
                 self.qso.set_free_text(&text);
-                self.maybe_transmit(self.cur_slot());
+                self.maybe_transmit();
                 self.publish_tx_state();
             }
             EngineCommand::RefreshStatus => {
@@ -3338,15 +3358,21 @@ mod tests {
         engine.handle(EngineCommand::SetTxPeriod(Some(0))); // home preference: Even
         engine.qso.no_reply_limit = 2;
 
+        // A deterministic msg_utc_ms (an even his_slot -> reply Odd) --
+        // not `None`, which would derive the excursion parity from real
+        // wall-clock time at whatever instant this test happens to run,
+        // making the test flaky.
+        let cycle_ms = engine.mode.cycle_ms();
+        let his_slot = (engine.cur_slot() + 10) / 2 * 2; // force even
         engine.handle(EngineCommand::Answer(AnswerArgs {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
             delta_freq: 0,
-            msg_utc_ms: None,
+            msg_utc_ms: Some(his_slot * cycle_ms),
         }));
         engine.has_transmitted_this_run = true;
-        engine.tx_parity = Some(1); // reply derived as Odd for this excursion
+        assert_eq!(engine.tx_parity, Some(1), "reply derived as Odd for this excursion");
         assert_eq!(engine.preferred_tx_parity, Some(1), "excursion value, not yet reverted");
 
         engine.handle_decoded(vec![], 0); // ours -- must not count
@@ -3375,14 +3401,17 @@ mod tests {
         engine.qso.my_call = "K0XYZ".into();
         engine.handle(EngineCommand::SetTxPeriod(Some(0))); // home preference: Even
 
+        // Deterministic msg_utc_ms, same reasoning as the watchdog test above.
+        let cycle_ms = engine.mode.cycle_ms();
+        let his_slot = (engine.cur_slot() + 10) / 2 * 2; // force even -> reply Odd
         engine.handle(EngineCommand::Answer(AnswerArgs {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
             delta_freq: 0,
-            msg_utc_ms: None,
+            msg_utc_ms: Some(his_slot * cycle_ms),
         }));
-        engine.tx_parity = Some(1);
+        assert_eq!(engine.tx_parity, Some(1));
         assert_eq!(engine.preferred_tx_parity, Some(1));
 
         // Drive the QSO to completion via the real engine entry point.
@@ -4029,7 +4058,7 @@ mod tests {
         engine.qso.active = true; // re-armed after the halt, as StartCq would do
         let before = engine.qso.tx_message().map(|s| s.to_string());
 
-        engine.maybe_transmit(engine.cur_slot());
+        engine.maybe_transmit();
         // Blocked: no transmission attempted, state untouched.
         assert_eq!(engine.qso.tx_message().map(|s| s.to_string()), before);
 
@@ -4494,6 +4523,51 @@ mod tests {
             ui[0].utc_ms,
             true_slot_id * cycle_ms,
             "must carry the slot it was actually captured for, not whenever publish happened to run"
+        );
+    }
+
+    #[test]
+    fn maybe_transmit_never_keys_on_a_stale_slot_id_from_a_backlogged_decode() {
+        // Real bug, confirmed live with two screenshots and a full
+        // diagnostic trace: the QMX CAT-tone TX path blocks the engine
+        // thread for the full ~12.64s of a transmission (one rig_send_raw
+        // per symbol). A queued command or a backlogged decode result that
+        // finally gets processed after that can be labeled with a slot_id
+        // that's a full slot (or more) behind real time -- but
+        // `tx_slot_eligible`'s `into_cycle_ms` check is a bare modulo, so
+        // it can't tell "106ms into the stale slot" from "106ms into the
+        // slot after it." `handle_decoded`'s tail call used to pass that
+        // stale slot_id straight through to `maybe_transmit`, which could
+        // then key up believing it was still replying opposite the DX,
+        // while the radio actually transmitted during the REAL current
+        // slot -- sometimes the DX's own parity, sometimes not, matching
+        // the live report "sometimes everything looks correct other times
+        // it does not." Fixed: `maybe_transmit` always derives its own
+        // slot fresh from `self.cur_slot()`, never trusting a caller's
+        // value.
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "FN42".into(), snr: -5, ..Default::default()
+        });
+        let true_slot = engine.cur_slot();
+        // Lock tx_parity to the OPPOSITE of the true current slot's parity
+        // -- by real time, right now is NOT our turn to transmit.
+        engine.tx_parity = Some(1 - true_slot.rem_euclid(2));
+        engine.has_transmitted_this_run = true;
+        engine.txed_slot = -999;
+
+        // Simulate a backlogged decode result labeled with a STALE slot_id
+        // that happens to match tx_parity's parity -- the exact shape that
+        // used to fool the old, caller-trusting eligibility check.
+        let stale_slot_id = true_slot - 1;
+        assert_eq!(stale_slot_id.rem_euclid(2), engine.tx_parity.unwrap(), "the stale label must match, to exercise the bug");
+        engine.handle_decoded(vec![], stale_slot_id);
+
+        assert_ne!(
+            engine.txed_slot, stale_slot_id,
+            "must never key up for the stale slot_id -- only ever the true current slot"
         );
     }
 
