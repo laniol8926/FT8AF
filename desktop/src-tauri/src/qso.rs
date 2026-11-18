@@ -44,6 +44,25 @@ pub struct QsoStatus {
     pub tx_message: Option<String>,
     pub report_sent: Option<i32>,
     pub report_rcvd: Option<i32>,
+    /// True once RR73 has been confirmed sent for the current target (the
+    /// CALLER's side of the exchange -- `already_logged` while `stage` is
+    /// still `Rr73`, not yet advanced to `Bye73`). Real UX bug, found live:
+    /// "still sitting on the calling cq panel for one time slot after the
+    /// qso has been logged." Once this is true, *my* side is done -- the
+    /// QSO is already logged (see `already_logged`'s own doc comment) --
+    /// even though the engine keeps `active` true a while longer, quietly
+    /// resending RR73 and answering a repeated report in the background,
+    /// per the user's own description: "although the qso from my side has
+    /// completed I will still respond to his messages until either he
+    /// sends his 73 or the... watchdog limit has been reached." The docked
+    /// panel should revert the instant this flips, not wait for that
+    /// background retry/give-up to finish -- deliberately *not* true while
+    /// `stage == Bye73` (the answerer's side, sending the courtesy 73):
+    /// that side has its own existing instant-revert-on-actually-sent
+    /// mechanism (`finish_if_bye73_sent`) and no lingering retry phase, so
+    /// reverting any earlier there would hide the panel before the 73 has
+    /// even gone out.
+    pub logged_awaiting_courtesy_ack: bool,
 }
 
 /// What the engine wants the scheduler to do after processing a slot.
@@ -117,6 +136,34 @@ pub struct QsoEngine {
     /// so a Bye73 that missed its slot (late TX window, rig busy, encode failure)
     /// is retransmitted next slot instead of being clobbered by the wrap-up.
     bye73_sent: bool,
+    /// True once a `QsoOutcome::Completed` has been returned for the current
+    /// target, by *any* path -- guards against a duplicate `QsoRecord` for
+    /// the same contact. Two real bugs rolled into this one flag:
+    ///
+    /// 1. Found live: "I sent my RR73 but never received his 73. I should
+    ///    have logged the QSO but did not." Standard FT8 practice (and
+    ///    Android's own `updateQSlRecordList` order-4 "RR73 sent" save)
+    ///    treats sending RR73 as sufficient to log the contact -- a reply
+    ///    "73" is pure courtesy, never required. `complete()` used to only
+    ///    ever fire on *receiving* a confirmation -- a partner who simply
+    ///    never sends one (common) meant the QSO stayed unlogged forever
+    ///    once Max 73 Sends ran out and `give_up_target` discarded it.
+    /// 2. Reported live, already fixed once on the Android side: logging
+    ///    used to fire the instant the *other* party's confirmation was
+    ///    *received* -- i.e. before our own closing message (RR73 or the
+    ///    courtesy 73) had actually been transmitted. If that transmission
+    ///    then failed to go out (missed TX window, rig busy, encode
+    ///    failure), the QSO was already logged even though the message
+    ///    that's supposed to close it out was never sent.
+    ///
+    /// Both are fixed the same way: logging only ever happens from
+    /// `notify_transmitted` (confirmed *sent*, not just queued), for
+    /// *either* closing message -- RR73 (the caller's side) or the courtesy
+    /// 73 (the answerer's side). `complete()` is now reached only when a
+    /// LATER confirming reply arrives after logging already happened via
+    /// `notify_transmitted` -- it just finishes the run without building a
+    /// second record.
+    already_logged: bool,
     /// Consecutive slots, for the current target, where no reply was heard
     /// at all (we're in `Grid`/`Report`/`RReport` -- still calling, not yet
     /// logged). Reset whenever the target changes or any reply advances the
@@ -193,6 +240,7 @@ impl QsoEngine {
             tx_message: None,
             started_ms: 0,
             bye73_sent: false,
+            already_logged: false,
             no_reply_count: 0,
             cq_no_reply_count: 0,
             final_ack_sends: 0,
@@ -209,6 +257,7 @@ impl QsoEngine {
             tx_message: self.tx_message.clone(),
             report_sent: self.report_sent,
             report_rcvd: self.report_rcvd,
+            logged_awaiting_courtesy_ack: self.already_logged && self.stage == TxStage::Rr73,
         }
     }
 
@@ -217,11 +266,32 @@ impl QsoEngine {
     }
 
     /// The scheduler calls this after the current `tx_message` has actually been
-    /// *handed to the transmitter* (keyed, not yet finished playing) --
-    /// it only matters for the courtesy "73": it marks the Bye73 as sent.
-    /// For every other stage the sequencer advances on received replies,
-    /// so this is a no-op.
-    pub fn notify_transmitted(&mut self) {
+    /// *handed to the transmitter* (keyed, not yet finished playing). For
+    /// Bye73 it marks the courtesy "73" as sent. Every other stage advances
+    /// on received replies, so this is a no-op there.
+    ///
+    /// Returns a loggable outcome the *first* time either closing message --
+    /// RR73 (the caller's side) or the courtesy 73 (the answerer's side) --
+    /// is confirmed sent for the current target. Real bug, ported from a fix
+    /// already made on the Android side: logging used to fire the instant
+    /// the *other* party's confirming message was *received* (`complete`,
+    /// called right as the stage advances to Bye73/Rr73) -- before our own
+    /// closing message had actually gone out. If that transmission then
+    /// failed to send (missed TX window, rig busy, encode failure), the QSO
+    /// was already logged even though the RR73/73 that's supposed to close
+    /// it out was never actually sent. Logging now waits for this method --
+    /// confirmed *sent*, not just queued -- exactly like Android's fix.
+    /// See `already_logged`'s own doc comment for how a later, separate
+    /// confirming reply is kept from logging a duplicate.
+    pub fn notify_transmitted(&mut self) -> Option<QsoOutcome> {
+        // TEMPORARY diagnostic (spontaneous second-73 report) -- remove
+        // once a real trace confirms or rules this out.
+        if matches!(self.stage, TxStage::Rr73 | TxStage::Bye73) {
+            eprintln!(
+                "[bye73] notify_transmitted stage={:?} target={:?} already_logged={} answering_dormant_repeat={}",
+                self.stage, self.target, self.already_logged, self.answering_dormant_repeat
+            );
+        }
         if self.stage == TxStage::Bye73 {
             self.bye73_sent = true;
         }
@@ -233,6 +303,22 @@ impl QsoEngine {
         if matches!(self.stage, TxStage::Rr73 | TxStage::Bye73) {
             self.final_ack_sends = self.final_ack_sends.saturating_add(1);
         }
+        if matches!(self.stage, TxStage::Rr73 | TxStage::Bye73) {
+            return self.log_if_not_yet();
+        }
+        None
+    }
+
+    /// Shared by `notify_transmitted`'s two closing-message branches: build
+    /// and return a loggable outcome for the current target, exactly once.
+    fn log_if_not_yet(&mut self) -> Option<QsoOutcome> {
+        if self.already_logged || self.answering_dormant_repeat {
+            return None;
+        }
+        let dx = self.target.clone().unwrap_or_default();
+        let record = self.build_qso_record(&dx);
+        self.already_logged = true;
+        Some(QsoOutcome::Completed(record))
     }
 
     /// The scheduler calls this once the courtesy 73's transmission has
@@ -251,8 +337,15 @@ impl QsoEngine {
     /// by the time it runs, so it's a no-op there once this has already
     /// fired.
     pub fn finish_if_bye73_sent(&mut self) {
+        // TEMPORARY diagnostic (spontaneous second-73 report) -- remove
+        // once a real trace confirms or rules this out.
+        eprintln!(
+            "[bye73] finish_if_bye73_sent stage={:?} bye73_sent={} target={:?} auto_return_to_cq={}",
+            self.stage, self.bye73_sent, self.target, self.auto_return_to_cq
+        );
         if self.stage == TxStage::Bye73 && self.bye73_sent {
             self.finish_qso();
+            eprintln!("[bye73] finish_qso ran -> stage={:?} active={} target={:?}", self.stage, self.active, self.target);
         }
     }
 
@@ -340,6 +433,7 @@ impl QsoEngine {
         self.report_rcvd = None;
         self.started_ms = util::now_unix_ms();
         self.bye73_sent = false;
+        self.already_logged = false;
         self.no_reply_count = 0;
         self.cq_no_reply_count = 0;
         self.final_ack_sends = 0;
@@ -480,17 +574,28 @@ impl QsoEngine {
                     self.send_rr73(&dx);
                 }
                 Content::Rr73 | Content::Rrr | Content::Bye73 => {
-                    return self.complete(&dx);
+                    // He jumped straight to confirming (skipped RReport, e.g.
+                    // a decode glitch) -- still owe him the same courtesy 73
+                    // RReport's own arm below sends; queue it the same way.
+                    // Real bug, ported from a fix already made on the
+                    // Android side (see notify_transmitted's own doc
+                    // comment): don't log here, before that 73 has actually
+                    // gone out -- only once notify_transmitted confirms it
+                    // was really sent.
+                    self.tx_message = Some(format!("{} {} 73", dx, self.my_call));
+                    self.stage = TxStage::Bye73;
+                    self.bye73_sent = false;
                 }
                 _ => {}
             },
             TxStage::RReport => match content {
                 Content::Rr73 | Content::Rrr | Content::Bye73 => {
-                    // Acknowledge with 73, then log.
+                    // Acknowledge with 73 -- notify_transmitted logs once
+                    // it's actually sent, not before (see its own doc
+                    // comment for the Android-side bug this ports a fix for).
                     self.tx_message = Some(format!("{} {} 73", dx, self.my_call));
                     self.stage = TxStage::Bye73;
                     self.bye73_sent = false;
-                    return self.complete(&dx);
                 }
                 _ => {}
             },
@@ -530,7 +635,15 @@ impl QsoEngine {
             }
             TxStage::Cq => {
                 self.cq_no_reply_count = self.cq_no_reply_count.saturating_add(1);
+                // TEMPORARY diagnostic (CQ Watchdog "called CQ 4 times, limit
+                // 3" report) -- remove once a real trace confirms or rules
+                // out this code path.
+                eprintln!(
+                    "[cq-watchdog] no_progress count={}/{}",
+                    self.cq_no_reply_count, self.cq_no_reply_limit
+                );
                 if should_give_up_cq(self.cq_no_reply_limit, self.cq_no_reply_count) {
+                    eprintln!("[cq-watchdog] giving up");
                     // No target to fall back to -- this IS the CQ itself
                     // giving up, same as the operator pressing Stop.
                     self.stop();
@@ -549,6 +662,11 @@ impl QsoEngine {
     /// without logging a second `QsoRecord`. Capped at
     /// `MAX_REPEAT_ANSWERS`. Returns whether a repeat answer was armed.
     fn try_answer_dormant_repeat(&mut self, messages: &[DecodedMessage]) -> bool {
+        // TEMPORARY diagnostic (spontaneous second-73 report) -- remove
+        // once a real trace confirms or rules this out.
+        if self.dormant.is_some() {
+            eprintln!("[bye73] try_answer_dormant_repeat called, dormant={:?}", self.dormant);
+        }
         let Some(dormant) = self.dormant.clone() else { return false };
         if dormant.repeat_answers >= MAX_REPEAT_ANSWERS {
             return false;
@@ -612,8 +730,8 @@ impl QsoEngine {
         self.stage = TxStage::Rr73;
     }
 
-    fn complete(&mut self, dx: &str) -> Option<QsoOutcome> {
-        let record = QsoRecord {
+    fn build_qso_record(&self, dx: &str) -> QsoRecord {
+        QsoRecord {
             id: None,
             call: dx.to_string(),
             gridsquare: self.grid_rcvd.clone().unwrap_or_default(),
@@ -631,7 +749,21 @@ impl QsoEngine {
             comment: String::new(),
             confirmed: false,
             ..Default::default()
-        };
+        }
+    }
+
+    fn complete(&mut self, dx: &str) -> Option<QsoOutcome> {
+        // Already logged -- see `already_logged`'s own doc comment -- by
+        // `notify_transmitted` the moment RR73 was confirmed sent. This is
+        // just the partner's courtesy reply/repeat catching up; finish the
+        // run without a second QsoRecord for the same contact.
+        if self.already_logged {
+            if self.stage != TxStage::Bye73 {
+                self.finish_qso();
+            }
+            return None;
+        }
+        let record = self.build_qso_record(dx);
 
         // If a courtesy "73" is queued (the RReport arm set stage = Bye73), leave
         // tx_message/stage so the scheduler transmits it; the next slot's Bye73
@@ -646,6 +778,7 @@ impl QsoEngine {
         if self.answering_dormant_repeat {
             None
         } else {
+            self.already_logged = true;
             Some(QsoOutcome::Completed(record))
         }
     }
@@ -790,24 +923,36 @@ mod tests {
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ R-08"));
         assert_eq!(e.status().report_rcvd, Some(-12));
 
-        // DX sends RR73 -> we log AND queue the courtesy 73 to transmit. The
-        // decoder copies the grid-shaped "RR73" into the grid field, so pass it
-        // here as it actually arrives live (grid == "RR73"), not grid == "".
+        // DX sends RR73 -> we queue the courtesy 73 to transmit. The decoder
+        // copies the grid-shaped "RR73" into the grid field, so pass it here
+        // as it actually arrives live (grid == "RR73"), not grid == "".
+        // Real bug, ported from a fix already made on the Android side: this
+        // must NOT log yet -- only once notify_transmitted confirms the 73
+        // was actually sent (see that method's own doc comment). Logging
+        // here, before the 73 has gone out, risked a logged-but-never-sent
+        // QSO if that transmission then failed.
         let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]);
-        match out {
+        assert!(out.is_none(), "must not log until the courtesy 73 is actually sent");
+        assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
+        assert_eq!(e.status().stage, TxStage::Bye73);
+        // `logged_awaiting_courtesy_ack` is deliberately false here even
+        // once logged below -- it's scoped to the CALLER's Rr73 retry-limbo
+        // specifically. This (the answerer's) side has its own already-
+        // correct, already-instant revert mechanism (`finish_if_bye73_sent`,
+        // fired once the 73 actually transmits) -- flipping this flag here
+        // too would hide the panel before the courtesy 73 has even gone out.
+        assert!(!e.status().logged_awaiting_courtesy_ack);
+
+        // The scheduler actually transmits it -- THIS logs the QSO.
+        match e.notify_transmitted() {
             Some(QsoOutcome::Completed(rec)) => {
                 assert_eq!(rec.call, "K1ABC");
                 assert_eq!(rec.gridsquare, "FN42");
                 assert_eq!(rec.rst_sent, "-08");
                 assert_eq!(rec.rst_rcvd, "-12");
             }
-            _ => panic!("expected completed QSO"),
+            _ => panic!("expected the QSO to log the instant the courtesy 73 was confirmed sent"),
         }
-        // The final 73 is queued (not clobbered by the auto-return to CQ)...
-        assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
-        assert_eq!(e.status().stage, TxStage::Bye73);
-        // ...the scheduler actually transmits it (signalled here)...
-        e.notify_transmitted();
         // ...and once its TX slot has passed, the next slot returns to CQ.
         assert!(e.process_rx(&[]).is_none());
         assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
@@ -825,16 +970,19 @@ mod tests {
         e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]);
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ R-08"));
 
-        // DX sends RR73 -> QSO logs and the courtesy 73 is queued. As live, the
-        // grid-shaped "RR73" also lands in the decoder's grid field.
+        // DX sends RR73 -> the courtesy 73 is queued (not yet logged -- that
+        // only happens once notify_transmitted confirms it was actually
+        // sent). As live, the grid-shaped "RR73" also lands in the
+        // decoder's grid field.
         let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]);
-        assert!(matches!(out, Some(QsoOutcome::Completed(_))));
+        assert!(out.is_none());
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
         assert_eq!(e.status().stage, TxStage::Bye73);
 
-        // The 73 did NOT go out this slot (no notify_transmitted). The next slot
-        // must keep the 73 queued rather than returning to CQ, and must not log
-        // the QSO a second time.
+        // The 73 did NOT go out this slot (no notify_transmitted) -- so it's
+        // not logged yet either. The next slot must keep the 73 queued
+        // rather than returning to CQ, and must not log the QSO a second
+        // time once it finally does go out.
         assert!(e.process_rx(&[]).is_none());
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
         assert_eq!(e.status().stage, TxStage::Bye73);
@@ -843,12 +991,133 @@ mod tests {
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
         assert_eq!(e.status().stage, TxStage::Bye73);
 
-        // Once the scheduler reports the 73 actually transmitted, the next slot
-        // wraps the QSO up and returns to CQ.
-        e.notify_transmitted();
-        assert!(e.process_rx(&[]).is_none());
+        // Once the scheduler reports the 73 actually transmitted, THIS logs
+        // the QSO (not any of the silent slots above), and the next slot
+        // wraps it up and returns to CQ.
+        assert!(matches!(e.notify_transmitted(), Some(QsoOutcome::Completed(_))));
+        assert!(e.process_rx(&[]).is_none(), "must not log a second time");
         assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
         assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn caller_logs_the_instant_rr73_is_sent_even_if_no_73_ever_comes_back() {
+        // Real bug, found live: "I sent my RR73 but never received his 73.
+        // I should have logged the QSO but did not." Standard FT8 practice
+        // (and Android's own order-4 "RR73 sent" save): sending RR73
+        // confirms both signal reports were exchanged -- the contact is
+        // already valid and loggable right then. A reply "73" is pure
+        // courtesy, never required. Before this fix, the CALLER's side (the
+        // one who calls CQ and eventually sends RR73, as opposed to the
+        // answerer's side already covered by answerer_full_sequence_logs_qso)
+        // had no logging path at all except receiving a reply back while in
+        // TxStage::Rr73 -- dead silence meant the QSO was simply never built,
+        // and give_up_target (after Max 73 Sends) discarded it with nothing
+        // ever logged.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.start_cq();
+        // K1ABC answers our CQ with his grid.
+        let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "FN42", "FN42", -5)]);
+        assert!(out.is_none());
+        assert_eq!(e.status().stage, TxStage::Report);
+        assert_eq!(e.tx_message(), Some("K1ABC K0XYZ -05"));
+
+        // He sends his R+report -- Report's own match arm goes straight to
+        // sending RR73 (no separate RReport-sending stage on this side).
+        let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "R-08", "", -8)]);
+        assert!(out.is_none());
+        assert_eq!(e.status().stage, TxStage::Rr73);
+        assert_eq!(e.tx_message(), Some("K1ABC K0XYZ RR73"));
+        assert!(!e.status().logged_awaiting_courtesy_ack, "RR73 is only queued, not yet confirmed sent");
+
+        // The scheduler confirms RR73 actually went out -- this must log the
+        // QSO immediately, with no reply ever required.
+        let out = e.notify_transmitted();
+        match out {
+            Some(QsoOutcome::Completed(rec)) => {
+                assert_eq!(rec.call, "K1ABC");
+                assert_eq!(rec.gridsquare, "FN42");
+            }
+            _ => panic!("expected the QSO to log the instant RR73 was confirmed sent"),
+        }
+        assert_eq!(e.status().stage, TxStage::Rr73, "still waiting/retrying for a courtesy 73, unaffected by logging");
+        // Real UX bug, found live: "still sitting on the calling cq panel
+        // for one time slot after the qso has been logged." This is the
+        // signal the docked panel uses to revert immediately once logged,
+        // even though the engine stays `active` a while longer quietly
+        // retrying/answering a repeat in the background.
+        assert!(e.status().logged_awaiting_courtesy_ack, "my side is done -- the panel should revert now, independent of active/stage");
+
+        // Dead silence from here on (the user's exact scenario) -- still
+        // logged once, no duplicate, and the run eventually gives up
+        // cleanly without ever trying to log a second time.
+        for _ in 0..10 {
+            assert!(e.process_rx(&[]).is_none());
+        }
+    }
+
+    #[test]
+    fn a_late_courtesy_73_does_not_log_the_qso_a_second_time() {
+        // The flip side of the fix above: if the partner's courtesy 73 DOES
+        // eventually arrive after RR73 was already confirmed sent, it must
+        // just finish the run (back to CQ / idle), not build a duplicate
+        // QsoRecord for the same contact.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.start_cq();
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "FN42", "FN42", -5)]);
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "R-08", "", -8)]);
+        assert!(matches!(e.notify_transmitted(), Some(QsoOutcome::Completed(_))));
+
+        // His courtesy 73 finally arrives.
+        let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "73", "", -8)]);
+        assert!(out.is_none(), "must not log a second record for the same contact");
+        assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn manually_answering_someone_else_mid_retry_does_not_relog_the_first_contact() {
+        // Real scenario, confirmed live: the operator can see BOTH the
+        // first station's (K1ABC) repeated report AND a second station
+        // (K5ZZZ) calling, once the panel has reverted after K1ABC's QSO
+        // was already logged (RR73 sent). Manually choosing to answer
+        // K5ZZZ instead of continuing to retry with K1ABC ("not the
+        // gentleman thing to do," per the operator, but a real, supported
+        // choice) must NOT re-log K1ABC -- his record is already in,
+        // `answer()`'s own `reset_qso()` simply abandons the retry/dormant
+        // state cleanly, and K5ZZZ gets his own fresh, independently
+        // logged QSO.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.start_cq();
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "FN42", "FN42", -5)]);
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "R-08", "", -8)]);
+        assert!(matches!(e.notify_transmitted(), Some(QsoOutcome::Completed(_))), "K1ABC logs once, on RR73 sent");
+        assert_eq!(e.status().stage, TxStage::Rr73, "still quietly retrying with K1ABC");
+
+        // Operator manually answers K5ZZZ instead, abandoning K1ABC's retry.
+        e.answer(&msg("CQ", "K5ZZZ", "EM12", "EM12", -3));
+        assert_eq!(e.status().target.as_deref(), Some("K5ZZZ"));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        // Even if K1ABC's repeat somehow still arrives right after the
+        // switch, it can no longer match the (now different) target --
+        // no re-log, no interference with the new exchange.
+        let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "R-08", "", -8)]);
+        assert!(out.is_none(), "K1ABC's repeat can't match K5ZZZ's QSO -- not mine, counts as silence, no re-log");
+        assert_eq!(e.status().target.as_deref(), Some("K5ZZZ"), "the switch to K5ZZZ is unaffected");
+
+        // K5ZZZ's own exchange logs independently, exactly once -- we
+        // answered HIS CQ, so this is the answerer's path: he sends a
+        // plain report, we send our R-report, his RR73 queues our courtesy
+        // 73, and logging happens once THAT is confirmed sent.
+        e.process_rx(&[msg("K0XYZ", "K5ZZZ", "-10", "", -8)]);
+        assert_eq!(e.status().stage, TxStage::RReport);
+        assert!(e.process_rx(&[msg("K0XYZ", "K5ZZZ", "RR73", "RR73", -8)]).is_none());
+        assert_eq!(e.status().stage, TxStage::Bye73);
+        match e.notify_transmitted() {
+            Some(QsoOutcome::Completed(rec)) => assert_eq!(rec.call, "K5ZZZ"),
+            other => panic!("expected K5ZZZ's own QSO to log the instant his courtesy 73 was confirmed sent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -954,19 +1223,24 @@ mod tests {
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ R-08"));
         assert_eq!(e.status().stage, TxStage::RReport);
 
-        // DX signs off with RR73 exactly as the decoder emits it live.
+        // DX signs off with RR73 exactly as the decoder emits it live. Must
+        // advance (not hang retransmitting the R-report) -- logging itself
+        // now waits for notify_transmitted (see its own doc comment), so
+        // this only checks the advance, not an immediate QsoOutcome.
         let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]);
-        match out {
+        assert!(out.is_none());
+        assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"), "RR73 sign-off must advance to the courtesy 73, not hang");
+        assert_eq!(e.status().stage, TxStage::Bye73);
+
+        match e.notify_transmitted() {
             Some(QsoOutcome::Completed(rec)) => {
                 assert_eq!(rec.call, "K1ABC");
                 assert_eq!(rec.gridsquare, "FN42");
                 assert_eq!(rec.rst_sent, "-08");
                 assert_eq!(rec.rst_rcvd, "-12");
             }
-            _ => panic!("RR73 sign-off must complete the QSO"),
+            _ => panic!("expected the QSO to log the instant the courtesy 73 was confirmed sent"),
         }
-        assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
-        assert_eq!(e.status().stage, TxStage::Bye73);
     }
 
     // --- TX Watchdog (no_reply_limit) / Max 73 Sends (max_73_sends) ---
@@ -1197,10 +1471,10 @@ mod tests {
         e.band = "20m".to_string();
         e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
         e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]); // -> RReport, R-08 sent
-        let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]); // logs, queues 73
-        assert!(matches!(out, Some(QsoOutcome::Completed(_))));
-        e.notify_transmitted();
-        assert!(e.process_rx(&[]).is_none()); // 73 sent -> TX stops (auto_return_to_cq=false)
+        let out = e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]); // queues 73, not yet logged
+        assert!(out.is_none());
+        assert!(matches!(e.notify_transmitted(), Some(QsoOutcome::Completed(_)))); // 73 sent -> logs now
+        assert!(e.process_rx(&[]).is_none()); // -> TX stops (auto_return_to_cq=false)
         assert!(!e.status().active);
         assert_eq!(e.status().stage, TxStage::Idle);
 

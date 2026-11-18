@@ -440,9 +440,27 @@ export default function App() {
     if (!txActive) setKeyedThisRun(false);
     else if (isTransmitting) setKeyedThisRun(true);
   }, [txActive, isTransmitting]);
-  const panelShouldShow = txActive && (keyedThisRun || logTarget != null);
+  // Real UX bug, found live: "still sitting on the calling cq panel for one
+  // time slot after the qso has been logged." Once our RR73 is confirmed
+  // sent, our side is done and already logged (qso.rs's
+  // logged_awaiting_courtesy_ack) even though the engine stays active a
+  // while longer, quietly resending RR73 if the partner missed it. The
+  // user's own design for this: "I'd revert to the message panel
+  // immediately after sending a 73 or a rr73. If while in the message
+  // panel the other station resends his transmission I'd reopen the qso
+  // panel and continue the qso but never relog" -- `isTransmitting` already
+  // pulses true on every retransmit (including a retry), not just the
+  // first, so reusing it here reopens the panel for exactly the retry's
+  // own over and reverts again right after, with no new signal needed.
+  const loggedAwaitingCourtesyAck = txState?.status.logged_awaiting_courtesy_ack ?? false;
+  const panelShouldShow =
+    txActive && (keyedThisRun || logTarget != null) && (!loggedAwaitingCourtesyAck || isTransmitting);
 
   useEffect(() => {
+    // TEMPORARY diagnostic (phantom TX log entry report) -- remove once a
+    // real trace confirms or rules this out.
+    const wasT = wasTransmittingRef.current;
+    const pendBefore = pendingTxLogRef.current;
     const decision = decideTxLog(
       wasTransmittingRef.current,
       isTransmitting,
@@ -455,7 +473,12 @@ export default function App() {
     if (decision.shouldLog) {
       setTxLog((prev) => [
         ...prev,
-        { direction: "tx" as const, utcMs: Date.now(), text: formatTxLogText(txMessageNow, txFreq), snr: null },
+        {
+          direction: "tx" as const,
+          utcMs: Date.now(),
+          text: formatTxLogText(txMessageNow, txFreq) + ` [wasT=${wasT} isT=${isTransmitting} pendB=${pendBefore} pendA=${decision.pendingAfter} active=${txActive}]`,
+          snr: null,
+        },
       ]);
     }
   }, [isTransmitting, txMessageNow, txActive, txFreq]);

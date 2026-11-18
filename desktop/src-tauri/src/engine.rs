@@ -944,6 +944,22 @@ struct Engine {
     /// time a CQ/QSO starts (`StartCq` seeds `tx_parity` from this instead of
     /// `None`); it never overrides an already-locked in-progress QSO's parity.
     preferred_tx_parity: Option<i64>,
+    /// Whether this run has actually keyed a real over yet -- set `false` by
+    /// every activation command (StartCq/Answer/SetStage/FreeText), `true`
+    /// only inside `maybe_transmit`'s success branch. Real bug, found live
+    /// (the operator: "the counter should increment after I call the cq not
+    /// before the actual transmission" -- confirmed by a phantom TX-log entry
+    /// and the CQ Watchdog undercounting real overs): `is_own_tx_slot`
+    /// (`handle_decoded`) used to infer "haven't transmitted yet" from
+    /// `tx_parity.is_none()`, but `tx_parity` is seeded from
+    /// `preferred_tx_parity` the instant StartCq runs -- when the operator
+    /// has a fixed TX Period set (not "Auto"), `tx_parity` is *never* `None`
+    /// at all, even though the very first real over can still miss its
+    /// slot's TX window exactly like the Auto case. A dedicated flag is the
+    /// only thing that actually tracks "has a real over gone out," regardless
+    /// of whether parity was locked early by a preference or only once
+    /// transmission succeeds.
+    has_transmitted_this_run: bool,
     clock_offset_ms: i64,
     time_synced: bool,
     /// Clone of the command sender so background helpers (NTP sync) can feed
@@ -1272,6 +1288,7 @@ impl Engine {
             last_ptt_on_sent: None,
             tx_parity: None,
             preferred_tx_parity: None,
+            has_transmitted_this_run: false,
             clock_offset_ms: saved_offset.unwrap_or(0),
             time_synced: saved_offset.is_some(),
             udp: crate::udp::UdpService::new(cmd_tx.clone()),
@@ -1603,97 +1620,146 @@ impl Engine {
         // "3" produced only ~1-2 real retries, not 3. Mirrors Android's
         // own equivalent guard (`parseMessageToFunction`'s own-slot
         // early-out, `msgList.get(0).getSequence() == sequential`).
-        // `tx_parity` is `None` until we've transmitted at least once
-        // this run, so nothing is skipped before our first over.
-        let is_own_tx_slot = self.tx_parity == Some(slot_id.rem_euclid(2));
+        //
+        // We haven't transmitted at all yet this run -- which includes a
+        // brief real window, not just "before the operator clicks":
+        // StartCq/SetStage/FreeText try to key the very slot they're issued
+        // in, and that attempt often misses the ~2.26s TX window (an
+        // operator's click lands at an arbitrary point in the cycle, not at
+        // its top), leaving the first real over to go out on the NEXT
+        // slot's boundary trigger instead. A slot where we haven't
+        // transmitted *at all* yet is just as structurally nothing-to-
+        // reply-to as our own transmit slot is, so it must be skipped the
+        // same way, not treated as a real round trip. Real bug, found live
+        // (CQ Watchdog set to 3, only 2 CQs actually went out; separately,
+        // the operator: "the counter should increment after I call the cq
+        // not before the actual transmission") -- `tx_parity.is_none()`
+        // alone isn't a reliable proxy for this: StartCq seeds `tx_parity`
+        // from `preferred_tx_parity` immediately, so with a fixed TX Period
+        // set (not "Auto"), `tx_parity` is *never* `None` even though the
+        // very first real over can still miss its slot. `has_transmitted_
+        // this_run` (set only inside `maybe_transmit`'s success branch) is
+        // the actual, unambiguous signal -- see its own doc comment.
+        let is_own_tx_slot = !self.has_transmitted_this_run
+            || self.tx_parity == Some(slot_id.rem_euclid(2));
+        // TEMPORARY diagnostic (CQ Watchdog "called CQ 4 times, limit 3"
+        // report) -- remove once a real trace confirms or rules this out.
+        if self.qso.status().stage == crate::qso::TxStage::Cq {
+            eprintln!(
+                "[cq-watchdog] handle_decoded slot={slot_id} parity={} tx_parity={:?} own_slot={is_own_tx_slot} n_decoded={} active={}",
+                slot_id.rem_euclid(2), self.tx_parity, decoded.len(), self.qso.active,
+            );
+        }
         let qso_outcome = if is_own_tx_slot { None } else { self.qso.process_rx(&decoded) };
 
-        if let Some(QsoOutcome::Completed(mut record)) = qso_outcome {
-            // The operator's current power setting at the moment the QSO
-            // completes (ADIF TX_PWR) -- matches Android's own
-            // QSLTable.tx_pwr. `qso.rs` builds the record without DB/config
-            // access (deliberately kept pure), so this is filled in here.
-            record.tx_pwr = self.db.get_config("powerWatts").unwrap_or_default();
-            // Auto comment, ported from Android's `QSLRecord` constructor
-            // exactly: "Distance: <N> <mi|km>, QSO by FT8AF" when both grids
-            // are known, else just "QSO by FT8AF". Real bug, found live:
-            // qso.rs's `complete()` always left this blank (`comment:
-            // String::new()`) -- filled in here instead of there for the
-            // same "qso.rs stays pure, no DB/config access" reason tx_pwr
-            // above is filled in here, not in qso.rs. `distanceInMiles`
-            // (Settings -> Decode & Filters, default on) is read fresh each
-            // time rather than cached, matching every other per-QSO config
-            // read in this block.
-            let miles = self.db.get_config("distanceInMiles").as_deref() != Some("0");
-            record.comment = match util::maidenhead_distance_km(&record.my_gridsquare, &record.gridsquare) {
-                Some(km) => {
-                    let dist = if miles { km * 0.621371 } else { km };
-                    format!("Distance: {:.0} {}, QSO by FT8AF", dist, if miles { "mi" } else { "km" })
-                }
-                None => "QSO by FT8AF".to_string(),
-            };
-            // Fork: fill COUNTRY (DXCC prefix lookup) and STATE (QRZ's
-            // registered state for the partner, gated by `logged_state`'s
-            // portable/grid-match rules) when the QSO itself didn't already
-            // carry one -- ported from Android's `DatabaseOpr.fillPlace`.
-            // See `logged_state.rs`'s doc comment for a real, disclosed gap
-            // (desktop has no POTA/SIG tracking on a QSO yet, so only the
-            // callsign-suffix half of "portable" is checked).
-            if record.country.is_empty() {
-                if let Some(m) = dxcc::lookup(&record.call) {
-                    if !m.country_name.is_empty() {
-                        record.country = m.country_name;
-                    }
-                }
-            }
-            if record.state.is_empty() {
-                let us_or_unknown = record.country.is_empty()
-                    || record.country.to_uppercase().starts_with("UNITED STATES");
-                if us_or_unknown {
-                    let grid_state = us_states::state_for_grid(&record.gridsquare);
-                    let qrz = self.qrz_xml.cached(&record.call);
-                    let portable = logged_state::is_portable_call(&record.call);
-                    if let Some(picked) = logged_state::pick_logged_state(
-                        grid_state.as_deref(),
-                        qrz.as_ref().map(|q| q.state.as_str()),
-                        qrz.as_ref().map(|q| q.grid.as_str()),
-                        Some(record.gridsquare.as_str()),
-                        portable,
-                    ) {
-                        record.state = picked;
-                    }
-                }
-            }
-            match self.db.insert_qso(&record) {
-                Ok(_) => {
-                    self.broadcast_qso(&record);
-                    // Running ADIF log mirror (ft8af_log.adi in Downloads),
-                    // ported from Android's `AdifLogFile.java` -- gated on
-                    // `enableAdifExport`, defaulting to on (Android's own
-                    // default) since this is new desktop functionality with
-                    // no prior behavior to preserve. Swallows its own errors.
-                    let adif_log_enabled = self.db.get_config("enableAdifExport").map(|v| v != "0").unwrap_or(true);
-                    adif_log_file::log_qso(adif_log_enabled, &crate::db::adif_record(&record));
-                    // Fork: auto-upload to QRZ's Logbook the moment this QSO is
-                    // logged (gated on `enableQRZ`), matching
-                    // `MainViewModel.java`'s post-insert background thread --
-                    // spawned so a slow/blocked network call never stalls the
-                    // engine's own run loop.
-                    if self.db.get_config(qrz::CONFIG_ENABLE).as_deref() == Some("1") {
-                        let db = self.db.clone();
-                        let api_key = self.db.get_config(qrz::CONFIG_API_KEY).unwrap_or_default();
-                        let record_for_upload = record.clone();
-                        std::thread::spawn(move || {
-                            qrz::upload_one_logged(&db, &api_key, &record_for_upload);
-                        });
-                    }
-                    self.emit(EngineEvent::QsoCompleted(record));
-                }
-                Err(e) => self.emit(EngineEvent::Error(format!("log QSO failed: {e}"))),
-            }
+        if let Some(QsoOutcome::Completed(record)) = qso_outcome {
+            self.log_completed_qso(record);
         }
         self.maybe_transmit(slot_id);
         self.publish_tx_state();
+    }
+
+    /// Fill in everything `qso.rs` deliberately builds a bare `QsoRecord`
+    /// without (it stays pure, no DB/config access -- see each fill's own
+    /// comment below for why that line lives here instead of there), then
+    /// log it: DB insert, ADIF mirror, QRZ upload, the `QsoCompleted` event.
+    /// Called from both `handle_decoded` (completing on a *received*
+    /// confirmation) and `maybe_transmit` (completing the instant RR73 is
+    /// *sent* -- see `QsoEngine::notify_transmitted`'s own doc comment) --
+    /// extracted so a QSO logs identically regardless of which side of the
+    /// exchange actually finished it.
+    fn log_completed_qso(&mut self, mut record: QsoRecord) {
+        // The operator's current power setting at the moment the QSO
+        // completes (ADIF TX_PWR) -- matches Android's own QSLTable.tx_pwr.
+        record.tx_pwr = self.db.get_config("powerWatts").unwrap_or_default();
+        // Auto comment, ported from Android's `QSLRecord` constructor
+        // exactly: "Distance: <N> <mi|km>, QSO by FT8AF" when both grids
+        // are known, else just "QSO by FT8AF". `distanceInMiles` (Settings
+        // -> Decode & Filters, default on) is read fresh each time rather
+        // than cached, matching every other per-QSO config read in this
+        // function.
+        let miles = self.db.get_config("distanceInMiles").as_deref() != Some("0");
+        record.comment = match util::maidenhead_distance_km(&record.my_gridsquare, &record.gridsquare) {
+            Some(km) => {
+                let dist = if miles { km * 0.621371 } else { km };
+                format!("Distance: {:.0} {}, QSO by FT8AF", dist, if miles { "mi" } else { "km" })
+            }
+            None => "QSO by FT8AF".to_string(),
+        };
+        // Fork: fill COUNTRY (DXCC prefix lookup) and STATE (QRZ's
+        // registered state for the partner, gated by `logged_state`'s
+        // portable/grid-match rules) when the QSO itself didn't already
+        // carry one -- ported from Android's `DatabaseOpr.fillPlace`.
+        // See `logged_state.rs`'s doc comment for a real, disclosed gap
+        // (desktop has no POTA/SIG tracking on a QSO yet, so only the
+        // callsign-suffix half of "portable" is checked).
+        if record.country.is_empty() {
+            if let Some(m) = dxcc::lookup(&record.call) {
+                if !m.country_name.is_empty() {
+                    record.country = m.country_name;
+                }
+            }
+        }
+        if record.state.is_empty() {
+            let us_or_unknown = record.country.is_empty()
+                || record.country.to_uppercase().starts_with("UNITED STATES");
+            if us_or_unknown {
+                let grid_state = us_states::state_for_grid(&record.gridsquare);
+                let qrz = self.qrz_xml.cached(&record.call);
+                let portable = logged_state::is_portable_call(&record.call);
+                if let Some(picked) = logged_state::pick_logged_state(
+                    grid_state.as_deref(),
+                    qrz.as_ref().map(|q| q.state.as_str()),
+                    qrz.as_ref().map(|q| q.grid.as_str()),
+                    Some(record.gridsquare.as_str()),
+                    portable,
+                ) {
+                    record.state = picked;
+                }
+            }
+        }
+        match self.db.insert_qso(&record) {
+            Ok(id) => {
+                // Real bug, found live (user asked to audit the sync flags
+                // specifically): `record.id` was left `None` here --
+                // `upload_and_mark_one`'s success path is `if let Some(id) =
+                // q.id { mark_synced(id, "qrz") }`, so every auto-upload-on-
+                // log QRZ submission actually reached QRZ (it uploads by
+                // content, not by id) but could never mark the local row
+                // `synced_qrz = 1` -- it silently no-op'd on `None` every
+                // time. The row only ever got fixed if the operator later
+                // ran a manual "Sync to logging services" pass, which
+                // re-uploads it (QRZ replies "duplicate," harmless) and
+                // *that* path's record came from a DB query that already has
+                // a real id. Filling it in here, right after insert, closes
+                // the gap at the source instead of relying on that manual
+                // catch-up.
+                record.id = Some(id);
+                self.broadcast_qso(&record);
+                // Running ADIF log mirror (ft8af_log.adi in Downloads),
+                // ported from Android's `AdifLogFile.java` -- gated on
+                // `enableAdifExport`, defaulting to on (Android's own
+                // default) since this is new desktop functionality with
+                // no prior behavior to preserve. Swallows its own errors.
+                let adif_log_enabled = self.db.get_config("enableAdifExport").map(|v| v != "0").unwrap_or(true);
+                adif_log_file::log_qso(adif_log_enabled, &crate::db::adif_record(&record));
+                // Fork: auto-upload to QRZ's Logbook the moment this QSO is
+                // logged (gated on `enableQRZ`), matching
+                // `MainViewModel.java`'s post-insert background thread --
+                // spawned so a slow/blocked network call never stalls the
+                // engine's own run loop.
+                if self.db.get_config(qrz::CONFIG_ENABLE).as_deref() == Some("1") {
+                    let db = self.db.clone();
+                    let api_key = self.db.get_config(qrz::CONFIG_API_KEY).unwrap_or_default();
+                    let record_for_upload = record.clone();
+                    std::thread::spawn(move || {
+                        qrz::upload_one_logged(&db, &api_key, &record_for_upload);
+                    });
+                }
+                self.emit(EngineEvent::QsoCompleted(record));
+            }
+            Err(e) => self.emit(EngineEvent::Error(format!("log QSO failed: {e}"))),
+        }
     }
 
     /// `Mode::tx_latest_ms` (the configured PTT delay's eligibility window)
@@ -1726,14 +1792,24 @@ impl Engine {
         // All the keying rules — active QSO, locked-parity alternation, once per
         // slot, and early enough in the cycle to fit the waveform — live in the pure
         // `tx_slot_eligible` so the run loop's boundary trigger shares them exactly.
-        if !tx_slot_eligible(
+        let into_cycle_ms_now = self.now().rem_euclid(self.mode.cycle_ms());
+        let eligible = tx_slot_eligible(
             self.qso.active,
             self.tx_parity,
             slot_id,
             self.txed_slot,
-            self.now().rem_euclid(self.mode.cycle_ms()),
+            into_cycle_ms_now,
             self.effective_tx_latest_ms(),
-        ) {
+        );
+        // TEMPORARY diagnostic (15s-apart double-transmission report) --
+        // remove once a real trace confirms or rules this out.
+        if self.qso.status().stage == crate::qso::TxStage::Cq {
+            eprintln!(
+                "[cq-watchdog] maybe_transmit ENTRY slot={slot_id} tx_parity={:?} txed_slot={} into_cycle_ms={into_cycle_ms_now} eligible={eligible} has_tx={}",
+                self.tx_parity, self.txed_slot, self.has_transmitted_this_run,
+            );
+        }
+        if !eligible {
             return;
         }
         // Answering a CQ pins the parity to the operator's click slot so we always
@@ -1741,12 +1817,42 @@ impl Engine {
         self.tx_parity = Some(slot_id.rem_euclid(2));
         self.txed_slot = slot_id;
         if let Some(msg) = self.qso.tx_message().map(|s| s.to_string()) {
+            // TEMPORARY diagnostic (CQ Watchdog "called CQ 4 times, limit 3"
+            // report) -- remove once a real trace confirms or rules this out.
+            if self.qso.status().stage == crate::qso::TxStage::Cq {
+                eprintln!("[cq-watchdog] maybe_transmit firing slot={slot_id} msg={msg:?}");
+            }
             if self.start_transmit(&msg) {
+                // The ONLY reliable "a real over has actually gone out this
+                // run" signal -- see `has_transmitted_this_run`'s own doc
+                // comment for why `tx_parity.is_none()` wasn't enough.
+                self.has_transmitted_this_run = true;
                 // Tell the sequencer the message actually went out. This is what
                 // lets a courtesy "73" wrap the QSO up only after it's on the air;
                 // if start_transmit bailed (busy/encode error) the QSO stays armed
-                // and retransmits next slot instead of clobbering the 73.
-                self.qso.notify_transmitted();
+                // and retransmits next slot instead of clobbering the 73. It also
+                // returns a loggable outcome the instant RR73 is confirmed sent
+                // (see QsoEngine::notify_transmitted's own doc comment) --
+                // logged the same way as any other completion.
+                if let Some(QsoOutcome::Completed(record)) = self.qso.notify_transmitted() {
+                    self.log_completed_qso(record);
+                }
+                // Publish the instant a real over actually keys -- matches
+                // Android's `transmitSignal.mutableIsTransmitting.postValue(true)`,
+                // called synchronously right here, not left to whichever
+                // caller happens to publish next. Real gap, found live: of
+                // maybe_transmit's three call sites, only two (StartCq's own
+                // immediate attempt, handle_decoded's tail) already publish
+                // afterward -- the one that fires most *real* CQ keyings (the
+                // run loop's boundary trigger, used whenever the operator's
+                // click misses the current slot's window and the first over
+                // goes out on the next one instead) never did. The frontend's
+                // TX log (activeQsoPanel.ts's decideTxLog) is keyed off the
+                // rising edge of `transmitting`, so without this, that edge
+                // could be missed or arrive late enough to look like it
+                // belonged to a different slot than the one the carrier
+                // actually keyed in.
+                self.publish_tx_state();
             }
         }
     }
@@ -2718,6 +2824,7 @@ impl Engine {
             EngineCommand::SetMode(mode) => self.switch_mode(mode),
             EngineCommand::StartCq => {
                 self.tx_parity = self.preferred_tx_parity;
+                self.has_transmitted_this_run = false;
                 self.qso.start_cq();
                 // Start CQ this very slot if we're still inside the window;
                 // otherwise the first transmission lands at the next free slot.
@@ -2746,6 +2853,17 @@ impl Engine {
                 // after the CQ, so pin TX to this slot's parity and key up right
                 // away if we're still inside the window — matching WSJT-X.
                 self.tx_parity = Some(self.cur_parity());
+                // Also update the *preference* (not just this run's lock), so the
+                // NEXT CQ start (e.g. via Auto-CQ after this QSO) keeps using
+                // whichever slot answering this station required, instead of
+                // reverting to whatever was set before. Real UX requirement,
+                // stated live: "the odd/even slot setting is to get adjusted to
+                // what is needed to reply to that station and it should remain
+                // as the selected slot until i change it or choose to answer a
+                // station in a different time slot" -- the latter is exactly
+                // this same line firing again with a new parity, overwriting it.
+                self.preferred_tx_parity = Some(self.cur_parity());
+                self.has_transmitted_this_run = false;
                 self.qso.answer(&msg);
                 // Fork: look the partner up on QRZ now, so its state is
                 // cached by the time the QSO is logged. Mirrors
@@ -2756,6 +2874,7 @@ impl Engine {
             }
             EngineCommand::SetStage(stage) => {
                 self.tx_parity = None;
+                self.has_transmitted_this_run = false;
                 self.qso.set_stage(stage);
                 self.maybe_transmit(self.cur_slot());
                 self.publish_tx_state();
@@ -2771,6 +2890,7 @@ impl Engine {
             EngineCommand::StopTune => self.finalize_tx(),
             EngineCommand::FreeText(text) => {
                 self.tx_parity = None;
+                self.has_transmitted_this_run = false;
                 self.qso.set_free_text(&text);
                 self.maybe_transmit(self.cur_slot());
                 self.publish_tx_state();
@@ -2878,9 +2998,9 @@ mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, effective_tune_gain, format_watts, reply_tx_audio_hz, rms_dbfs,
         should_default_qmx_cat_tones_on, should_refresh_ptt, resolve_tx_audio_channel,
-        waterfall_row_due, wf_boundary_row, CatToneTx, Engine, EngineCommand, EngineEvent, TuneHandle, CLIP_PEAK,
-        DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ,
-        MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
+        waterfall_row_due, wf_boundary_row, AnswerArgs, CatToneTx, Engine, EngineCommand, EngineEvent,
+        TuneHandle, CLIP_PEAK, DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS,
+        MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::audio::channel_select;
     use crate::db::Db;
@@ -3035,6 +3155,45 @@ mod tests {
         engine.handle(EngineCommand::SetTxPeriod(None));
         engine.handle(EngineCommand::StartCq);
         assert_eq!(engine.tx_parity, None);
+    }
+
+    #[test]
+    fn answering_a_station_updates_the_tx_period_preference_too() {
+        // Real UX requirement, stated live: "if i answer a station that is
+        // calling cq the odd/even slot setting is [to] get adjusted to what
+        // is needed to reply to that station and it should remain as the
+        // selected slot until i change it or choose to answer a station in
+        // a different time slot." Answering only ever locked the transient
+        // `tx_parity` for *this* run -- `preferred_tx_parity` (what the next
+        // CQ start, e.g. via Auto-CQ after this QSO, seeds from) was left
+        // alone, so the very next CQ could silently revert to whatever
+        // period was set before this QSO, not the one this QSO actually
+        // used.
+        let db = Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, _evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(Arc::clone(&db), evt_tx, cmd_tx);
+        assert_eq!(engine.preferred_tx_parity, None, "no preference set yet");
+
+        let parity_before = engine.cur_parity();
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            delta_freq: 0,
+        }));
+        assert_eq!(engine.tx_parity, Some(parity_before));
+        assert_eq!(
+            engine.preferred_tx_parity,
+            Some(parity_before),
+            "answering must also update the lasting preference, not just this run's lock"
+        );
+
+        // A later CQ (e.g. Auto-CQ after this QSO ends) keeps using that
+        // same period, not whatever was set before this QSO.
+        engine.qso.stop();
+        engine.handle(EngineCommand::StartCq);
+        assert_eq!(engine.tx_parity, Some(parity_before));
     }
 
     #[test]
@@ -3777,6 +3936,7 @@ mod tests {
         });
         assert_eq!(engine.qso.status().stage, TxStage::Grid);
         engine.qso.no_reply_limit = 3;
+        engine.has_transmitted_this_run = true;
         engine.tx_parity = Some(0); // we transmit on even slots, they on odd
 
         engine.handle_decoded(vec![], 0); // ours -- must not count
@@ -3826,13 +3986,15 @@ mod tests {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
         }]);
-        assert!(matches!(outcome, Some(QsoOutcome::Completed(_))));
+        // Queued, not yet logged -- logging now waits for notify_transmitted.
+        assert!(outcome.is_none());
         assert_eq!(engine.qso.status().stage, TxStage::Bye73);
         assert!(engine.qso.active, "still armed to send the courtesy 73");
 
-        // The scheduler actually transmits the 73 (our parity slot).
-        engine.qso.notify_transmitted();
+        // The scheduler actually transmits the 73 (our parity slot) -- this logs it.
+        assert!(matches!(engine.qso.notify_transmitted(), Some(QsoOutcome::Completed(_))));
         engine.tx_parity = Some(0);
+        engine.has_transmitted_this_run = true;
 
         // Our own next slot -- process_rx must be skipped, but that must not
         // matter: nothing to complete here, the real check lands on theirs.
@@ -3875,13 +4037,16 @@ mod tests {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
         }]);
-        assert!(matches!(outcome, Some(QsoOutcome::Completed(_))));
+        // Not logged yet -- only queued. Logging now waits for
+        // notify_transmitted to confirm the courtesy 73 was actually sent
+        // (see that method's own doc comment).
+        assert!(outcome.is_none());
         assert_eq!(engine.qso.status().stage, TxStage::Bye73);
 
         // The scheduler keys the 73 (notify_transmitted, same as the real
         // start_transmit -> notify_transmitted call in maybe_transmit) and
-        // the CAT-tone transmission is now in flight.
-        engine.qso.notify_transmitted();
+        // the CAT-tone transmission is now in flight. THIS logs the QSO.
+        assert!(matches!(engine.qso.notify_transmitted(), Some(QsoOutcome::Completed(_))));
         engine.tx_cat = Some(CatToneTx {
             tones: [0; encode::FT4_NN],
             len: 0,
@@ -3917,6 +4082,13 @@ mod tests {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             grid: "EM12".into(), snr: -5, ..Default::default()
         });
+        // Matches the real Answer command handler, which locks tx_parity
+        // immediately -- both decode slots below are the partner's incoming
+        // messages (parity 0), so tx_parity must be the *other* parity or
+        // the new pre-first-transmission skip (see is_own_tx_slot's doc
+        // comment) would wrongly treat them as our own slot too.
+        engine.tx_parity = Some(1);
+        engine.has_transmitted_this_run = true;
         engine.handle_decoded(vec![DecodedMessage {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "-12".into(), snr: -8, ..Default::default()
@@ -3924,7 +4096,13 @@ mod tests {
         engine.handle_decoded(vec![DecodedMessage {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
-        }], 1);
+        }], 2);
+        // RR73 only queues the courtesy 73 now -- logging (and this test's
+        // own fill-in logic) waits for the scheduler to confirm it was
+        // actually sent, same as the real maybe_transmit success path.
+        if let Some(QsoOutcome::Completed(record)) = engine.qso.notify_transmitted() {
+            engine.log_completed_qso(record);
+        }
 
         let qsos = engine.db.list_qsos(10, 0);
         assert_eq!(qsos.len(), 1);
@@ -3944,6 +4122,8 @@ mod tests {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             grid: "EM12".into(), snr: -5, ..Default::default()
         });
+        engine.tx_parity = Some(1); // see the sibling test's own comment
+        engine.has_transmitted_this_run = true;
         engine.handle_decoded(vec![DecodedMessage {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "-12".into(), snr: -8, ..Default::default()
@@ -3951,7 +4131,10 @@ mod tests {
         engine.handle_decoded(vec![DecodedMessage {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
-        }], 1);
+        }], 2);
+        if let Some(QsoOutcome::Completed(record)) = engine.qso.notify_transmitted() {
+            engine.log_completed_qso(record);
+        }
 
         let comment = engine.db.list_qsos(10, 0)[0].comment.clone();
         assert!(comment.contains(" km,"), "distanceInMiles=0 must use km, got: {comment}");
@@ -3966,6 +4149,8 @@ mod tests {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             grid: "EM12".into(), snr: -5, ..Default::default()
         });
+        engine.tx_parity = Some(1); // see qso_comment_includes_distance...'s own comment
+        engine.has_transmitted_this_run = true;
         engine.handle_decoded(vec![DecodedMessage {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "-12".into(), snr: -8, ..Default::default()
@@ -3973,9 +4158,60 @@ mod tests {
         engine.handle_decoded(vec![DecodedMessage {
             call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
             extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
-        }], 1);
+        }], 2);
+        if let Some(QsoOutcome::Completed(record)) = engine.qso.notify_transmitted() {
+            engine.log_completed_qso(record);
+        }
 
         assert_eq!(engine.db.list_qsos(10, 0)[0].comment, "QSO by FT8AF");
+    }
+
+    #[test]
+    fn logged_qso_record_carries_its_real_row_id() {
+        // Real bug, found live (user asked to audit the logbook sync flags
+        // specifically): `insert_qso`'s returned row id was discarded
+        // (`Ok(_)`), so `record.id` stayed `None` through the rest of
+        // log_completed_qso -- including the clone handed to the
+        // auto-upload-on-log QRZ thread. `upload_and_mark_one`'s success
+        // path is `if let Some(id) = q.id { mark_synced(id, "qrz") }`, so
+        // every auto-uploaded QSO actually reached QRZ (it uploads by
+        // content, not by id) but could never mark the local row
+        // `synced_qrz = 1` -- silently skipped every single time. Confirmed
+        // here via the emitted `QsoCompleted` event (what the QRZ-upload
+        // clone is taken from) rather than hitting the real network.
+        let db = std::sync::Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(db, evt_tx, cmd_tx);
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.my_grid = "FN42".into();
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "EM12".into(), snr: -5, ..Default::default()
+        });
+        engine.tx_parity = Some(1);
+        engine.has_transmitted_this_run = true;
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "-12".into(), snr: -8, ..Default::default()
+        }], 0);
+        engine.handle_decoded(vec![DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            extra: "RR73".into(), grid: "RR73".into(), snr: -8, ..Default::default()
+        }], 2);
+        if let Some(QsoOutcome::Completed(record)) = engine.qso.notify_transmitted() {
+            engine.log_completed_qso(record);
+        }
+
+        let completed = (0..)
+            .map_while(|_| evt_rx.try_recv().ok())
+            .find_map(|e| match e {
+                EngineEvent::QsoCompleted(r) => Some(r),
+                _ => None,
+            })
+            .expect("a QsoCompleted event must have been emitted");
+        assert!(completed.id.is_some(), "the emitted record must carry its real row id, not None");
+        assert_eq!(completed.id, engine.db.list_qsos(10, 0)[0].id);
     }
 
     #[test]
@@ -4012,10 +4248,99 @@ mod tests {
         engine.qso.start_cq();
         engine.qso.cq_no_reply_limit = 2;
         engine.tx_parity = Some(0);
+        engine.has_transmitted_this_run = true;
 
         engine.handle_decoded(vec![], 0); // ours -- must not count
         engine.handle_decoded(vec![], 1); // theirs, silent -- 1st real miss
         assert!(engine.qso.active, "must still be calling CQ after only 1 real miss");
+        engine.handle_decoded(vec![], 2); // ours -- must not count
+        engine.handle_decoded(vec![], 3); // theirs, silent -- 2nd real miss -> give up
+        assert!(!engine.qso.active, "gives up at exactly 2 real misses, matching the configured limit");
+    }
+
+    #[test]
+    fn a_decode_cycle_before_the_first_real_transmission_is_not_counted_as_a_cq_watchdog_miss() {
+        // Real bug, found live: "cq watchdog set to 3, only transmitted 2
+        // cq's." Confirmed from a full trace -- the watchdog's own count DID
+        // reach exactly 3/3, but only 2 real CQ overs had gone out. Root
+        // cause: StartCq tries to key the very slot it's issued in, which
+        // misses the TX window far more often than not (an operator's click
+        // lands at an arbitrary point in the cycle, not at its top) --
+        // tx_parity then stays `None` until the NEXT slot's boundary trigger
+        // gets the first real over out. The OLD is_own_tx_slot check only
+        // matched `Some(parity)`, so that in-between slot (decoded, but
+        // nothing could possibly be heard yet -- nothing has been
+        // transmitted at all) fell through to a real `process_rx` call and
+        // counted as a genuine "no reply" miss before CQ #1 ever existed,
+        // making every run give up one real transmission earlier than its
+        // configured limit.
+        let mut engine = test_engine();
+        engine.qso.start_cq();
+        engine.qso.cq_no_reply_limit = 3;
+        // tx_parity starts None (StartCq's own immediate attempt missed the
+        // window) -- this slot must be skipped exactly like an own-parity
+        // slot, not counted as a real miss.
+        assert_eq!(engine.tx_parity, None);
+        engine.handle_decoded(vec![], 0);
+        assert_eq!(engine.qso.status().stage, TxStage::Cq);
+        assert!(engine.qso.active, "the pre-first-transmission slot must not itself cost a miss");
+
+        // The first real over now lands (boundary trigger, next slot) --
+        // tx_parity locks, has_transmitted_this_run flips, and real counting
+        // starts from here.
+        engine.tx_parity = Some(1);
+        engine.has_transmitted_this_run = true;
+        engine.handle_decoded(vec![], 1); // ours -- must not count
+        engine.handle_decoded(vec![], 2); // theirs, silent -- 1st real miss
+        assert!(engine.qso.active, "only 1 real miss so far");
+        engine.handle_decoded(vec![], 3); // ours -- must not count
+        engine.handle_decoded(vec![], 4); // theirs, silent -- 2nd real miss
+        assert!(engine.qso.active, "only 2 real misses so far -- this is the slot the old bug gave up on");
+        engine.handle_decoded(vec![], 5); // ours -- must not count
+        engine.handle_decoded(vec![], 6); // theirs, silent -- 3rd real miss -> give up
+        assert!(!engine.qso.active, "gives up at exactly 3 real misses, matching the configured limit");
+    }
+
+    #[test]
+    fn a_fixed_tx_period_still_skips_the_pre_transmission_slot() {
+        // The sibling test above covers "Auto" TX Period, where tx_parity
+        // starts `None`. Real bug, found live (the operator, after the
+        // Auto-case fix above was already shipped: "the counter should
+        // increment after I call the cq not before the actual
+        // transmission" -- still reproducing): with a *fixed* TX Period
+        // preference (Settings/TxBar's Even/Odd, not Auto),
+        // `EngineCommand::StartCq` seeds `tx_parity` from
+        // `preferred_tx_parity` immediately -- `tx_parity` is `Some(_)` from
+        // the very first instant, never `None`, so the old
+        // `tx_parity.is_none()` check could never have caught this case even
+        // though the exact same "click missed the window" scenario applies
+        // just as much. `has_transmitted_this_run` fixes this by tracking
+        // the real signal directly, independent of whether parity happened
+        // to be locked early.
+        // Mirrors EngineCommand::StartCq's own two lines exactly (not routed
+        // through `.handle()`, which would also call the real,
+        // wall-clock-dependent `maybe_transmit` -- irrelevant here and a
+        // source of test flakiness, since this test only cares about
+        // is_own_tx_slot's skip logic, not whether a real device exists).
+        let mut engine = test_engine();
+        engine.preferred_tx_parity = Some(0);
+        engine.tx_parity = engine.preferred_tx_parity;
+        engine.has_transmitted_this_run = false;
+        engine.qso.start_cq();
+        engine.qso.cq_no_reply_limit = 2;
+        assert_eq!(engine.tx_parity, Some(0), "fixed preference locks tx_parity immediately, unlike Auto");
+
+        // A decode cycle lands on slot 0 (matches the fixed preference's own
+        // parity) before any real over has gone out -- must not count,
+        // exactly like the pre-transmission slot in the Auto case.
+        engine.handle_decoded(vec![], 0);
+        assert!(engine.qso.active, "the pre-first-transmission slot must not itself cost a miss, even with a fixed TX Period");
+
+        // The first real over now lands.
+        engine.has_transmitted_this_run = true;
+        engine.handle_decoded(vec![], 0); // ours -- must not count
+        engine.handle_decoded(vec![], 1); // theirs, silent -- 1st real miss
+        assert!(engine.qso.active, "only 1 real miss so far");
         engine.handle_decoded(vec![], 2); // ours -- must not count
         engine.handle_decoded(vec![], 3); // theirs, silent -- 2nd real miss -> give up
         assert!(!engine.qso.active, "gives up at exactly 2 real misses, matching the configured limit");
