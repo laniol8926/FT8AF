@@ -1634,7 +1634,8 @@ impl Engine {
     /// (the decoder returns a batch — possibly empty — every cycle), so this is
     /// what drives CQ/auto-sequence retransmits.
     fn handle_decoded(&mut self, decoded: Vec<DecodedMessage>, slot_id: i64) {
-        self.publish_decodes(&decoded);
+        let slot_start_ms = slot_id * self.mode.cycle_ms();
+        self.publish_decodes(&decoded, slot_start_ms);
         self.broadcast_decodes(&decoded);
 
         // PSKReporter upload: enqueue this slot's decodes (gated on
@@ -1644,8 +1645,6 @@ impl Engine {
         // connect/disconnect call site.
         self.psk_sender.set_rig_name(self.rig.as_ref().map(|r| r.name()));
         let psk_enabled = self.db.get_config(pskreporter_sender::CONFIG_ENABLE).map(|v| v != "0").unwrap_or(true);
-        let slot_cycle_ms = self.mode.cycle_ms();
-        let slot_start_ms = self.now() - (self.now().rem_euclid(slot_cycle_ms));
         self.psk_sender.enqueue(
             &decoded,
             psk_enabled,
@@ -2423,8 +2422,21 @@ impl Engine {
         self.emit(EngineEvent::WaterfallRow(WaterfallRow { bins, hz_per_col, boundary }));
     }
 
-    fn publish_decodes(&self, decoded: &[DecodedMessage]) {
-        let now = self.now();
+    /// `slot_utc_ms` is the START of the slot this decode was actually
+    /// captured for (`slot_id * cycle_ms`, using the `pending_decode_slots`
+    /// -corrected `slot_id` -- see its own doc comment), NOT `self.now()`
+    /// at publish time. Real bug, confirmed live with two screenshots: the
+    /// decode worker runs on its own thread and is only polled
+    /// opportunistically, so a result landing late enough to cross a slot
+    /// boundary used to get stamped with whatever time it happened to be
+    /// *picked up*, one slot later than when it was actually transmitted
+    /// -- "the message box shows him calling CQ at the :00 time slot but
+    /// he actually called in the previous :45 slot when looking at the
+    /// waterfall." This `UiMessage.utc_ms` is also what `AnswerArgs::
+    /// msg_utc_ms` derives the reply parity from -- a stale timestamp here
+    /// would have silently defeated that fix too.
+    fn publish_decodes(&self, decoded: &[DecodedMessage], slot_utc_ms: i64) {
+        let now = slot_utc_ms;
         // Callsign/grid cache for the (not yet built) Map screen: any decode
         // that actually resolved a grid (m.grid is only non-empty when
         // dsp/decoder.rs's looks_like_grid passed -- never a signal report,
@@ -3498,7 +3510,7 @@ mod tests {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             ..Default::default()
-        }]);
+        }], 0);
 
         assert_eq!(db.qth_for_call("K1ABC"), Some("FN42".to_string()));
     }
@@ -3517,7 +3529,7 @@ mod tests {
             grid: "".into(),
             extra: "RRR".into(),
             ..Default::default()
-        }]);
+        }], 0);
 
         assert_eq!(db.qth_for_call("K1ABC"), None);
     }
@@ -4441,6 +4453,48 @@ mod tests {
         assert_eq!(engine.pending_decode_slots.pop_front(), Some(11));
         assert_eq!(engine.pending_decode_slots.pop_front(), Some(12));
         assert_eq!(engine.pending_decode_slots.pop_front(), None);
+    }
+
+    #[test]
+    fn a_late_published_decode_still_carries_its_true_slots_timestamp() {
+        // Real bug, confirmed live with two screenshots: "the message box
+        // shows him calling CQ at the :00 time slot but he actually called
+        // in the previous :45 slot when looking at the waterfall." The
+        // `pending_decode_slots` fix above already corrects `handle_decoded`'s
+        // OWN `slot_id` parameter for the engine's internal watchdog/parity
+        // accounting, but `publish_decodes` -- what builds the `UiMessage`
+        // the UI (and `AnswerArgs::msg_utc_ms`) actually sees -- still
+        // stamped every decode with `self.now()` at publish time instead of
+        // that corrected slot, so a late-published decode crossing a slot
+        // boundary showed the WRONG (one-slot-too-new) time regardless.
+        let db = std::sync::Arc::new(Db::open_in_memory().expect("in-memory db"));
+        let (evt_tx, evt_rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = std::sync::mpsc::channel();
+        let mut engine = Engine::new(db, evt_tx, cmd_tx);
+
+        let cycle_ms = engine.mode.cycle_ms();
+        let true_slot_id = engine.cur_slot() + 10; // some slot, far from "now"
+        // Simulate publishing arriving late -- well after the slot that
+        // actually captured this decode's audio.
+        engine.clock_offset_ms += true_slot_id * cycle_ms + cycle_ms * 3 - engine.now();
+
+        engine.handle_decoded(
+            vec![DecodedMessage { call_from: "K1ABC".into(), grid: "FN42".into(), ..Default::default() }],
+            true_slot_id,
+        );
+
+        let ui = (0..)
+            .map_while(|_| evt_rx.try_recv().ok())
+            .find_map(|e| match e {
+                EngineEvent::Decoded(msgs) => Some(msgs),
+                _ => None,
+            })
+            .expect("a Decoded event must have been emitted");
+        assert_eq!(
+            ui[0].utc_ms,
+            true_slot_id * cycle_ms,
+            "must carry the slot it was actually captured for, not whenever publish happened to run"
+        );
     }
 
     #[test]
