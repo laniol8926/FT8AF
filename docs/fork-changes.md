@@ -514,6 +514,63 @@ for the Hamlib version workaround needed there.
   yet, just the worked-call strikethrough; no per-setting UI toggle for the
   two QMX TX-audio fixes or for Tune's TUNE level (unlike Android, both are
   an unconditional auto-on/rig's-own-power-setting for any Hamlib QMX).
+- **QSO completion/logging timing**, a cluster of real bugs found live
+  during hands-on QMX/FT-857D testing of Call CQ and Answer CQ:
+  - **QSO logged before its closing message was actually sent** — ported
+    from a fix already made on the Android side. `complete()` used to log
+    the instant the partner's confirming RR73/RRR/73 was *received*
+    (`TxStage::Report`/`RReport`'s own match arms), before our own closing
+    message (RR73 for the caller, the courtesy 73 for the answerer) had
+    gone out. If that transmission then failed (missed TX window, rig
+    busy, encode failure), the QSO was logged with the closing message
+    never sent. Logging now only ever happens from `notify_transmitted`
+    (confirmed sent, not just queued), for either closing message, unified
+    under one `log_if_not_yet` (`qso.rs`).
+  - **CQ Watchdog counted a slot before any CQ had ever gone out**:
+    `is_own_tx_slot` (`engine.rs`'s `handle_decoded`) inferred "haven't
+    transmitted yet" from `tx_parity.is_none()`, but `StartCq` seeds
+    `tx_parity` from `preferred_tx_parity` immediately — with a fixed TX
+    Period (not "Auto"), `tx_parity` is never `None` even though the very
+    first real over can still miss its slot's TX window (an operator's
+    click lands at an arbitrary point in the cycle). A dedicated
+    `has_transmitted_this_run` flag (set only in `maybe_transmit`'s success
+    branch) tracks the real signal directly; without it the watchdog gave
+    up one real CQ transmission earlier than its configured limit.
+  - **TX Period didn't stick after answering a station**: `Answer` only
+    locked the transient `tx_parity` for that one run; the lasting
+    *preference* (`preferred_tx_parity`, what the next CQ start reuses,
+    e.g. via Auto-CQ after the QSO) was left alone, silently reverting to
+    whatever was set before. `Answer` now updates both, so the slot
+    adjusts to whichever station is being answered and stays there until
+    changed or a different station is answered in a different slot.
+  - **Docked panel staying up for one extra retry cycle** after a QSO was
+    already logged (the caller's RR73-sent side, still quietly retrying/
+    waiting for an optional courtesy 73 in the background): a new
+    `logged_awaiting_courtesy_ack` status flag lets the panel revert the
+    instant logging happens instead of waiting out that retry, and
+    reopens automatically for exactly the duration of any actual
+    retransmission (reusing the existing `isTransmitting` pulse) if the
+    partner repeats and needs a resend — never re-logging, per the
+    operator's own design for this.
+  - **Auto-upload-on-log never marked a QSO synced to QRZ**:
+    `log_completed_qso` discarded `insert_qso`'s returned row id
+    (`Ok(_)`), so `record.id` stayed `None` all the way to the QRZ-upload
+    thread; `upload_and_mark_one`'s success path
+    (`if let Some(id) = q.id { mark_synced(id, "qrz") }`) silently never
+    fired. The upload itself always succeeded (QRZ matches by content, not
+    id) — only the local `synced_qrz` flag was wrong, with no UI path to
+    self-heal it (the Logbook's "Sync to logging services" button isn't
+    wired to the batch re-upload yet). Fixed by filling in the real id
+    right after insert.
+  - **A late-arriving decode got attributed to the wrong (too-new) slot**:
+    the decode worker runs on its own thread and is only polled
+    opportunistically, so a result landing just late enough to cross a
+    slot boundary was labeled with whatever slot was *current* when
+    picked up, not the one its audio was actually captured for — flipping
+    its parity and making the own-transmit-slot skip (above) silently
+    treat a genuine partner-silence miss as "ours." A `pending_decode_slots`
+    FIFO (pushed on dispatch, popped on drain) fixes this, including under
+    a backlog of more than one outstanding decode.
 
 ## Smaller fixes
 
