@@ -639,6 +639,25 @@ for the Hamlib version workaround needed there.
   answering a CQ that's never replied even once, separately from (and
   never exceeding) the broader "TX Watchdog" that governs retries once a
   QSO is actually under way.
+- **TX Watchdog ("Stop After" N) counted every non-advancing cycle as a
+  failed attempt, even a genuine reply** — a major behavior change,
+  confirmed live with a worked example: "TX Watchdog set to 3. I call a
+  station, he answers me and the TX Watchdog has gotten incremented, I
+  respond to him but get no response from his station, TX Watchdog get
+  incremented, in the next slot I get a response from him, and reply, tx
+  watchdog gets incremented again and is at 3 so I give up... that should
+  not happen." The partner repeating himself (because he hasn't copied our
+  last reply) used to count exactly like silence, ported in spirit from
+  Android's own `isPartnerRepeat` — reverted, since a live, responding
+  partner is fundamentally not the same situation as one who's gone quiet.
+  `process_rx` now resets the no-reply counter on *any* genuine message
+  from the target, whether or not it advances the QSO stage; only true
+  silence still counts. One deliberate exception, confirmed live ("i agree
+  rr73 is different"): the courtesy-73 retry stage keeps counting every
+  non-advancing cycle unconditionally, since its own cap (Max 73 Sends)
+  bounds how many times *we* resend our own closing message regardless of
+  whether he's still there — a different kind of safety net than "has he
+  gone silent."
 
 ## Smaller fixes
 
