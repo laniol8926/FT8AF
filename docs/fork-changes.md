@@ -573,13 +573,8 @@ for the Hamlib version workaround needed there.
     request) falls back to the old click-time behavior.
   - **Docked panel staying up for one extra retry cycle** after a QSO was
     already logged (the caller's RR73-sent side, still quietly retrying/
-    waiting for an optional courtesy 73 in the background): a new
-    `logged_awaiting_courtesy_ack` status flag lets the panel revert the
-    instant logging happens instead of waiting out that retry, and
-    reopens automatically for exactly the duration of any actual
-    retransmission (reusing the existing `isTransmitting` pulse) if the
-    partner repeats and needs a resend — never re-logging, per the
-    operator's own design for this.
+    waiting for an optional courtesy 73 in the background) — **superseded
+    later the same session**, see below.
   - **Auto-upload-on-log never marked a QSO synced to QRZ**:
     `log_completed_qso` discarded `insert_qso`'s returned row id
     (`Ok(_)`), so `record.id` stayed `None` all the way to the QRZ-upload
@@ -658,6 +653,17 @@ for the Hamlib version workaround needed there.
   bounds how many times *we* resend our own closing message regardless of
   whether he's still there — a different kind of safety net than "has he
   gone silent."
+- **Docked panel no longer flickers back to "decodes" mid-RR73-retry**
+  (supersedes the "Docked panel staying up for one extra retry cycle" fix
+  above, from earlier the same session): that fix reverted to the decode
+  list the instant RR73 was confirmed sent, reopening only for the
+  duration of each retry's own over — live testing showed this looks like
+  a "phantom" retransmission, since the panel visibly flickers back and
+  forth for a retry the operator has no way to anticipate. New, simpler
+  rule, stated live: "we shouldn't switch back to the decode panel until
+  either (1) he responds or (2) the send 73 limit is reached whichever
+  comes first." The docked panel now just follows the engine's own
+  `active` state for the whole RR73 phase, with no special early revert.
 
 ## Smaller fixes
 
