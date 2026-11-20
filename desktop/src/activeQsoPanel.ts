@@ -47,38 +47,45 @@ export function qsoLogKey(entry: QsoLogEntry): string {
 }
 
 /**
- * Classify this snapshot's decoded messages from `target` into RX (to us)
- * or BUSY (to someone else, including a plain repeated CQ) rows. TX rows
- * are never derived from the decoded list (own-TX loopback, if any ever
- * reached it, must never become a row here) -- they come solely from the
- * synthesized log the caller maintains via `decideTxLog`.
+ * Classify every decoded message on the RX frequency since `sinceMs` into
+ * RX (to us) or BUSY (to anyone else) rows -- not scoped to `target` at
+ * all. TX rows are never derived from the decoded list (own-TX loopback,
+ * if any ever reached it, must never become a row here) -- they come
+ * solely from the synthesized log the caller maintains via `decideTxLog`.
  *
- * Deliberately NOT matching Android's `buildQsoLog` here: Android's #254
- * excludes a repeated CQ/DE/QRZ from the target entirely (reasoning: "he's
- * available, not busy, we already know he's there"), but live operator
- * feedback was explicit the other way for desktop -- "I am not pleased
- * with what is not shown in the panel when I am answering a cq. I should
- * see all activity on the rx frequency... but see nothing but my calling
- * him in the message panel" while watching the target repeat his CQ on
- * the waterfall with nothing reflected in the docked panel. A repeated CQ
- * is real, useful information here (he hasn't heard us, as opposed to
- * gone silent or working someone else) -- shown as "busy" the same as any
- * other not-addressed-to-us message from him.
+ * Deliberately NOT matching Android's `buildQsoLog` here, in two stages of
+ * live operator feedback. First: Android's #254 excludes a repeated CQ/DE/
+ * QRZ from the target entirely ("he's available, not busy, we already know
+ * he's there"), but desktop's operator wanted the opposite -- "I should see
+ * all activity on the rx frequency... but see nothing but my calling him in
+ * the message panel" while watching the target repeat his CQ on the
+ * waterfall with nothing reflected in the docked panel. Second, and wider:
+ * once repeated CQs from the target were shown, the operator wanted every
+ * OTHER station on the frequency too, not just the target's own traffic --
+ * explicit, concrete reasoning: "(1) [the target] could have been answered
+ * by someone else. Right now I don't know that and just keep calling him
+ * or (2) some other station is transmitting on top of him and I don't know
+ * that either." Both require seeing the whole frequency's activity, not a
+ * target-scoped slice of it -- so this no longer filters by `call_from`
+ * at all. The message text itself already carries whichever callsigns are
+ * actually involved (e.g. "VE3ARF W1XYZ FN42"), so the operator can still
+ * tell at a glance what's happening with their own target versus everyone
+ * else, without a separate UI category for it.
  *
  * `sinceMs` excludes anything older than the current run -- real bug,
  * found live: `messages` is the app's whole rolling decode history, so
  * without this floor, answering a station immediately flooded the panel
- * with that station's *older* activity (a QSO he'd worked minutes earlier,
- * before this run even started), not just what happens from here on.
- * Callers pass the moment the run started (or the seed CQ's own
- * timestamp -- see `seedCqEntry`), not a fixed window.
+ * with older activity (a QSO worked minutes earlier, before this run even
+ * started), not just what happens from here on. Callers pass the moment
+ * the run started (or the seed CQ's own timestamp -- see `seedCqEntry`),
+ * not a fixed window. `target` is kept only to gate the whole function on
+ * there being an active excursion at all (matching the caller's own
+ * `if (!logTarget) return;` guard) -- not for filtering rows.
  */
 export function buildQsoLog(messages: UiMessage[], target: string, sinceMs: number): QsoLogEntry[] {
   if (!target) return [];
-  const upperTarget = target.toUpperCase();
   const entries: QsoLogEntry[] = [];
   for (const m of messages) {
-    if (m.call_from.toUpperCase() !== upperTarget) continue;
     if (m.utc_ms < sinceMs) continue;
     entries.push({
       direction: m.to_me ? "rx" : "busy",

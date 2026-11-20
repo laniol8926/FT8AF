@@ -49,14 +49,17 @@ describe("buildQsoLog", () => {
     expect(result[0].direction).toBe("busy");
   });
 
-  it("ignores unrelated traffic", () => {
+  it("includes activity from stations other than the target, as busy", () => {
+    // Deliberately NOT scoped to the target at all -- live operator
+    // feedback, explicit and concrete: "(1) [the target] could have been
+    // answered by someone else. Right now I don't know that and just keep
+    // calling him or (2) some other station is transmitting on top of him
+    // and I don't know that either." Both require seeing the whole
+    // frequency's activity, not just the target's own traffic. See
+    // buildQsoLog's own doc comment.
     const result = buildQsoLog([msg({ call_from: "JA1XYZ", to_me: false })], "RA3XYZ", 0);
-    expect(result).toEqual([]);
-  });
-
-  it("target match is case insensitive", () => {
-    const result = buildQsoLog([msg({ call_from: "ra3xyz" })], "RA3XYZ", 0);
     expect(result).toHaveLength(1);
+    expect(result[0].direction).toBe("busy");
   });
 
   it("includes a repeated CQ/DE/QRZ call from the target, as busy", () => {
@@ -69,6 +72,11 @@ describe("buildQsoLog", () => {
     const result = buildQsoLog([msg({ is_cq: true, to_me: false })], "RA3XYZ", 0);
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("busy");
+  });
+
+  it("returns nothing at all while there's no active excursion (no target)", () => {
+    const result = buildQsoLog([msg({ call_from: "JA1XYZ", to_me: false })], "", 0);
+    expect(result).toEqual([]);
   });
 
   it("sorts entries ascending by time within one call (caller merges across sources)", () => {

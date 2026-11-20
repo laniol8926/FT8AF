@@ -383,10 +383,12 @@ export default function App() {
       // station's OLDER activity (minutes-old chatter from before this run
       // even started) instead of the one message that actually matters --
       // his CQ, the reason the panel now reads "Waiting for <call>" -- which
-      // buildQsoLog deliberately never shows on its own (#254: a bare CQ
-      // isn't "busy"). Seed the log with exactly that one CQ when there is
-      // one (a manual Answer click), and set the floor fresh decodes are
-      // judged against from here on, so older history never floods back in.
+      // buildQsoLog's own sinceMs floor would otherwise exclude (it
+      // necessarily predates this run, which only started because this CQ
+      // was seen and clicked). Seed the log with exactly that one CQ when
+      // there is one (a manual Answer click), and set the floor fresh
+      // decodes are judged against from here on, so older history never
+      // floods back in.
       const seeded = seedCqEntry(seedCqRef.current, logTarget ?? "");
       setRxLog(seeded ? [seeded] : []);
       rxLogSinceMsRef.current = Date.now();
@@ -398,10 +400,11 @@ export default function App() {
     wasActiveRef.current = txActive;
   }, [txActive, logTarget]);
 
-  // Fold this snapshot's decodes from the live target into the durable RX/
-  // BUSY log. Reads the raw (unfiltered) `messages`, not the decode list's
-  // currently-visible subset -- an unrelated filter chip (e.g. Show Only
-  // CQ) must never hide the other station's half of our own QSO.
+  // Fold this snapshot's decodes into the durable RX/BUSY log -- every
+  // station on the frequency, not just the target (see buildQsoLog's own
+  // doc comment). Reads the raw (unfiltered) `messages`, not the decode
+  // list's currently-visible subset -- an unrelated filter chip (e.g. Show
+  // Only CQ) must never hide activity the panel should still show.
   useEffect(() => {
     if (!logTarget) return;
     const incoming = buildQsoLog(messages, logTarget, rxLogSinceMsRef.current);
