@@ -130,6 +130,23 @@ pub struct QsoEngine {
     /// "runs until stopped," which is also exactly what an unattended/
     /// "robot" CQ operation needs.
     pub cq_no_reply_limit: u32,
+    /// Settings -> Transmission's "CQ Answer Attempts" -- how many times to
+    /// retry answering a CQ (`TxStage::Grid` retries specifically, i.e. he
+    /// has never yet replied even once) before giving up, separate from
+    /// `no_reply_limit`'s broader "retransmit mid-QSO" count. Real UX
+    /// requirement, stated live: "while I'm in a QSO I'd want the TX
+    /// Watchdog setting to control how many times I will retransmit a
+    /// message. But if I'm replying to a station calling CQ how many times
+    /// will I try to answer his CQ before giving up? No more than the TX
+    /// Watchdog setting... want to avoid [a case like] the TX Watchdog
+    /// being set to unlimited so I keep calling him forever." `0` =
+    /// unconfigured -- defers entirely to `no_reply_limit` (today's exact
+    /// behavior, no change for anyone who hasn't touched this). A non-zero
+    /// value is the real cap on the Grid-stage retry count specifically,
+    /// but is never allowed to exceed `no_reply_limit` when THAT'S finite
+    /// (a CQ-answer cap higher than the general mid-QSO cap wouldn't make
+    /// sense) -- see `effective_cq_answer_limit`.
+    pub cq_answer_limit: u32,
 
     stage: TxStage,
     target: Option<String>,
@@ -239,6 +256,7 @@ impl QsoEngine {
             no_reply_limit: 0,
             max_73_sends: 0,
             cq_no_reply_limit: 0,
+            cq_answer_limit: 0,
             stage: TxStage::Idle,
             target: None,
             grid_rcvd: None,
@@ -508,6 +526,17 @@ impl QsoEngine {
         let msg = match mine {
             Some(m) => m.clone(),
             None => {
+                // He's actively exchanging with someone else -- a real
+                // signal he's moved on, not just silence. Give up right
+                // away rather than waiting out the full TX Watchdog cycle
+                // count -- see `target_working_someone_else`'s own doc
+                // comment.
+                if let Some(target) = self.target.clone() {
+                    if target_working_someone_else(messages, &target, &self.my_call) {
+                        self.give_up_target();
+                        return Some(QsoOutcome::GaveUpTarget);
+                    }
+                }
                 // No reply at all this slot -- same as a non-advancing
                 // reply, see `advanced` below.
                 return if self.on_no_progress() {
@@ -637,7 +666,21 @@ impl QsoEngine {
     /// engine state (see that variant's doc comment).
     fn on_no_progress(&mut self) -> bool {
         match self.stage {
-            TxStage::Grid | TxStage::Report | TxStage::RReport => {
+            // Still trying to get a CQ-caller to answer us even once --
+            // governed by the narrower cq_answer_limit (capped by, but
+            // separate from, no_reply_limit). See `effective_cq_answer_
+            // limit`'s own doc comment for the exact composition rule.
+            TxStage::Grid => {
+                self.no_reply_count = self.no_reply_count.saturating_add(1);
+                let limit = effective_cq_answer_limit(self.cq_answer_limit, self.no_reply_limit);
+                if should_give_up_target(limit, self.no_reply_count) {
+                    self.give_up_target();
+                    return true;
+                }
+            }
+            // A confirmed, ongoing QSO (he has replied at least once) --
+            // governed by the broader no_reply_limit ("TX Watchdog").
+            TxStage::Report | TxStage::RReport => {
                 self.no_reply_count = self.no_reply_count.saturating_add(1);
                 if should_give_up_target(self.no_reply_limit, self.no_reply_count) {
                     self.give_up_target();
@@ -848,6 +891,29 @@ pub fn should_give_up_target(no_reply_limit: u32, no_reply_count: u32) -> bool {
     no_reply_limit > 0 && no_reply_count >= no_reply_limit
 }
 
+/// The real cap on `TxStage::Grid` retries (answering a CQ that's never
+/// replied even once), combining `cq_answer_limit` and `no_reply_limit`
+/// per the operator's own stated rule -- see `QsoEngine::cq_answer_limit`'s
+/// doc comment for the live requirement this implements:
+/// - `cq_answer_limit == 0` (unconfigured): defers entirely to
+///   `no_reply_limit` -- today's exact behavior, unchanged.
+/// - `no_reply_limit == 0` (TX Watchdog unlimited) with a real
+///   `cq_answer_limit`: the CQ-answer cap is the only real limit here --
+///   this is the actual safety net the operator asked for ("avoid [a case
+///   like] the TX Watchdog being set to unlimited so I keep calling him
+///   forever").
+/// - Both finite: never allowed to exceed `no_reply_limit` (a CQ-answer
+///   cap higher than the general mid-QSO cap wouldn't make sense).
+pub fn effective_cq_answer_limit(cq_answer_limit: u32, no_reply_limit: u32) -> u32 {
+    if cq_answer_limit == 0 {
+        return no_reply_limit;
+    }
+    if no_reply_limit == 0 {
+        return cq_answer_limit;
+    }
+    cq_answer_limit.min(no_reply_limit)
+}
+
 /// CQ Watchdog cap -- see `QsoEngine::cq_no_reply_limit`'s doc comment for
 /// why this is a separate setting/counter from `should_give_up_target`'s.
 /// `0` = unlimited, same convention, so an unattended/"robot" CQ operation
@@ -867,6 +933,29 @@ pub fn has_reached_max_73_sends(max_73_sends: u32, final_ack_sends: u32) -> bool
 /// Auto (`0`): never hold the run frequency on a target that stopped
 /// replying forever. Matches Android's own `RR73_GIVEUP_CYCLES` constant.
 pub const RR73_GIVEUP_CYCLES_FAILSAFE: u32 = 3;
+
+/// Whether this slot's decodes show `target` actively exchanging with a
+/// DIFFERENT station -- a real signal, not just silence, that he's moved
+/// on and further calls are futile. Real UX requirement, stated live:
+/// "I'm answering station xyz's CQ but he answers someone else not my
+/// station. Stop calling him because he's in QSO with someone else...
+/// if his next transmission is not 'CQ his_call his_grid' or 'my_call
+/// his_call my_signal_report' I stop trying to call him." Detected
+/// directly from message content, not a reply-count/timeout -- any
+/// message FROM the target that is neither a CQ (he just hasn't heard
+/// anyone yet) nor addressed to us (continuing our own exchange) means
+/// he's talking to someone else specifically. A single such decode is
+/// enough to trigger this (matching the operator's own stated rule
+/// exactly) -- a busted/misheard callsign could in principle cause a
+/// false positive, same risk any single FT8 decode carries elsewhere in
+/// this engine.
+pub fn target_working_someone_else(messages: &[DecodedMessage], target: &str, my_call: &str) -> bool {
+    messages.iter().any(|m| {
+        m.call_from.eq_ignore_ascii_case(target)
+            && !crate::callsign::is_cq_callsign(&m.call_to)
+            && !crate::callsign::is_my_callsign(&m.call_to, my_call)
+    })
+}
 
 /// FT8 reports are clamped to roughly [-30, +30].
 fn clamp_report(snr: i32) -> i32 {
@@ -1274,6 +1363,66 @@ mod tests {
     }
 
     #[test]
+    fn effective_cq_answer_limit_pure_cases() {
+        // Unconfigured (0) -- defers entirely to no_reply_limit, today's
+        // exact behavior for anyone who hasn't touched this setting.
+        assert_eq!(effective_cq_answer_limit(0, 0), 0);
+        assert_eq!(effective_cq_answer_limit(0, 5), 5);
+
+        // TX Watchdog unlimited (0) -- the CQ-answer cap is the only real
+        // limit here. This is the actual safety net the operator asked
+        // for: "avoid [a case like] the TX Watchdog being set to unlimited
+        // so I keep calling him forever."
+        assert_eq!(effective_cq_answer_limit(1, 0), 1);
+        assert_eq!(effective_cq_answer_limit(10, 0), 10);
+
+        // Both finite -- never exceeds TX Watchdog's own value.
+        assert_eq!(effective_cq_answer_limit(1, 5), 1); // "Personally I'd set it to one"
+        assert_eq!(effective_cq_answer_limit(5, 1), 1); // clamped down, not up
+        assert_eq!(effective_cq_answer_limit(3, 3), 3); // equal is fine
+    }
+
+    #[test]
+    fn target_working_someone_else_pure_cases() {
+        // Real UX requirement, stated live: detect he's moved on to a
+        // different station directly from message content, not a
+        // reply-count/timeout.
+        let my_call = "K0XYZ";
+        let target = "K1ABC";
+
+        // His report to a DIFFERENT station -- he's working someone else.
+        assert!(target_working_someone_else(
+            &[msg("W1AW", "K1ABC", "-05", "", -5)],
+            target,
+            my_call,
+        ));
+
+        // His own repeated CQ -- he hasn't heard anyone yet, not "someone else".
+        assert!(!target_working_someone_else(
+            &[msg("CQ", "K1ABC", "FN42", "FN42", -5)],
+            target,
+            my_call,
+        ));
+
+        // A message addressed to US -- continuing our own exchange.
+        assert!(!target_working_someone_else(
+            &[msg("K0XYZ", "K1ABC", "-05", "", -5)],
+            target,
+            my_call,
+        ));
+
+        // Traffic from someone other than the target entirely -- irrelevant.
+        assert!(!target_working_someone_else(
+            &[msg("W1AW", "N2JFD", "-05", "", -5)],
+            target,
+            my_call,
+        ));
+
+        // Empty slot -- nothing to detect.
+        assert!(!target_working_someone_else(&[], target, my_call));
+    }
+
+    #[test]
     fn has_reached_max_73_sends_pure_cases() {
         assert!(!has_reached_max_73_sends(0, 1000)); // Auto/off never caps here
         assert!(!has_reached_max_73_sends(3, 2));
@@ -1371,6 +1520,112 @@ mod tests {
         assert!(matches!(e.process_rx(&[]), Some(QsoOutcome::GaveUpTarget)));
         assert_eq!(e.status().stage, TxStage::Cq);
         assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
+    }
+
+    #[test]
+    fn cq_answer_limit_gives_up_faster_than_tx_watchdog_while_still_answering_his_cq() {
+        // Real UX requirement, stated live: "Personally I'd set it to
+        // 'one'" -- a CQ that's never replied even once should give up
+        // after just ONE silent retry, well before the broader TX
+        // Watchdog's own (higher) limit would fire.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 5; // the broader mid-QSO cap stays generous
+        e.cq_answer_limit = 1; // but answering a never-replying CQ gives up fast
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        // The very first silent slot already hits the (narrower) cap.
+        assert!(matches!(e.process_rx(&[]), Some(QsoOutcome::GaveUpTarget)));
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn cq_answer_limit_never_exceeds_tx_watchdog_even_if_configured_higher() {
+        // "the value of x has to be less than or equal to the value of TX
+        // Watchdog" -- a CQ-answer cap configured ABOVE TX Watchdog is
+        // clamped down to it, not honored as typed.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 2;
+        e.cq_answer_limit = 10; // configured far higher than TX Watchdog
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        assert!(e.process_rx(&[]).is_none());
+        assert_eq!(e.status().stage, TxStage::Grid, "1st silent slot -- not given up yet");
+        // Gives up at TX Watchdog's own limit (2), not the configured 10.
+        assert!(matches!(e.process_rx(&[]), Some(QsoOutcome::GaveUpTarget)));
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn cq_answer_limit_provides_a_real_cap_even_when_tx_watchdog_is_unlimited() {
+        // The actual safety net the operator asked for: "want to avoid
+        // [a case like] the TX Watchdog being set to unlimited so I keep
+        // calling him forever."
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 0; // TX Watchdog unlimited
+        e.cq_answer_limit = 1;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        assert!(matches!(e.process_rx(&[]), Some(QsoOutcome::GaveUpTarget)));
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn cq_answer_limit_only_governs_grid_stage_not_a_confirmed_qso() {
+        // Once he's replied at least once (we're past Grid), the broader
+        // no_reply_limit ("TX Watchdog") governs -- not cq_answer_limit.
+        // The operator's own framing: "while I'm in a QSO I'd want the TX
+        // Watchdog setting to control how many times I will retransmit a
+        // message."
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 3;
+        e.cq_answer_limit = 1; // would give up immediately if this applied here
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        // He replies with a report -> advances past Grid into RReport (we
+        // now send OUR report back, waiting for his RR73/RRR).
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]);
+        assert_eq!(e.status().stage, TxStage::RReport);
+
+        // Two silent slots now -- still under no_reply_limit=3, and NOT
+        // cut short by cq_answer_limit=1 (which no longer applies here).
+        assert!(e.process_rx(&[]).is_none());
+        assert_eq!(e.status().stage, TxStage::RReport);
+        assert!(e.process_rx(&[]).is_none());
+        assert_eq!(e.status().stage, TxStage::RReport, "cq_answer_limit must not apply mid-QSO");
+    }
+
+    #[test]
+    fn gives_up_immediately_when_the_target_works_someone_else() {
+        // Real UX requirement, stated live: "I'm answering station xyz's
+        // CQ but he answers someone else not my station. Stop calling him
+        // because he's in QSO with someone else." No reply limit needed --
+        // this must fire on the very first decode showing it, not wait out
+        // a multi-cycle watchdog.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 0; // unlimited -- proves this isn't the watchdog firing
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        // He's sending a report to a different station entirely.
+        let outcome = e.process_rx(&[msg("W1AW", "K1ABC", "-05", "", -5)]);
+        assert!(matches!(outcome, Some(QsoOutcome::GaveUpTarget)));
+        assert_eq!(e.status().stage, TxStage::Cq);
+        assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
+    }
+
+    #[test]
+    fn a_repeated_cq_from_the_target_does_not_trigger_the_working_someone_else_give_up() {
+        // The dormant/no-progress path, not this one -- he hasn't heard
+        // anyone yet, which is a real difference from working someone else.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 0;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        assert!(e.process_rx(&[msg("CQ", "K1ABC", "FN42", "FN42", -5)]).is_none());
+        assert_eq!(e.status().stage, TxStage::Grid, "still waiting, not given up");
     }
 
     #[test]

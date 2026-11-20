@@ -563,6 +563,10 @@ pub enum EngineCommand {
     /// equivalent (see `QsoEngine::cq_no_reply_limit`'s doc comment). 0 =
     /// unlimited, the deliberate default (unattended/"robot" CQ operation).
     SetCqWatchdog(u32),
+    /// Settings -> Transmission's "CQ Answer Attempts" -- genuinely new, no
+    /// Android equivalent (see `QsoEngine::cq_answer_limit`'s doc comment).
+    /// 0 = unconfigured, defers to "TX Watchdog".
+    SetCqAnswerLimit(u32),
     /// Settings -> Auto-Sequence's "Auto-CQ after QSO" -- see `Engine::new`'s
     /// doc comment on why desktop's *default* differs from Android's own.
     SetAutoCqAfterQso(bool),
@@ -1195,6 +1199,7 @@ impl Engine {
         qso.no_reply_limit = db.get_config("noReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
         qso.max_73_sends = db.get_config("max73Sends").and_then(|s| s.parse().ok()).unwrap_or(0);
         qso.cq_no_reply_limit = db.get_config("cqNoReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        qso.cq_answer_limit = db.get_config("cqAnswerLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
         // Settings -> Auto-Sequence's "Auto-CQ after QSO" (Android's
         // `autoCQAfterQSO`, default **false**). Desktop's own default here
         // is deliberately kept at **true** when the key is unset -- this
@@ -2837,6 +2842,10 @@ impl Engine {
             EngineCommand::SetCqWatchdog(limit) => {
                 self.qso.cq_no_reply_limit = limit;
                 let _ = self.db.set_config("cqNoReplyLimit", &limit.to_string());
+            }
+            EngineCommand::SetCqAnswerLimit(limit) => {
+                self.qso.cq_answer_limit = limit;
+                let _ = self.db.set_config("cqAnswerLimit", &limit.to_string());
             }
             EngineCommand::SetAutoCqAfterQso(enabled) => {
                 self.qso.auto_return_to_cq = enabled;

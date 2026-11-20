@@ -238,6 +238,15 @@ fn set_cq_watchdog(state: State<AppState>, limit: u32) {
     state.engine.send(EngineCommand::SetCqWatchdog(limit));
 }
 
+/// Settings -> Transmission's "CQ Answer Attempts" -- how many times to
+/// retry answering a CQ before giving up, capped by (but separate from)
+/// "TX Watchdog"; 0 = unconfigured, defers to it. No Android equivalent --
+/// see `QsoEngine::cq_answer_limit`.
+#[tauri::command]
+fn set_cq_answer_limit(state: State<AppState>, limit: u32) {
+    state.engine.send(EngineCommand::SetCqAnswerLimit(limit));
+}
+
 /// Settings -> Auto-Sequence's "Auto-CQ after QSO".
 #[tauri::command]
 fn set_auto_cq_after_qso(state: State<AppState>, enabled: bool) {
@@ -1218,6 +1227,7 @@ fn main() {
             set_tx_watchdog,
             set_max_73_sends,
             set_cq_watchdog,
+            set_cq_answer_limit,
             set_auto_cq_after_qso,
             set_clear_on_band_mode_change,
             set_rx_latency_ms,

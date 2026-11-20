@@ -14,7 +14,7 @@ const HUNT_PRIORITY_LABEL: Record<HuntPriority, string> = {
 };
 
 type OpenDialog =
-  | null | "stopAfter" | "cqWatchdog" | "max73" | "swrThreshold" | "alcLow" | "alcHigh"
+  | null | "stopAfter" | "cqAnswerLimit" | "cqWatchdog" | "max73" | "swrThreshold" | "alcLow" | "alcHigh"
   | "tuneMethod" | "tuneMaxOn" | "tuneLevel" | "huntPriority" | "huntMinSnr";
 
 const TUNE_METHOD_OPTIONS: { value: number; label: string }[] = [
@@ -128,6 +128,7 @@ export function TransmissionSettings({
 
   const [clearOnChange, setClearOnChange] = useState(true);
   const [stopAfter, setStopAfter] = useState(0);
+  const [cqAnswerLimit, setCqAnswerLimit] = useState(0);
   const [cqWatchdog, setCqWatchdog] = useState(0);
   const [max73, setMax73] = useState(0);
   const [swrHaltEnabled, setSwrHaltEnabled] = useState(false);
@@ -144,6 +145,7 @@ export function TransmissionSettings({
   useEffect(() => {
     api.getConfig("clearOnBandModeChange").then((v) => setClearOnChange(v !== "0"));
     api.getConfig("noReplyLimit").then((v) => setStopAfter(v ? parseInt(v, 10) || 0 : 0));
+    api.getConfig("cqAnswerLimit").then((v) => setCqAnswerLimit(v ? parseInt(v, 10) || 0 : 0));
     api.getConfig("cqNoReplyLimit").then((v) => setCqWatchdog(v ? parseInt(v, 10) || 0 : 0));
     api.getConfig("max73Sends").then((v) => setMax73(v ? parseInt(v, 10) || 0 : 0));
     api.getConfig("swrHaltEnabled").then((v) => setSwrHaltEnabled(v === "1"));
@@ -194,6 +196,12 @@ export function TransmissionSettings({
             description="Stop calling after N unanswered attempts"
             value={stopAfter === 0 ? "Off" : `${stopAfter} tries`}
             onClick={() => setOpenDialog("stopAfter")}
+          />
+          <SettingsRow
+            label="CQ Answer Attempts"
+            description="Stop trying to answer a station's CQ after N unanswered attempts -- separate from (and never more than) TX Watchdog, which governs retries once a QSO is actually under way. 0 = defers to TX Watchdog."
+            value={cqAnswerLimit === 0 ? "Same as TX Watchdog" : `${cqAnswerLimit} tries`}
+            onClick={() => setOpenDialog("cqAnswerLimit")}
           />
           <SettingsRow
             label="CQ Watchdog"
@@ -367,6 +375,21 @@ export function TransmissionSettings({
           onSave={(v) => {
             setStopAfter(v);
             api.setTxWatchdog(v);
+            setOpenDialog(null);
+          }}
+          onCancel={() => setOpenDialog(null)}
+        />
+      )}
+      {openDialog === "cqAnswerLimit" && (
+        <NumberInputDialog
+          title="CQ Answer Attempts"
+          description="Stop trying to answer a station's CQ (before he's ever replied) after this many unanswered attempts. Capped at TX Watchdog's own value when that's set -- a CQ-answer limit higher than TX Watchdog is clamped down, not honored as typed. 0 = defers entirely to TX Watchdog."
+          value={cqAnswerLimit}
+          min={0}
+          max={30}
+          onSave={(v) => {
+            setCqAnswerLimit(v);
+            api.setCqAnswerLimit(v);
             setOpenDialog(null);
           }}
           onCancel={() => setOpenDialog(null)}
