@@ -33,33 +33,68 @@ function msg(overrides: Partial<UiMessage> = {}): UiMessage {
 
 describe("buildQsoLog", () => {
   it("returns empty for an empty target", () => {
-    expect(buildQsoLog([msg()], "", 0)).toEqual([]);
+    expect(buildQsoLog([msg()], "", 0, null)).toEqual([]);
   });
 
   it("classifies a message from the target to us as rx", () => {
-    const result = buildQsoLog([msg({ to_me: true, snr: -7 })], "RA3XYZ", 0);
+    const result = buildQsoLog([msg({ to_me: true, snr: -7 })], "RA3XYZ", 0, null);
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("rx");
     expect(result[0].snr).toBe(-7);
   });
 
   it("classifies a message from the target to someone else as busy", () => {
-    const result = buildQsoLog([msg({ to_me: false })], "RA3XYZ", 0);
+    const result = buildQsoLog([msg({ to_me: false })], "RA3XYZ", 0, null);
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("busy");
   });
 
-  it("includes activity from stations other than the target, as busy", () => {
-    // Deliberately NOT scoped to the target at all -- live operator
-    // feedback, explicit and concrete: "(1) [the target] could have been
-    // answered by someone else. Right now I don't know that and just keep
-    // calling him or (2) some other station is transmitting on top of him
-    // and I don't know that either." Both require seeing the whole
-    // frequency's activity, not just the target's own traffic. See
-    // buildQsoLog's own doc comment.
-    const result = buildQsoLog([msg({ call_from: "JA1XYZ", to_me: false })], "RA3XYZ", 0);
+  it("includes the target's own traffic regardless of frequency drift", () => {
+    // Always included by callsign match, even well outside the frequency
+    // tolerance -- he can drift a little between transmissions and it's
+    // still unambiguously him.
+    const result = buildQsoLog([msg({ to_me: false, freq_hz: 2500 })], "RA3XYZ", 0, 500);
+    expect(result).toHaveLength(1);
+  });
+
+  it("includes another station's activity on the target's own frequency (a collision), as busy", () => {
+    // Live operator feedback, explicit and concrete: "(1) [the target]
+    // could have been answered by someone else. Right now I don't know
+    // that and just keep calling him or (2) some other station is
+    // transmitting on top of him and I don't know that either." A
+    // collision is a frequency match by definition. See buildQsoLog's own
+    // doc comment for the three rounds of feedback that landed here.
+    const result = buildQsoLog(
+      [msg({ call_from: "JA1XYZ", to_me: false, freq_hz: 1520 })],
+      "RA3XYZ",
+      0,
+      1500, // target's own last-heard frequency
+    );
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("busy");
+  });
+
+  it("excludes another station's activity well outside the target's own frequency", () => {
+    // Live feedback after testing the broader "every station on the
+    // band" version: "it is showing me all activity. Should only show the
+    // activity on the frequency the station that is calling CQ [is on]."
+    const result = buildQsoLog(
+      [msg({ call_from: "JA1XYZ", to_me: false, freq_hz: 2200 })],
+      "RA3XYZ",
+      0,
+      1500,
+    );
+    expect(result).toEqual([]);
+  });
+
+  it("excludes other-station activity when the target's own frequency isn't known yet", () => {
+    const result = buildQsoLog(
+      [msg({ call_from: "JA1XYZ", to_me: false, freq_hz: 1500 })],
+      "RA3XYZ",
+      0,
+      null,
+    );
+    expect(result).toEqual([]);
   });
 
   it("includes a repeated CQ/DE/QRZ call from the target, as busy", () => {
@@ -69,13 +104,13 @@ describe("buildQsoLog", () => {
     // message panel" while watching the target repeat his CQ on the
     // waterfall with nothing shown in the docked panel. See buildQsoLog's
     // own doc comment.
-    const result = buildQsoLog([msg({ is_cq: true, to_me: false })], "RA3XYZ", 0);
+    const result = buildQsoLog([msg({ is_cq: true, to_me: false })], "RA3XYZ", 0, null);
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("busy");
   });
 
   it("returns nothing at all while there's no active excursion (no target)", () => {
-    const result = buildQsoLog([msg({ call_from: "JA1XYZ", to_me: false })], "", 0);
+    const result = buildQsoLog([msg({ call_from: "JA1XYZ", to_me: false })], "", 0, null);
     expect(result).toEqual([]);
   });
 
@@ -84,6 +119,7 @@ describe("buildQsoLog", () => {
       [msg({ utc_ms: 2_000 }), msg({ utc_ms: 1_000 })],
       "RA3XYZ",
       0,
+      null,
     );
     expect(result.map((e) => e.utcMs)).toEqual([2_000, 1_000]); // preserves input order; merge sorts
   });
@@ -97,6 +133,7 @@ describe("buildQsoLog", () => {
       [msg({ utc_ms: 500, to_me: false }), msg({ utc_ms: 1_500, to_me: false })],
       "RA3XYZ",
       1_000,
+      null,
     );
     expect(result).toHaveLength(1);
     expect(result[0].utcMs).toBe(1_500);
@@ -107,7 +144,7 @@ describe("buildQsoLog", () => {
     // he doesn't answer but works someone else instead, we should keep
     // seeing that -- we're still trying to reach him until he answers, we
     // cancel, or he comes back to us.
-    const result = buildQsoLog([msg({ utc_ms: 5_000, to_me: false })], "RA3XYZ", 1_000);
+    const result = buildQsoLog([msg({ utc_ms: 5_000, to_me: false })], "RA3XYZ", 1_000, null);
     expect(result).toHaveLength(1);
     expect(result[0].direction).toBe("busy");
   });

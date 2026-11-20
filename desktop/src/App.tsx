@@ -400,28 +400,34 @@ export default function App() {
     wasActiveRef.current = txActive;
   }, [txActive, logTarget]);
 
-  // Fold this snapshot's decodes into the durable RX/BUSY log -- every
-  // station on the frequency, not just the target (see buildQsoLog's own
-  // doc comment). Reads the raw (unfiltered) `messages`, not the decode
-  // list's currently-visible subset -- an unrelated filter chip (e.g. Show
-  // Only CQ) must never hide activity the panel should still show.
-  useEffect(() => {
-    if (!logTarget) return;
-    const incoming = buildQsoLog(messages, logTarget, rxLogSinceMsRef.current);
-    setRxLog((existing) => mergeRxLog(existing, incoming));
-  }, [messages, logTarget]);
-
   // The QSO partner's own frequency -- a white line on the waterfall
   // alongside the red TX marker, matching the fork's real Android feature
   // ("White line on the QSO partner's frequency on every waterfall, beside
   // the red TX markers"). `messages` is prepended newest-first, so the
-  // first match is their most recently heard frequency.
+  // first match is their most recently heard frequency. Computed here
+  // (not just below) because buildQsoLog's own frequency scoping needs it
+  // too -- see that effect's comment.
   const targetFreqHz = useMemo(() => {
     if (!logTarget) return null;
     const upper = logTarget.toUpperCase();
     const msg = messages.find((m) => m.call_from.toUpperCase() === upper);
     return msg?.freq_hz ?? null;
   }, [messages, logTarget]);
+
+  // Fold this snapshot's decodes into the durable RX/BUSY log -- the
+  // target's own traffic, plus anyone else on/near his frequency (a
+  // collision, or someone he's actually working) -- not every station on
+  // the whole band. Live feedback after testing the broader "every
+  // station" version: "it is showing me all activity. Should only show
+  // the activity on the frequency the station that is calling CQ [is
+  // on]." Reads the raw (unfiltered) `messages`, not the decode list's
+  // currently-visible subset -- an unrelated filter chip (e.g. Show Only
+  // CQ) must never hide activity the panel should still show.
+  useEffect(() => {
+    if (!logTarget) return;
+    const incoming = buildQsoLog(messages, logTarget, rxLogSinceMsRef.current, targetFreqHz);
+    setRxLog((existing) => mergeRxLog(existing, incoming));
+  }, [messages, logTarget, targetFreqHz]);
 
   // Synthesize one TX row per transmission, keyed off the rising edge of
   // `transmitting` -- see decideTxLog's own doc comment for why (one row
