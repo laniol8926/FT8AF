@@ -48,14 +48,22 @@ export function qsoLogKey(entry: QsoLogEntry): string {
 
 /**
  * Classify this snapshot's decoded messages from `target` into RX (to us)
- * or BUSY (to someone else) rows. A CQ/DE/QRZ call from the target means
- * they're available, not busy (Android's #254) -- excluded entirely, not
- * classified either way. TX rows are never derived from the decoded list
- * (own-TX loopback, if any ever reached it, must never become a row here)
- * -- they come solely from the synthesized log the caller maintains via
- * `decideTxLog`. Matches Android's `buildQsoLog` exactly, simplified by
- * desktop already carrying `to_me`/`is_cq` per-message (no need to
- * re-derive `checkIsMyCallsign`/`checkIsCQ` here).
+ * or BUSY (to someone else, including a plain repeated CQ) rows. TX rows
+ * are never derived from the decoded list (own-TX loopback, if any ever
+ * reached it, must never become a row here) -- they come solely from the
+ * synthesized log the caller maintains via `decideTxLog`.
+ *
+ * Deliberately NOT matching Android's `buildQsoLog` here: Android's #254
+ * excludes a repeated CQ/DE/QRZ from the target entirely (reasoning: "he's
+ * available, not busy, we already know he's there"), but live operator
+ * feedback was explicit the other way for desktop -- "I am not pleased
+ * with what is not shown in the panel when I am answering a cq. I should
+ * see all activity on the rx frequency... but see nothing but my calling
+ * him in the message panel" while watching the target repeat his CQ on
+ * the waterfall with nothing reflected in the docked panel. A repeated CQ
+ * is real, useful information here (he hasn't heard us, as opposed to
+ * gone silent or working someone else) -- shown as "busy" the same as any
+ * other not-addressed-to-us message from him.
  *
  * `sinceMs` excludes anything older than the current run -- real bug,
  * found live: `messages` is the app's whole rolling decode history, so
@@ -71,7 +79,6 @@ export function buildQsoLog(messages: UiMessage[], target: string, sinceMs: numb
   const entries: QsoLogEntry[] = [];
   for (const m of messages) {
     if (m.call_from.toUpperCase() !== upperTarget) continue;
-    if (m.is_cq) continue;
     if (m.utc_ms < sinceMs) continue;
     entries.push({
       direction: m.to_me ? "rx" : "busy",
@@ -84,15 +91,17 @@ export function buildQsoLog(messages: UiMessage[], target: string, sinceMs: numb
 }
 
 /**
- * The one deliberate exception to `buildQsoLog`'s "no CQs" rule: the exact
- * CQ the operator clicked to answer him in the first place. Without it, the
+ * The exact CQ the operator clicked to answer him in the first place --
+ * needed separately from `buildQsoLog` because it necessarily predates
+ * `sinceMs` (the run only started *because* this CQ was seen and clicked),
+ * so `buildQsoLog`'s own floor would otherwise exclude it. Without it, the
  * single most relevant line -- *why* the panel is now "Waiting for
  * <target>" -- never appeared, even though it's what the panel header text
- * promises the operator is responding to. Only ever shown once, as the
- * log's opening entry -- a later bare CQ from him while we're still waiting
- * stays excluded, per the existing rule (he's not "busy," and we already
- * know he's there). `null` if `seedCq` is absent or is from someone other
- * than `target` (stale from a previous run the caller forgot to clear).
+ * promises the operator is responding to. Every later repeat of his CQ is
+ * picked up by `buildQsoLog` itself (see its own doc comment) -- this only
+ * covers the one that came before the log's own starting point. `null` if
+ * `seedCq` is absent or is from someone other than `target` (stale from a
+ * previous run the caller forgot to clear).
  */
 export function seedCqEntry(seedCq: UiMessage | null, target: string): QsoLogEntry | null {
   if (!seedCq || seedCq.call_from.toUpperCase() !== target.toUpperCase()) return null;

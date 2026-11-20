@@ -59,9 +59,16 @@ describe("buildQsoLog", () => {
     expect(result).toHaveLength(1);
   });
 
-  it("excludes a CQ/DE/QRZ call from the target -- not busy, not rx (#254)", () => {
+  it("includes a repeated CQ/DE/QRZ call from the target, as busy", () => {
+    // Deliberately NOT matching Android's #254 (which excludes this
+    // entirely) -- live operator feedback: "I should see all activity on
+    // the rx frequency... but see nothing but my calling him in the
+    // message panel" while watching the target repeat his CQ on the
+    // waterfall with nothing shown in the docked panel. See buildQsoLog's
+    // own doc comment.
     const result = buildQsoLog([msg({ is_cq: true, to_me: false })], "RA3XYZ", 0);
-    expect(result).toEqual([]);
+    expect(result).toHaveLength(1);
+    expect(result[0].direction).toBe("busy");
   });
 
   it("sorts entries ascending by time within one call (caller merges across sources)", () => {
