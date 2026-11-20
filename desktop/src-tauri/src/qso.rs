@@ -556,13 +556,7 @@ impl QsoEngine {
 
         // Whether this cycle's content actually ADVANCES the stage, vs. a
         // stale/non-matching reply (the partner repeating what he already
-        // sent because he isn't copying us -- Android's `isPartnerRepeat`).
-        // Only a real advance resets the TX Watchdog's silence counter;
-        // Android's own `noReplyCount` resets on *progress*, not on mere
-        // presence of a message from the target -- a repeat counts as a
-        // failed attempt, same as silence, for every stage that has a
-        // give-up concept (everything except Cq, which has no specific
-        // target yet to give up on).
+        // sent because he isn't copying us).
         let advanced = matches!(
             (self.stage, &content),
             (TxStage::Cq, Content::Grid(_) | Content::Report(_))
@@ -571,15 +565,45 @@ impl QsoEngine {
                 | (TxStage::RReport, Content::Rr73 | Content::Rrr | Content::Bye73)
                 | (TxStage::Rr73, Content::Bye73 | Content::Rr73 | Content::Rrr)
         );
-        if advanced {
-            self.no_reply_count = 0;
-            self.cq_no_reply_count = 0;
-        } else {
-            return if self.on_no_progress() {
-                Some(QsoOutcome::GaveUpTarget)
-            } else {
-                None
-            };
+        // Reset on ANY genuine message from him -- he's clearly still
+        // there, even when this cycle's content doesn't advance the stage
+        // (e.g. a repeat, because he didn't copy our last reply). Real UX
+        // requirement, stated live: "the [TX Watchdog] counter is
+        // incremented each time i send a message but that is assuming no
+        // response from the other station. If there happens to be a
+        // response to a subsequent transmission the TX Watchdog counter
+        // should be reinitialized... If he responds to me before the TX
+        // Watchdog setting is reached I should get another 1 thru TX
+        // Watchdog setting opportunity to reply to him" -- a live partner
+        // repeating himself is a fundamentally different, much less
+        // worrying situation than total silence (the only thing that
+        // should actually count against either watchdog -- see the
+        // `mine == None` branch above, which still increments). Previously
+        // ported from Android's own `isPartnerRepeat`, which counts a
+        // repeat as a failed attempt same as silence -- reverted here per
+        // this live requirement; desktop's watchdogs now measure "has he
+        // gone silent," not "has the exchange stalled."
+        //
+        // Rr73 is the one deliberate exception: its own cap (max_73_sends/
+        // final_ack_sends, checked inside on_no_progress below) bounds how
+        // many times WE resend our own closing message, regardless of
+        // whether he's still there -- a different kind of safety net than
+        // "has he gone silent," so it must still see every non-advancing
+        // cycle, not just true silence.
+        self.no_reply_count = 0;
+        self.cq_no_reply_count = 0;
+        if !advanced {
+            if self.stage == TxStage::Rr73 {
+                return if self.on_no_progress() {
+                    Some(QsoOutcome::GaveUpTarget)
+                } else {
+                    None
+                };
+            }
+            // Non-advancing but genuine reply (a repeat) -- re-send our
+            // current message next slot, same as silence would, just
+            // without counting against either watchdog.
+            return None;
         }
 
         match self.stage {
@@ -1722,23 +1746,65 @@ mod tests {
     }
 
     #[test]
-    fn a_partner_repeat_counts_toward_the_watchdog_same_as_silence() {
-        // Real bug fix: previously ANY message from the target reset the
-        // no-reply counter, even a stale repeat that doesn't advance the
-        // stage. A partner re-sending the same thing he already sent
-        // (not copying us) must count as a failed attempt, same as
-        // silence would.
+    fn a_partner_repeat_resets_the_watchdog_instead_of_counting_against_it() {
+        // Real UX requirement, stated live: "the [TX Watchdog] counter is
+        // incremented each time i send a message but that is assuming no
+        // response from the other station. If there happens to be a
+        // response to a subsequent transmission the TX Watchdog counter
+        // should be reinitialized... If he responds to me before the TX
+        // Watchdog setting is reached I should get another 1 thru TX
+        // Watchdog setting opportunity to reply to him." A live partner
+        // repeating himself (not copying our last reply) is a
+        // fundamentally different, much less worrying situation than
+        // total silence -- reverted from this test's own prior assertion
+        // that a repeat counts as a failed attempt same as silence.
         let mut e = QsoEngine::new("K0XYZ", "EN37");
         e.no_reply_limit = 2;
         e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
         assert_eq!(e.status().stage, TxStage::Grid);
         // He keeps re-sending his grid (what he already sent before we
-        // even answered) instead of a report -- never advances Grid.
-        e.process_rx(&[msg("K0XYZ", "K1ABC", "", "FN42", -8)]);
-        assert_eq!(e.status().stage, TxStage::Grid); // 1 non-advancing reply
-        e.process_rx(&[msg("K0XYZ", "K1ABC", "", "FN42", -8)]);
-        // 2nd non-advancing reply hits the limit -> give up, same as silence would.
-        assert_eq!(e.status().stage, TxStage::Cq);
+        // even answered) instead of a report -- never advances Grid, but
+        // he's clearly still there every single time.
+        for _ in 0..5 {
+            e.process_rx(&[msg("K0XYZ", "K1ABC", "", "FN42", -8)]);
+            assert_eq!(e.status().stage, TxStage::Grid, "a live repeat must never count against the watchdog");
+        }
+        // True silence now DOES count, same as always.
+        e.process_rx(&[]);
+        assert_eq!(e.status().stage, TxStage::Grid, "1st real silent slot");
+        e.process_rx(&[]);
+        assert_eq!(e.status().stage, TxStage::Cq, "2nd real silent slot hits the limit");
+    }
+
+    #[test]
+    fn a_genuine_repeat_after_silence_grants_a_fresh_watchdog_budget() {
+        // The operator's own exact worked example: "TX Watchdog set to 3.
+        // I call a station, he answers me and the TX Watchdog has gotten
+        // incremented, I respond to him but get no response from his
+        // station, TX Watchdog get incremented, in the next slot I get a
+        // response from him, and reply, tx watchdog gets incremented
+        // again and is at 3 so I give up... that should not happen."
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 3;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5)); // -> Grid
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]); // his report -> RReport
+        assert_eq!(e.status().stage, TxStage::RReport);
+
+        e.process_rx(&[]); // 1 real silent slot
+        assert_eq!(e.status().stage, TxStage::RReport);
+        // He's still there, just repeating his report (hasn't copied our
+        // reply) -- must NOT be the 2nd strike toward a 3-strike give up.
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]);
+        assert_eq!(e.status().stage, TxStage::RReport, "a live repeat resets, it's not strike 2");
+
+        // Full fresh budget from here -- 2 more silent slots must NOT give up.
+        e.process_rx(&[]);
+        assert_eq!(e.status().stage, TxStage::RReport, "1st silent slot of the fresh budget");
+        e.process_rx(&[]);
+        assert_eq!(e.status().stage, TxStage::RReport, "2nd silent slot of the fresh budget");
+        // Only the 3rd silent slot in a row (never reset again) gives up.
+        e.process_rx(&[]);
+        assert_eq!(e.status().stage, TxStage::Cq, "3rd consecutive real silent slot");
     }
 
     #[test]
