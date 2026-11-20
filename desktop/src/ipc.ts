@@ -57,12 +57,6 @@ export interface QsoStatus {
   tx_message: string | null;
   report_sent: number | null;
   report_rcvd: number | null;
-  /** True once RR73 has been confirmed sent for the current target (our
-   *  side of the exchange is done and already logged) while we're still
-   *  quietly retrying/answering a repeat in the background. Drives the
-   *  docked panel reverting immediately instead of waiting out that
-   *  retry -- see App.tsx's panelShouldShow. */
-  logged_awaiting_courtesy_ack: boolean;
 }
 
 export interface TxStateEvent {

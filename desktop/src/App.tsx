@@ -449,21 +449,24 @@ export default function App() {
     if (!txActive) setKeyedThisRun(false);
     else if (isTransmitting) setKeyedThisRun(true);
   }, [txActive, isTransmitting]);
-  // Real UX bug, found live: "still sitting on the calling cq panel for one
-  // time slot after the qso has been logged." Once our RR73 is confirmed
-  // sent, our side is done and already logged (qso.rs's
-  // logged_awaiting_courtesy_ack) even though the engine stays active a
-  // while longer, quietly resending RR73 if the partner missed it. The
-  // user's own design for this: "I'd revert to the message panel
-  // immediately after sending a 73 or a rr73. If while in the message
-  // panel the other station resends his transmission I'd reopen the qso
-  // panel and continue the qso but never relog" -- `isTransmitting` already
-  // pulses true on every retransmit (including a retry), not just the
-  // first, so reusing it here reopens the panel for exactly the retry's
-  // own over and reverts again right after, with no new signal needed.
-  const loggedAwaitingCourtesyAck = txState?.status.logged_awaiting_courtesy_ack ?? false;
-  const panelShouldShow =
-    txActive && (keyedThisRun || logTarget != null) && (!loggedAwaitingCourtesyAck || isTransmitting);
+  // Superseded design, kept here for context: an earlier fix reverted to
+  // the message panel the instant our RR73 was confirmed sent (already
+  // logged, qso.rs's logged_awaiting_courtesy_ack), reopening only for the
+  // duration of each retry's own over if the partner missed it. Live
+  // testing showed this looks like a "phantom" RR73 -- the panel visibly
+  // flickers back to decodes and then pops back open 30s later for a
+  // retry the operator has no way to anticipate. Current, simpler design,
+  // stated live: "we shouldn't switch back to the decode panel until
+  // either (1) he responds or (2) the send 73 limit is reached whichever
+  // comes first" -- i.e. just follow `txActive` normally for the whole
+  // RR73 phase, with no special early-revert. `txActive` already goes
+  // false exactly at that point: qso.rs only clears `active` (when
+  // auto_return_to_cq is off) from finish_qso() (he confirmed) or
+  // give_up_target() (the retry/Max-73 cap gave up) -- the "whichever
+  // comes first" in the operator's own words, with auto_return_to_cq on
+  // instead rolling straight into the next CQ run's own panel, which is
+  // also correct (nothing to revert to in between).
+  const panelShouldShow = txActive && (keyedThisRun || logTarget != null);
 
   useEffect(() => {
     // TEMPORARY diagnostic (phantom TX log entry report) -- remove once a

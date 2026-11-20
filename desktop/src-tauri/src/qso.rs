@@ -44,25 +44,6 @@ pub struct QsoStatus {
     pub tx_message: Option<String>,
     pub report_sent: Option<i32>,
     pub report_rcvd: Option<i32>,
-    /// True once RR73 has been confirmed sent for the current target (the
-    /// CALLER's side of the exchange -- `already_logged` while `stage` is
-    /// still `Rr73`, not yet advanced to `Bye73`). Real UX bug, found live:
-    /// "still sitting on the calling cq panel for one time slot after the
-    /// qso has been logged." Once this is true, *my* side is done -- the
-    /// QSO is already logged (see `already_logged`'s own doc comment) --
-    /// even though the engine keeps `active` true a while longer, quietly
-    /// resending RR73 and answering a repeated report in the background,
-    /// per the user's own description: "although the qso from my side has
-    /// completed I will still respond to his messages until either he
-    /// sends his 73 or the... watchdog limit has been reached." The docked
-    /// panel should revert the instant this flips, not wait for that
-    /// background retry/give-up to finish -- deliberately *not* true while
-    /// `stage == Bye73` (the answerer's side, sending the courtesy 73):
-    /// that side has its own existing instant-revert-on-actually-sent
-    /// mechanism (`finish_if_bye73_sent`) and no lingering retry phase, so
-    /// reverting any earlier there would hide the panel before the 73 has
-    /// even gone out.
-    pub logged_awaiting_courtesy_ack: bool,
 }
 
 /// What the engine wants the scheduler to do after processing a slot.
@@ -282,7 +263,6 @@ impl QsoEngine {
             tx_message: self.tx_message.clone(),
             report_sent: self.report_sent,
             report_rcvd: self.report_rcvd,
-            logged_awaiting_courtesy_ack: self.already_logged && self.stage == TxStage::Rr73,
         }
     }
 
@@ -1068,13 +1048,6 @@ mod tests {
         assert!(out.is_none(), "must not log until the courtesy 73 is actually sent");
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ 73"));
         assert_eq!(e.status().stage, TxStage::Bye73);
-        // `logged_awaiting_courtesy_ack` is deliberately false here even
-        // once logged below -- it's scoped to the CALLER's Rr73 retry-limbo
-        // specifically. This (the answerer's) side has its own already-
-        // correct, already-instant revert mechanism (`finish_if_bye73_sent`,
-        // fired once the 73 actually transmits) -- flipping this flag here
-        // too would hide the panel before the courtesy 73 has even gone out.
-        assert!(!e.status().logged_awaiting_courtesy_ack);
 
         // The scheduler actually transmits it -- THIS logs the QSO.
         match e.notify_transmitted() {
@@ -1161,7 +1134,6 @@ mod tests {
         assert!(out.is_none());
         assert_eq!(e.status().stage, TxStage::Rr73);
         assert_eq!(e.tx_message(), Some("K1ABC K0XYZ RR73"));
-        assert!(!e.status().logged_awaiting_courtesy_ack, "RR73 is only queued, not yet confirmed sent");
 
         // The scheduler confirms RR73 actually went out -- this must log the
         // QSO immediately, with no reply ever required.
@@ -1174,12 +1146,6 @@ mod tests {
             _ => panic!("expected the QSO to log the instant RR73 was confirmed sent"),
         }
         assert_eq!(e.status().stage, TxStage::Rr73, "still waiting/retrying for a courtesy 73, unaffected by logging");
-        // Real UX bug, found live: "still sitting on the calling cq panel
-        // for one time slot after the qso has been logged." This is the
-        // signal the docked panel uses to revert immediately once logged,
-        // even though the engine stays `active` a while longer quietly
-        // retrying/answering a repeat in the background.
-        assert!(e.status().logged_awaiting_courtesy_ack, "my side is done -- the panel should revert now, independent of active/stage");
 
         // Dead silence from here on (the user's exact scenario) -- still
         // logged once, no duplicate, and the run eventually gives up
