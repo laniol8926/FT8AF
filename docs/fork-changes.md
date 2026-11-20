@@ -599,6 +599,46 @@ for the Hamlib version workaround needed there.
     treat a genuine partner-silence miss as "ours." A `pending_decode_slots`
     FIFO (pushed on dispatch, popped on drain) fixes this, including under
     a backlog of more than one outstanding decode.
+- **`maybe_transmit` could key up on a stale slot under load**: the QMX
+  CAT-tone TX path blocks the engine thread for a transmission's full
+  ~12.64s, one CAT command per symbol. A queued command or a backlogged
+  decode result that finally gets processed right after the engine
+  unblocks from that could carry a slot label a full cycle behind real
+  time — `tx_slot_eligible`'s window check is a bare modulo, so it
+  couldn't tell a stale label from a fresh one, and could key up believing
+  it was still replying opposite the DX while the radio actually
+  transmitted during whatever slot real time had already moved into.
+  Found from a live diagnostic trace showing an ~11.6s gap between two
+  adjacent eligibility checks for the same labeled slot. Fixed:
+  `maybe_transmit` now always derives the current slot fresh from
+  `self.cur_slot()`, never trusting a caller's value.
+- **`publish_decodes` was stamping `UiMessage.utc_ms` with publish time**
+  (`self.now()`) instead of the decode's true slot — confirmed live: "the
+  message box shows him calling CQ at the :00 time slot but he actually
+  called in the previous :45 slot when looking at the waterfall." The
+  decode worker runs on its own thread and is only polled
+  opportunistically, so a result published late enough to cross a slot
+  boundary showed a timestamp a full slot too new. This also silently
+  undermined the Answer slot-parity fix above, since `AnswerArgs::
+  msg_utc_ms` derives the reply parity from this exact timestamp. Fixed to
+  take the slot's own start time (`slot_id * cycle_ms`) instead.
+- **Docked QSO panel now shows every station's activity on the RX
+  frequency**, not just the answered target's: `buildQsoLog` used to
+  exclude a repeated CQ from the target entirely (Android's #254) and
+  filter out every other station's traffic. Live feedback was explicit
+  the other way — seeing the target's repeated CQ (is he still calling,
+  not yet heard us?) and seeing anyone else on frequency (did he answer
+  someone else, is another station on top of him?) are both real,
+  actionable information while deciding whether to keep calling. Both
+  exclusions removed.
+- **CQ-answer give-up is now smarter and separately configurable**: a new
+  `target_working_someone_else` check gives up immediately (not after a
+  multi-cycle watchdog) the moment the target is seen exchanging with a
+  different station, and a new "CQ Answer Attempts" setting
+  (`cq_answer_limit`) lets the operator cap how many times to retry
+  answering a CQ that's never replied even once, separately from (and
+  never exceeding) the broader "TX Watchdog" that governs retries once a
+  QSO is actually under way.
 
 ## Smaller fixes
 
