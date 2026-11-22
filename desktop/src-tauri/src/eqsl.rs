@@ -6,8 +6,24 @@
 //! from the one thing confirmed directly against the live server plus
 //! widely-repeated, cross-referenced community knowledge (forum reports
 //! from Log4OM/other logging-program users hitting these exact
-//! endpoints), not an official spec. **Needs live verification** against
-//! a real eQSL.cc account before it can be trusted.
+//! endpoints), not an official spec.
+//!
+//! **Live-confirmed 2026-11-22** against the user's own real eQSL.cc
+//! account: `check_connection`'s header-only probe really does come back
+//! `<!-- Reply form eQSL.cc ADIF Real-time Interface --> <HTML>
+//! <HEAD></HEAD> <BODY> </BODY> </HTML>` on success (eQSL's own "Reply
+//! form" wording, not a typo introduced here) -- HTTP 2xx, no
+//! `credential_rejected` phrase, exactly what this module already
+//! classified as `ok: true`, so no code change was needed. The same
+//! session's "Upload now" reported `3 uploaded, 18 already there` -- the
+//! 18 came back from eQSL's own server as `"duplicate"`-bearing
+//! responses (this project's own earlier real uploads, consistent with
+//! the user having already uploaded their whole log before this feature
+//! existed), confirming the `ADIFData`/`EQSL_USER`/`EQSL_PSWD` upload
+//! shape AND the duplicate-detection string against the real server, not
+//! just a plausible guess. **Inbox download is still unconfirmed** --
+//! only upload and the connection probe have real evidence behind them
+//! so far; needs its own live test before it can be trusted.
 //!
 //! Two real, separate operations, not one:
 //!
@@ -37,10 +53,11 @@
 //!    reuse the ADIF-import dedup matchers LoTW's own confirmations
 //!    deliberately don't).
 //!
-//! Because the real response formats for both operations are unconfirmed,
+//! Because the download's real response format is still unconfirmed,
 //! [`check_connection`] -- like `hrdlog.rs`'s -- doesn't try to classify
 //! pass/fail on its own steam beyond the one confirmed error phrase; it
-//! shows eQSL's own response text for the operator to judge.
+//! shows eQSL's own response text for the operator to judge (now with a
+//! real confirmed example of what success looks like, see above).
 
 use serde::Serialize;
 
@@ -353,6 +370,16 @@ mod tests {
     fn credential_rejected_matches_the_confirmed_forum_wording() {
         assert!(credential_rejected("No match on eQSL_User/eQSL_Pswd"));
         assert!(!credential_rejected("Your log has been imported."));
+    }
+
+    #[test]
+    fn credential_rejected_does_not_false_positive_on_the_real_live_confirmed_success_body() {
+        // Real response body from the user's own eQSL.cc account,
+        // 2026-11-22 (see this module's doc comment) -- a genuine success
+        // reply must never be misread as a credential rejection.
+        let real_success_body =
+            "<!-- Reply form eQSL.cc ADIF Real-time Interface --> <HTML> <HEAD></HEAD> <BODY> </BODY> </HTML>";
+        assert!(!credential_rejected(real_success_body));
     }
 
     #[test]

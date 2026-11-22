@@ -872,6 +872,16 @@ for the Hamlib version workaround needed there.
     confirmed via eQSL -- a per-QSO fact this app has no basis to assert
     blanket-true just because the operator caught up their own uploads
     elsewhere.
+  - **Live-verified 2026-11-22** against the user's real eQSL.cc account:
+    Test Connection's header-only probe came back exactly the response
+    this module already classified as success (`<!-- Reply form eQSL.cc
+    ADIF Real-time Interface --> <HTML> <HEAD></HEAD> <BODY> </BODY>
+    </HTML>`), and a real "Upload now" run reported `3 uploaded, 18
+    already there` -- the 18 came back from eQSL's own server as
+    `"duplicate"`, confirming both the upload field shape and the
+    duplicate-detection string against the real server, not just a
+    plausible guess. Inbox download has not been live-tested yet and
+    remains the one unconfirmed piece of this feature.
 
 ## Smaller fixes
 
