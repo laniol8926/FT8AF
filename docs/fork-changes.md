@@ -676,6 +676,17 @@ for the Hamlib version workaround needed there.
   station does not subscribe to the qrz auto upload." A record that still
   fails (e.g. network not up yet this early in boot) stays unsynced and
   just tries again next launch, same as before this existed.
+- **New: "Mark QSOs as Uploaded to All Logs"** (Settings -> Logging &
+  Awards, no Android equivalent). Importing an ADIF file directly on a
+  logging service's own website (e.g. QRZ.com) uploads those QSOs without
+  ever touching this app's own `synced_qrz`/`synced_cloudlog`/`lotw_sent`
+  columns, so from this app's point of view they still look pending
+  forever — and the QRZ startup-retry sweep above would otherwise keep
+  trying to re-upload them. This is a blunt "stop trying, I already
+  handled it another way" action (`db.rs`'s `mark_all_synced`): flips
+  every currently-unsynced QSO's QRZ/Cloudlog/LoTW-sent flags to synced in
+  one sweep, with a confirm step, never contacting any of the services
+  themselves.
 
 ## Smaller fixes
 

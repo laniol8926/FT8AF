@@ -576,6 +576,13 @@ export const api = {
    *  see `qrz.rs`'s doc comment -- so `failed` can be nonzero alongside a
    *  nonzero `uploaded`. */
   qrzUploadPending: () => invoke<QrzUploadResult>("qrz_upload_pending"),
+  /** Settings -> Logging & Awards -> "Mark QSOs as Uploaded to All Logs".
+   *  Marks every currently-pending QSO synced to QRZ/Cloudlog/LoTW without
+   *  contacting any of them -- for a station who already got their log
+   *  into one of these some other way (e.g. an ADIF import done directly
+   *  on that service's own website, which this app has no way to detect).
+   *  Resolves to the number of QSOs changed. */
+  markAllQsosUploaded: () => invoke<number>("mark_all_qsos_uploaded"),
   /** Read-only Logbook API key check (`ACTION=STATUS`); rejects with a
    *  message on failure, resolves on success. */
   qrzTestLogbookConnection: () => invoke<void>("qrz_test_logbook_connection"),

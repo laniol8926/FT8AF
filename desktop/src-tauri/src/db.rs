@@ -1133,6 +1133,27 @@ impl Db {
             .unwrap_or_default()
     }
 
+    /// Marks every QSO as already uploaded to every online log this app
+    /// tracks (QRZ, Cloudlog, LoTW-sent) in one sweep, without contacting
+    /// any of them. Real gap, stated by the user: a station can upload
+    /// their log to a service by importing an ADIF file directly on that
+    /// service's own website -- entirely outside this app's own
+    /// auto-upload -- and this app has no way to learn that happened, so
+    /// its own pending-upload sweeps (e.g. the QRZ startup retry) would
+    /// otherwise keep trying to re-upload QSOs that are already there.
+    /// This is a blunt "stop trying, I already handled it another way"
+    /// action, not a real upload. Only rows not already fully synced are
+    /// touched, so the returned count (rows changed) is meaningful to show
+    /// the operator.
+    pub fn mark_all_synced(&self) -> anyhow::Result<usize> {
+        let n = self.conn.lock().execute(
+            "UPDATE qso_log SET synced_qrz = 1, synced_cloudlog = 1, lotw_sent = 1 \
+             WHERE synced_qrz = 0 OR synced_cloudlog = 0 OR lotw_sent = 0",
+            [],
+        )?;
+        Ok(n)
+    }
+
     pub fn count(&self) -> i64 {
         self.conn
             .lock()
@@ -3024,6 +3045,32 @@ mod tests {
         // Unknown service is a no-op, not an error.
         db.mark_synced(id, "bogus").unwrap();
         assert!(!db.is_synced(id, "bogus"));
+    }
+
+    #[test]
+    fn mark_all_synced_flips_every_pending_qso_without_touching_already_synced_ones() {
+        let db = Db::open_in_memory().unwrap();
+        let fully_synced = db.insert_qso(&rec("K1ABC", "20260604", "120000", false)).unwrap();
+        db.mark_synced(fully_synced, "cloudlog").unwrap();
+        db.mark_synced(fully_synced, "qrz").unwrap();
+        db.mark_lotw_sent(&[fully_synced]).unwrap();
+
+        let partially_synced = db.insert_qso(&rec("K2DEF", "20260604", "121500", false)).unwrap();
+        db.mark_synced(partially_synced, "qrz").unwrap();
+
+        let never_synced = db.insert_qso(&rec("K3GHI", "20260604", "123000", false)).unwrap();
+
+        // Only the two rows with something still unsynced are touched.
+        let changed = db.mark_all_synced().unwrap();
+        assert_eq!(changed, 2);
+
+        for id in [fully_synced, partially_synced, never_synced] {
+            assert!(db.is_synced(id, "cloudlog"), "id {id} should be cloudlog-synced");
+            assert!(db.is_synced(id, "qrz"), "id {id} should be qrz-synced");
+        }
+
+        // A second run finds nothing left to change.
+        assert_eq!(db.mark_all_synced().unwrap(), 0);
     }
 
     #[test]

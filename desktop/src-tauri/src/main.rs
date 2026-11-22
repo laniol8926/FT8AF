@@ -910,6 +910,19 @@ fn qrz_test_xml_connection(state: State<AppState>) -> String {
     qrz::QrzXmlClient::new().test_connection(&username, &password)
 }
 
+// --- Logging bulk actions -----------------------------------------------
+
+/// "Mark QSOs as Uploaded to All Logs" (Settings -> Logging & Awards): stops
+/// this app from treating every currently-pending QSO as still needing an
+/// upload, without actually uploading anything -- for a station who already
+/// got their log into QRZ/Cloudlog/LoTW some other way (e.g. an ADIF import
+/// done directly on that service's own website). Returns how many QSOs were
+/// changed, for the confirmation UI to report back.
+#[tauri::command]
+fn mark_all_qsos_uploaded(state: State<AppState>) -> Result<i64, String> {
+    state.db.mark_all_synced().map(|n| n as i64).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn set_waterfall_config(state: State<AppState>, config: WfConfig) {
     // The engine sanitizes, persists (wf_window/wf_fft_size/wf_avg/
@@ -1287,6 +1300,7 @@ fn main() {
             lotw_upload_pending,
             qrz_pending_upload_count,
             qrz_upload_pending,
+            mark_all_qsos_uploaded,
             qrz_test_logbook_connection,
             qrz_test_xml_connection,
         ])

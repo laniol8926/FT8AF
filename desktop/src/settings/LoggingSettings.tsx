@@ -70,6 +70,18 @@ import { SettingsRow, SettingsSection } from "./SettingsPrimitives";
  * Android's "Awards" half of this category's name is desktop's separate
  * Logbook/Stats screen (already built in an earlier phase) -- nothing in
  * this file.
+ *
+ * **"Mark QSOs as Uploaded to All Logs"**, new, no Android equivalent:
+ * requested directly by the user after noticing this app's own QRZ
+ * pending-upload retry (added the same session) would otherwise keep
+ * trying to re-upload QSOs a station had already gotten into QRZ.com
+ * (or any other log) some other way -- importing an ADIF file directly on
+ * that service's own website doesn't touch this app's `synced_*`/
+ * `lotw_sent` columns at all, so from this app's point of view those QSOs
+ * still look pending forever. A blunt "stop trying, I already handled it"
+ * action (`db.rs`'s `mark_all_synced`): flips every currently-unsynced
+ * QSO's QRZ/Cloudlog/LoTW-sent flags to synced in one sweep, without
+ * contacting any of those services.
  */
 export function LoggingSettings({ callsign }: { callsign: string }) {
   const [lotwOpen, setLotwOpen] = useState(false);
@@ -84,6 +96,7 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   const [pskReporterEnabled, setPskReporterEnabled] = useState(true);
   const [udpOpen, setUdpOpen] = useState(false);
   const [udp, setUdp] = useState<UdpConfig>({ enabled: false, host: "127.0.0.1", port: 2237, accept_requests: false });
+  const [markAllOpen, setMarkAllOpen] = useState(false);
 
   useEffect(() => {
     api.getConfig("lotwUsername").then((v) => setLotwUsername(v ?? ""));
@@ -156,6 +169,7 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
       {qrzLogbookOpen && <QrzLogbookDialog onClose={() => setQrzLogbookOpen(false)} />}
       {qrzCredsOpen && <QrzCredsDialog onClose={() => setQrzCredsOpen(false)} />}
       {udpOpen && <UdpServerDialog udp={udp} onSave={applyUdp} onClose={() => setUdpOpen(false)} />}
+      {markAllOpen && <MarkAllUploadedDialog onClose={() => setMarkAllOpen(false)} />}
       <SettingsSection title="Logging & Awards" />
       <div className="settings-category-list panel settings-category-card">
         <SettingsRow label="Save SWL Decodes" description="Log all decoded messages to the database" disabled />
@@ -197,6 +211,11 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
           description="Download QSL confirmations and upload your log via TQSL"
           value={lotwUsername || "Not configured"}
           onClick={() => setLotwOpen(true)}
+        />
+        <SettingsRow
+          label="Mark QSOs as Uploaded to All Logs"
+          description="Already got your log into QRZ, Cloudlog, or LoTW some other way (e.g. an ADIF import done directly on that service's website)? Use this so this app stops trying to upload those same QSOs again."
+          onClick={() => setMarkAllOpen(true)}
         />
       </div>
 
@@ -388,6 +407,73 @@ function LotwDialog({ callsign, onClose }: { callsign: string; onClose: () => vo
             </div>
           )}
         </div>
+        <div className="actions">
+          <button onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "Mark QSOs as Uploaded to All Logs" -- see this file's top doc comment.
+ * A two-step confirm (same pattern as `LotwDialog`'s upload button) since
+ * it affects every pending QSO at once and can't be targeted to just one.
+ */
+function MarkAllUploadedDialog({ onClose }: { onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [result, setResult] = useState<number | null>(null);
+
+  async function markAll() {
+    setConfirming(false);
+    setBusy(true);
+    const n = await api.markAllQsosUploaded();
+    setBusy(false);
+    setResult(n);
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>Mark QSOs as Uploaded to All Logs</h3>
+          <button className="modal-close" aria-label="Close" onClick={onClose}>✕</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          Marks every QSO this app thinks is still pending upload as already
+          uploaded to QRZ, Cloudlog, and LoTW -- without actually contacting
+          any of them. Use this if you've uploaded your log to one of these
+          another way, such as importing an ADIF file directly on that
+          service's own website; this app has no way to detect that on its
+          own, so it would otherwise keep trying to upload those same QSOs
+          again (including automatically on launch for QRZ).
+        </div>
+        {result == null ? (
+          !confirming ? (
+            <button disabled={busy} onClick={() => setConfirming(true)}>
+              Mark all as uploaded…
+            </button>
+          ) : (
+            <div className="col" style={{ gap: 6 }}>
+              <div className="muted" style={{ fontSize: 12 }}>
+                This cannot be undone from here -- if any of these QSOs
+                genuinely weren't uploaded anywhere, you'd need to re-upload
+                them manually afterward. Confirm to proceed.
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <button onClick={() => setConfirming(false)}>Cancel</button>
+                <button className="primary" disabled={busy} onClick={markAll}>
+                  {busy ? "Marking…" : "Confirm"}
+                </button>
+              </div>
+            </div>
+          )
+        ) : (
+          <div className="muted" style={{ fontSize: 12, color: "var(--ok)" }}>
+            {result} QSO{result === 1 ? "" : "s"} marked as uploaded.
+          </div>
+        )}
         <div className="actions">
           <button onClick={onClose}>Close</button>
         </div>
