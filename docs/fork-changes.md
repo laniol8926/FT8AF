@@ -687,6 +687,41 @@ for the Hamlib version workaround needed there.
   every currently-unsynced QSO's QRZ/Cloudlog/LoTW-sent flags to synced in
   one sweep, with a confirm step, never contacting any of the services
   themselves.
+- **LoTW "Download new"/"Download all" confirmations fixed, two real bugs
+  found live** (user: "the LOTW download confirmations both new and all
+  is not working"). Confirmed via a real request against the live LoTW
+  endpoint with the account's own credentials:
+  - **"Download all" never actually downloaded all.** `full_refresh`
+    omitted the `qso_qslsince` parameter entirely, trusting LoTW to treat
+    that as "no limit" -- it doesn't. LoTW silently substitutes its own
+    undocumented short default window instead, so "download all" was
+    quietly re-fetching almost nothing while claiming to refresh
+    everything. Fixed by sending an explicit, safely-ancient
+    `qso_qslsince` (1970-01-01, long before LoTW itself existed) instead
+    of omitting the parameter.
+  - **Any HTTP error response leaked the LoTW password straight into the
+    UI.** `ureq::Error`'s own `Display` output embeds the full request
+    URL for both its variants, and that URL carries the plaintext
+    password in its query string (this module's own top doc comment
+    already warns never to log the URL for exactly this reason -- the
+    error path just wasn't covered by that rule). Reproduced live: LoTW
+    allows only one report request per account at a time and answers a
+    second concurrent one with HTTP 503 "Page Request Limit!" -- likely
+    what the user actually hit, probably from a prior slow/interrupted
+    request leaving the account briefly locked. Fixed with a new
+    `describe_request_error` that builds its own message from the status
+    code and response body alone, never from the error's own `Display`;
+    the 503/"Page Request Limit" case gets a specific, actionable message
+    instead of a generic one. The matching-and-apply pipeline itself
+    (`parse_report`/`apply_lotw_confirmations`) was verified correct by
+    replaying a real downloaded report against a copy of the production
+    database -- the downloads were failing before any of that code ever
+    ran. `apply_lotw_confirmations` remains UPDATE-only as before -- a
+    confirmation with no local match is still never inserted as a new
+    QSO, which was never broken and stays that way.
+  - A full-history pull on a large log can legitimately take minutes to
+    generate server-side, so `full_refresh` now gets a 600s read timeout
+    instead of the usual 120s.
 
 ## Smaller fixes
 

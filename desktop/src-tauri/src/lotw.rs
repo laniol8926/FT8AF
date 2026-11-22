@@ -31,6 +31,9 @@
 //!
 //! Never log a built report URL anywhere -- it carries the plaintext
 //! password in the query string (matches Android's own explicit comment).
+//! This also means never `format!("{e}")` a `ureq::Error` from this
+//! request directly: both its variants can embed that same URL in their
+//! own `Display` output. See [`describe_request_error`] below.
 
 use std::path::Path;
 use std::time::Duration;
@@ -147,10 +150,51 @@ pub fn parse_report(text: &str) -> Result<Vec<LotwQsl>, String> {
     Ok(out)
 }
 
+/// `qso_qslsince` used for a "download all" request. **Must be a real,
+/// explicit date, never `None`** -- confirmed live: when the parameter is
+/// omitted entirely, LoTW does NOT return unbounded history. It silently
+/// substitutes its own undocumented "system supplied default" (observed:
+/// a window of only the last couple of days), so "download all" would
+/// otherwise quietly fetch almost nothing while claiming to refresh
+/// everything. Any date safely before LoTW's own existence (it launched in
+/// 2003) means "since forever" with no real ambiguity.
+const FULL_HISTORY_SINCE: &str = "1970-01-01";
+
+/// Turns a `ureq::Error` from the report request into a message safe to
+/// show in the UI. **Never `format!("{e}")` this error directly** -- both
+/// of `ureq::Error`'s variants (`Status` always, `Transport` often) embed
+/// the request URL in their `Display` output, and that URL carries the
+/// plaintext LoTW password in its query string (see this module's top doc
+/// comment). Confirmed live: LoTW enforces one report request per account
+/// at a time and answers a second concurrent one with HTTP 503 "Page
+/// Request Limit!" -- detected specially here since it's an expected,
+/// actionable condition (a previous request, possibly a slow "download
+/// all", is still being generated), not a generic failure.
+fn describe_request_error(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, response) => {
+            let body = response.into_string().unwrap_or_default();
+            if body.to_lowercase().contains("page request limit") {
+                "LoTW allows only one report request at a time for your account, and a previous \
+                 one (possibly a slow \"download all\") is still being generated. Wait a bit and \
+                 try again."
+                    .to_string()
+            } else {
+                format!("LoTW answered with HTTP {code}.")
+            }
+        }
+        ureq::Error::Transport(t) => format!("Could not reach LoTW: {}", t.kind()),
+    }
+}
+
 /// Downloads and applies LoTW confirmations, advancing the stored "last
 /// sync" marker to today on success so the next incremental call only asks
 /// for what's new. `full_refresh` ignores that marker for one call (a
-/// "download everything again" affordance) without discarding it.
+/// "download everything again" affordance) without discarding it, using
+/// [`FULL_HISTORY_SINCE`] rather than omitting the parameter -- see its own
+/// doc comment for why that distinction matters. A full-history pull on a
+/// large log can legitimately take minutes to generate server-side, so it
+/// gets a much longer read timeout than an incremental one.
 pub fn download_confirmations(db: &Db, username: &str, password: &str, full_refresh: bool) -> LotwDownloadResult {
     if username.trim().is_empty() || password.is_empty() {
         return LotwDownloadResult {
@@ -158,17 +202,22 @@ pub fn download_confirmations(db: &Db, username: &str, password: &str, full_refr
             ..Default::default()
         };
     }
-    let since = if full_refresh { None } else { since_date(db.get_config(CONFIG_LAST_QSL).as_deref()) };
+    let since = if full_refresh {
+        Some(FULL_HISTORY_SINCE.to_string())
+    } else {
+        since_date(db.get_config(CONFIG_LAST_QSL).as_deref())
+    };
     let url = build_report_url(username, password, since.as_deref());
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(20))
-        .timeout_read(Duration::from_secs(120))
+        .timeout_read(Duration::from_secs(if full_refresh { 600 } else { 120 }))
         .build();
-    let body = match agent.get(&url).call() {
-        Ok(r) => match r.into_string() {
-            Ok(b) => b,
-            Err(e) => return LotwDownloadResult { error: Some(format!("{e}")), ..Default::default() },
-        },
+    let response = match agent.get(&url).call() {
+        Ok(r) => r,
+        Err(e) => return LotwDownloadResult { error: Some(describe_request_error(e)), ..Default::default() },
+    };
+    let body = match response.into_string() {
+        Ok(b) => b,
         Err(e) => return LotwDownloadResult { error: Some(format!("{e}")), ..Default::default() },
     };
     let qsls = match parse_report(&body) {
@@ -294,5 +343,37 @@ mod tests {
         let result = upload_pending(&db, "K1ABC", std::env::temp_dir().as_path());
         assert_eq!(result.attempted, 0);
         assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn full_refresh_sends_an_explicit_far_past_since_date_not_an_omitted_one() {
+        // Confirmed live against the real LoTW endpoint: omitting qso_qslsince
+        // does NOT mean "unbounded" -- the server quietly substitutes its own
+        // short default window instead. "Download all" must pass an explicit
+        // date far enough in the past to really mean everything.
+        let url = build_report_url("K1ABC", "secret", Some(FULL_HISTORY_SINCE));
+        assert!(url.contains(&format!("qso_qslsince={FULL_HISTORY_SINCE}")));
+    }
+
+    #[test]
+    fn describe_request_error_never_leaks_the_url_or_password() {
+        // `Response::new` can't attach a URL from outside the ureq crate
+        // (`set_url` is crate-private there) -- this test instead proves
+        // the structural property: describe_request_error builds its own
+        // message from the status code and body alone, never from the
+        // error's own Display (which is what actually carries the URL,
+        // per ureq::Error's impl -- see this function's own doc comment).
+        let resp = ureq::Response::new(503, "Service Unavailable", "<html>Page Request Limit!</html>").unwrap();
+        let msg = describe_request_error(ureq::Error::Status(503, resp));
+        assert!(msg.contains("one report request at a time"));
+        assert!(!msg.to_lowercase().contains("login"));
+        assert!(!msg.to_lowercase().contains("password"));
+    }
+
+    #[test]
+    fn describe_request_error_reports_other_statuses_by_code_only() {
+        let resp = ureq::Response::new(500, "Internal Server Error", "").unwrap();
+        let msg = describe_request_error(ureq::Error::Status(500, resp));
+        assert_eq!(msg, "LoTW answered with HTTP 500.");
     }
 }
