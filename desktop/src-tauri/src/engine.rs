@@ -20,6 +20,7 @@ use crate::db::{Db, QsoRecord};
 use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
 use crate::dxcc;
+use crate::eqsl;
 use crate::hamqth;
 use crate::hrdlog;
 use crate::logged_state;
@@ -1441,6 +1442,17 @@ impl Engine {
                 hrdlog::upload_pending(&db_for_upload, &callsign, &hrdlog_code);
             });
         }
+        // Upload side only -- eQSL's download/import is a manual Settings
+        // action, same as LoTW's (`LotwDialog`'s "Download new"/"Download
+        // all" buttons, never run automatically on startup).
+        let eqsl_password = engine.db.get_config(eqsl::CONFIG_PASSWORD).unwrap_or_default();
+        if engine.db.get_config(eqsl::CONFIG_ENABLE).as_deref() == Some("1") && !eqsl_password.is_empty() {
+            let db_for_upload = engine.db.clone();
+            let username = engine.db.get_config(eqsl::CONFIG_USERNAME).unwrap_or_default();
+            std::thread::spawn(move || {
+                eqsl::upload_pending(&db_for_upload, &username, &eqsl_password);
+            });
+        }
 
         engine
     }
@@ -1938,6 +1950,15 @@ impl Engine {
                     let record_for_upload = record.clone();
                     std::thread::spawn(move || {
                         hrdlog::upload_one_logged(&db, &record_for_upload.station_callsign, &code, &record_for_upload);
+                    });
+                }
+                if self.db.get_config(eqsl::CONFIG_ENABLE).as_deref() == Some("1") {
+                    let db = self.db.clone();
+                    let username = self.db.get_config(eqsl::CONFIG_USERNAME).unwrap_or_default();
+                    let password = self.db.get_config(eqsl::CONFIG_PASSWORD).unwrap_or_default();
+                    let record_for_upload = record.clone();
+                    std::thread::spawn(move || {
+                        eqsl::upload_one_logged(&db, &username, &password, &record_for_upload);
                     });
                 }
                 self.emit(EngineEvent::QsoCompleted(record));

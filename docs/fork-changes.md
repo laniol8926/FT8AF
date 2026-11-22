@@ -827,6 +827,51 @@ for the Hamlib version workaround needed there.
     logged) for the operator to judge. Needs live verification against a
     real HRDLog.net account before it can be trusted; the endpoint, field
     names or response handling may all need correcting once that happens.
+- **New: eQSL upload + inbox download** (Settings -> Logging & Awards,
+  `eqsl.rs`), the fourth and last of this batch, requested directly by the
+  user. Unlike the others, eQSL has no real client anywhere in the Android
+  fork at all (confirmed: no `SettingsBackup.kt` entry, no client module --
+  `eqsl_sent`/`eqsl_rcvd` there are just imported-ADIF flags, same as
+  desktop before this), so this is a genuinely new feature, not a port.
+  **Same confidence caveat as HRDLog.net** -- eQSL's help pages are mostly
+  login-gated or don't exist as static docs, so this is built from one
+  directly-confirmed fact (`ImportADIF.cfm` requires an `ADIFData`
+  parameter) plus cross-referenced forum reports, not an official spec.
+  Two genuinely separate operations, both exposed in one Settings dialog:
+  - **Upload** (`POST /qslcard/ImportADIF.cfm`, `EQSL_USER`/`EQSL_PSWD`/
+    `ADIFData`): one QSO per call, deliberately not batched even though
+    the real endpoint may accept several `<eor>`-separated records in one
+    body -- this project has no confirmed per-record result format for a
+    multi-record response, and guessing one wrong risks marking an upload
+    "synced" when it wasn't, worse than the lost efficiency.
+  - **Download** (`GET /qslcard/DownloadInBox.cfm` with `UserName`/
+    `Password`/`QTHNickname`/`ConfirmedQSLOnly`/`RcvdSince`): a genuine
+    two-step fetch, confirmed from real-world forum reports rather than
+    official docs -- the first call generates a file server-side and
+    answers with HTML naming it rather than the ADIF directly, so a
+    second `GET` against the named `.adi` URL fetches the real file.
+    "Download all" uses an explicit, safely-ancient `RcvdSince`
+    (`200001010000`) rather than omitting the parameter, the same lesson
+    from the LoTW "download all" fix earlier this session (confirmed
+    there, not assumed here, that omitting a since-style parameter isn't
+    safe to read as "unbounded"). Applied via `db.rs`'s new
+    `apply_eqsl_inbox`, which -- per the user's explicit, repeated
+    instruction that nothing in this whole batch of work should ever add
+    a QSO to the logbook -- reuses the same ADIF-import dedup matchers an
+    ordinary import uses but **drops the insert-if-unmatched branch
+    entirely**: a confirmed QSL with no local match is reported back
+    (`unmatched`) but never inserted as a new QSO row. Unlike LoTW's own
+    confirmations-only report, eQSL's inbox is a real per-QSO ADIF export,
+    so reusing the import matchers (rather than LoTW's bespoke
+    exact-match-only UPDATE) is the correct fit here, not a shortcut.
+  - `eqsl_sent`/`eqsl_rcvd` already existed (v4) -- no new migration
+    needed. "Mark QSOs as Uploaded to All Logs" now also flips
+    `eqsl_sent`, but still deliberately excludes `eqsl_rcvd`: unlike every
+    sync flag in this whole batch (pure "did WE try to upload this"
+    bookkeeping), `eqsl_rcvd` specifically means the *other* station also
+    confirmed via eQSL -- a per-QSO fact this app has no basis to assert
+    blanket-true just because the operator caught up their own uploads
+    elsewhere.
 
 ## Smaller fixes
 

@@ -13,6 +13,7 @@ use ft8af::clublog::{self, ClublogUploadResult, ConnectionCheck as ClublogConnec
 use ft8af::cloudlog::{self, CloudlogUploadResult, ConnectionCheck as CloudlogConnectionCheck, StationProfile};
 use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, LogStats, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
+use ft8af::eqsl::{self, ConnectionCheck as EqslConnectionCheck, EqslDownloadResult, EqslUploadResult};
 use ft8af::fcc_grid::{self, FccSeedSummary};
 use ft8af::hamqth::{self, ConnectionCheck as HamQthConnectionCheck, HamQthUploadResult};
 use ft8af::hrdlog::{self, ConnectionCheck as HrdlogConnectionCheck, HrdlogUploadResult};
@@ -1026,13 +1027,44 @@ fn hrdlog_test_connection(callsign: String, code: String) -> HrdlogConnectionChe
     hrdlog::check_connection(&callsign, &code)
 }
 
+// --- eQSL.cc ---------------------------------------------------------------
+
+#[tauri::command]
+fn eqsl_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_eqsl_upload().len() as i64
+}
+
+#[tauri::command]
+fn eqsl_upload_pending(state: State<AppState>) -> EqslUploadResult {
+    let username = state.db.get_config(eqsl::CONFIG_USERNAME).unwrap_or_default();
+    let password = state.db.get_config(eqsl::CONFIG_PASSWORD).unwrap_or_default();
+    eqsl::upload_pending(&state.db, &username, &password)
+}
+
+#[tauri::command]
+fn eqsl_test_connection(username: String, password: String) -> EqslConnectionCheck {
+    eqsl::check_connection(&username, &password)
+}
+
+/// Downloads eQSL's inbox and merges it into the local log -- see
+/// `eqsl.rs`'s doc comment: UPDATE-only, never inserts a new QSO for a
+/// record with no local match.
+#[tauri::command]
+fn eqsl_download_confirmations(state: State<AppState>, full_refresh: bool) -> EqslDownloadResult {
+    let username = state.db.get_config(eqsl::CONFIG_USERNAME).unwrap_or_default();
+    let password = state.db.get_config(eqsl::CONFIG_PASSWORD).unwrap_or_default();
+    let nickname = state.db.get_config(eqsl::CONFIG_NICKNAME).unwrap_or_default();
+    eqsl::download_confirmations(&state.db, &username, &password, &nickname, full_refresh)
+}
+
 // --- Logging bulk actions -----------------------------------------------
 
 /// "Mark QSOs as Uploaded to All Logs" (Settings -> Logging & Awards): stops
 /// this app from treating every currently-pending QSO as still needing an
 /// upload, without actually uploading anything -- for a station who already
-/// got their log into QRZ/Cloudlog/LoTW/World Radio League some other way
-/// (e.g. an ADIF import done directly on that service's own website).
+/// got their log into QRZ/Cloudlog/LoTW/World Radio League/HamQTH/Club Log/
+/// HRDLog.net/eQSL (upload side only) some other way (e.g. an ADIF import
+/// done directly on that service's own website).
 /// Returns how many QSOs were changed, for the confirmation UI to report back.
 #[tauri::command]
 fn mark_all_qsos_uploaded(state: State<AppState>) -> Result<i64, String> {
@@ -1436,6 +1468,10 @@ fn main() {
             hrdlog_pending_upload_count,
             hrdlog_upload_pending,
             hrdlog_test_connection,
+            eqsl_pending_upload_count,
+            eqsl_upload_pending,
+            eqsl_test_connection,
+            eqsl_download_confirmations,
             mark_all_qsos_uploaded,
         ])
         .run(tauri::generate_context!())

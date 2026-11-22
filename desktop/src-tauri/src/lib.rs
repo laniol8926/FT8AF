@@ -20,6 +20,7 @@ pub mod db;
 pub mod dsp;
 pub mod dxcc;
 pub mod engine;
+pub mod eqsl;
 pub mod fcc_grid;
 pub mod hamqth;
 pub mod hrdlog;

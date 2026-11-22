@@ -125,6 +125,9 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   const [hrdlogOpen, setHrdlogOpen] = useState(false);
   const [hrdlogEnabled, setHrdlogEnabled] = useState(false);
   const [hrdlogCodeSet, setHrdlogCodeSet] = useState(false);
+  const [eqslOpen, setEqslOpen] = useState(false);
+  const [eqslEnabled, setEqslEnabled] = useState(false);
+  const [eqslUsername, setEqslUsername] = useState("");
 
   useEffect(() => {
     api.getConfig("lotwUsername").then((v) => setLotwUsername(v ?? ""));
@@ -193,6 +196,16 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
     api.setConfig("enableHRDLog", next ? "1" : "0");
   }
 
+  function refreshEqsl() {
+    api.getConfig("enableEqsl").then((v) => setEqslEnabled(v === "1"));
+    api.getConfig("eqslUsername").then((v) => setEqslUsername(v ?? ""));
+  }
+  useEffect(refreshEqsl, [eqslOpen]);
+  function saveEqslEnabled(next: boolean) {
+    setEqslEnabled(next);
+    api.setConfig("enableEqsl", next ? "1" : "0");
+  }
+
   useEffect(() => {
     // Defaults to on, matching Android -- see adif_log_file.rs's doc
     // comment on why this new-to-desktop feature uses Android's own
@@ -253,6 +266,7 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
       {hamqthOpen && <HamqthDialog callsign={callsign} onClose={() => setHamqthOpen(false)} />}
       {clublogOpen && <ClublogDialog onClose={() => setClublogOpen(false)} />}
       {hrdlogOpen && <HrdlogDialog callsign={callsign} onClose={() => setHrdlogOpen(false)} />}
+      {eqslOpen && <EqslDialog onClose={() => setEqslOpen(false)} />}
       <SettingsSection title="Logging & Awards" />
       <div className="settings-category-list panel settings-category-card">
         <SettingsRow label="Save SWL Decodes" description="Log all decoded messages to the database" disabled />
@@ -322,6 +336,14 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
           toggle={hrdlogEnabled}
           onToggleChange={saveHrdlogEnabled}
           onClick={() => setHrdlogOpen(true)}
+        />
+        <SettingsRow
+          label="eQSL"
+          description="Upload QSOs to eQSL and download confirmed QSLs into this log"
+          value={eqslUsername || "Not configured"}
+          toggle={eqslEnabled}
+          onToggleChange={saveEqslEnabled}
+          onClick={() => setEqslOpen(true)}
         />
         <SettingsRow
           label="LoTW"
@@ -1560,6 +1582,169 @@ function HrdlogDialog({ callsign, onClose }: { callsign: string; onClose: () => 
           {uploadStatus && (
             <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
               {uploadStatus.text}
+            </div>
+          )}
+        </div>
+
+        <div className="actions">
+          <button onClick={dismiss}>Cancel</button>
+          <button className="primary" onClick={save}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * eQSL settings -- username/password (upload) + QTH Nickname (download
+ * only). Two real, separate operations -- see `eqsl.rs`'s top doc
+ * comment for the confidence caveat (lower than every other integration
+ * here except HRDLog.net). Download never inserts a new QSO -- only
+ * updates a matched existing one.
+ */
+function EqslDialog({ onClose }: { onClose: () => void }) {
+  const [initial, setInitial] = useState<{ username: string; password: string; nickname: string } | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [nickname, setNickname] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
+  const [downloadStatus, setDownloadStatus] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    Promise.all([api.getConfig("eqslUsername"), api.getConfig("eqslPassword"), api.getConfig("eqslNickname")]).then(
+      ([u, p, n]) => {
+        setInitial({ username: u ?? "", password: p ?? "", nickname: n ?? "" });
+        setUsername(u ?? "");
+        setPassword(p ?? "");
+        setNickname(n ?? "");
+      }
+    );
+    api.eqslPendingUploadCount().then(setPendingCount);
+  }, []);
+
+  function dismiss() {
+    if (initial) {
+      api.setConfig("eqslUsername", initial.username);
+      api.setConfig("eqslPassword", initial.password);
+      api.setConfig("eqslNickname", initial.nickname);
+    }
+    onClose();
+  }
+
+  async function saveFields() {
+    await Promise.all([
+      api.setConfig("eqslUsername", username.trim()),
+      api.setConfig("eqslPassword", password),
+      api.setConfig("eqslNickname", nickname.trim()),
+    ]);
+  }
+
+  async function test() {
+    await saveFields();
+    setBusy(true);
+    setTestResult(null);
+    const check = await api.eqslTestConnection(username.trim(), password);
+    setTestResult({ text: check.detail || (check.ok ? "No response body" : "Fail"), ok: check.ok });
+    setBusy(false);
+  }
+
+  async function save() {
+    await saveFields();
+    onClose();
+  }
+
+  async function upload() {
+    setBusy(true);
+    setUploadStatus(null);
+    const result = await api.eqslUploadPending();
+    setBusy(false);
+    api.eqslPendingUploadCount().then(setPendingCount);
+    if (result.error) {
+      setUploadStatus({
+        text: `${result.uploaded} uploaded, ${result.already_present} already there, ${result.failed} failed -- ${result.error}`,
+        ok: result.uploaded + result.already_present > 0,
+      });
+    } else {
+      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.already_present} already there`, ok: true });
+    }
+  }
+
+  async function download(fullRefresh: boolean) {
+    await saveFields();
+    setBusy(true);
+    setDownloadStatus(null);
+    const result = await api.eqslDownloadConfirmations(fullRefresh);
+    setBusy(false);
+    setDownloadStatus(
+      result.error
+        ? { text: result.error, ok: false }
+        : { text: `${result.newly_confirmed} QSOs newly confirmed (${result.unmatched} not found locally)`, ok: true }
+    );
+  }
+
+  return (
+    <div className="modal-overlay" onClick={dismiss}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>eQSL</h3>
+          <button className="modal-close" aria-label="Close" onClick={dismiss}>✕</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          Your eqsl.cc website login. This integration's API details couldn't be confirmed
+          from eQSL's own docs during development -- test it live before relying on it.
+        </div>
+        <div className="field">
+          <label>Username</label>
+          <input value={username} onChange={(e) => { setUsername(e.target.value); setTestResult(null); }} autoComplete="off" />
+        </div>
+        <div className="field">
+          <label>Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => { setPassword(e.target.value); setTestResult(null); }}
+            autoComplete="off"
+          />
+        </div>
+        <div className="field">
+          <label>QTH Nickname (for download)</label>
+          <input value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="Matches your eQSL profile" autoComplete="off" />
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+          <button disabled={busy} onClick={test}>{busy ? "Working…" : "Test Connection"}</button>
+        </div>
+        {testResult && (
+          <div className="muted" style={{ fontSize: 12, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
+            {testResult.text}
+          </div>
+        )}
+
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
+          </div>
+          <button disabled={busy || !pendingCount} onClick={upload}>{busy ? "Uploading…" : "Upload now"}</button>
+          {uploadStatus && (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
+              {uploadStatus.text}
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            Download newly confirmed QSLs and merge them into this log (never inserts a new QSO).
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <button disabled={busy} onClick={() => download(false)}>{busy ? "Working…" : "Download new"}</button>
+            <button disabled={busy} onClick={() => download(true)}>Download all</button>
+          </div>
+          {downloadStatus && (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: downloadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
+              {downloadStatus.text}
             </div>
           )}
         </div>

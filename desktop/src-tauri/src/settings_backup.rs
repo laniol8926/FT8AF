@@ -41,6 +41,12 @@ pub const SENSITIVE_KEYS: &[&str] = &[
     "hamqthPassword",
     "clublogToken",
     "hrdlogCode",
+    // eQSL has no real upload/download client anywhere in the Android
+    // fork at all (confirmed: no SettingsBackup.kt entry, no client
+    // module -- `eqsl_sent`/`eqsl_rcvd` there are just imported ADIF
+    // flags, same as here before this feature existed) -- a genuinely
+    // new desktop feature, not a port.
+    "eqslPassword",
 ];
 
 pub fn is_sensitive_key(key: &str) -> bool {

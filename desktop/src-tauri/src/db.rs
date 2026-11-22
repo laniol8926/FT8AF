@@ -1049,8 +1049,11 @@ impl Db {
     }
 
     /// Flag a QSO as synced to an online service so re-runs are idempotent.
-    /// `service` is `"cloudlog"`, `"qrz"`, `"wrl"`, `"hamqth"`, `"clublog"`
-    /// or `"hrdlog"`; unknown services are a no-op.
+    /// `service` is `"cloudlog"`, `"qrz"`, `"wrl"`, `"hamqth"`, `"clublog"`,
+    /// `"hrdlog"` or `"eqsl"` (the upload side -- `eqsl_sent`; the
+    /// download/confirmation side, `eqsl_rcvd`, is set only by
+    /// [`Self::apply_eqsl_inbox`], never through this generic path);
+    /// unknown services are a no-op.
     pub fn mark_synced(&self, id: i64, service: &str) -> anyhow::Result<()> {
         let column = match service {
             "cloudlog" => "synced_cloudlog",
@@ -1059,6 +1062,7 @@ impl Db {
             "hamqth" => "synced_hamqth",
             "clublog" => "synced_clublog",
             "hrdlog" => "synced_hrdlog",
+            "eqsl" => "eqsl_sent",
             _ => return Ok(()),
         };
         self.conn.lock().execute(
@@ -1077,6 +1081,7 @@ impl Db {
             "hamqth" => "synced_hamqth",
             "clublog" => "synced_clublog",
             "hrdlog" => "synced_hrdlog",
+            "eqsl" => "eqsl_sent",
             _ => return false,
         };
         self.conn
@@ -1098,6 +1103,21 @@ impl Db {
         let conn = self.conn.lock();
         let mut stmt = match conn.prepare(&format!(
             "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE lotw_sent = 0 ORDER BY id ASC",
+        )) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], row_to_qso)
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// QSOs not yet uploaded to eQSL (`eqsl_sent = 0`), oldest first -- same
+    /// shape/ordering rationale as [`Self::qsos_pending_qrz_upload`].
+    pub fn qsos_pending_eqsl_upload(&self) -> Vec<QsoRecord> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE eqsl_sent = 0 ORDER BY id ASC",
         )) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1158,6 +1178,50 @@ impl Db {
             changed += n;
         }
         changed
+    }
+
+    /// Applies eQSL's inbox ADIF download to the local log, UPDATE-only --
+    /// a record with no local match is discarded, never inserted as a new
+    /// QSO (the same standing rule as [`Self::apply_lotw_confirmations`],
+    /// restated explicitly by the user for eQSL specifically). Unlike that
+    /// function, this one *does* reuse the ADIF-import dedup matchers
+    /// ([`Self::find_duplicate_locked`]/[`Self::find_lotw_twin_locked`]):
+    /// eQSL's inbox export is a real per-QSO ADIF file (the full record,
+    /// not a stripped confirmations-only report the way LoTW's is), so it
+    /// carries the same fields a normal import does and the same matching
+    /// makes sense.
+    ///
+    /// Every record in this file is, by definition, eQSL-confirmed, so
+    /// `eqsl_rcvd` is forced true on the parsed record before merging,
+    /// regardless of whether it happens to carry its own `EQSL_QSL_RCVD`
+    /// tag (eQSL's own inbox export isn't guaranteed to).
+    ///
+    /// Returns `(newly_confirmed, unmatched)` -- `unmatched` is reported
+    /// back to the operator, not silently dropped, since a QSO eQSL has
+    /// confirmed but this app can't find locally is worth knowing about
+    /// even though it's never auto-inserted.
+    pub fn apply_eqsl_inbox(&self, adif_text: &str) -> (usize, usize) {
+        let records = crate::adif::parse_adif(adif_text);
+        let conn = self.conn.lock();
+        let mut newly_confirmed = 0usize;
+        let mut unmatched = 0usize;
+        for rec in &records {
+            let Some(mut qso) = crate::adif::adif_record_to_qso(&rec.fields) else { continue };
+            qso.eqsl_rcvd = true;
+            let existing = Self::find_duplicate_locked(&conn, &qso.call, &qso.qso_date, &qso.time_on)
+                .or_else(|| Self::find_lotw_twin_locked(&conn, &qso));
+            match existing {
+                Some(existing) => {
+                    let id = existing.id.unwrap();
+                    if let Some(merged) = merge_matched_qso(&existing, &qso) {
+                        let _ = Self::update_flags_locked(&conn, id, &merged);
+                        newly_confirmed += 1;
+                    }
+                }
+                None => unmatched += 1,
+            }
+        }
+        (newly_confirmed, unmatched)
     }
 
     /// QSOs not yet uploaded to QRZ.com's Logbook API (`synced_qrz = 0`),
@@ -1266,19 +1330,19 @@ impl Db {
     /// action, not a real upload. Only rows not already fully synced are
     /// touched, so the returned count (rows changed) is meaningful to show
     /// the operator.
-    /// Deliberately excludes `eqsl_sent`/`eqsl_rcvd`: unlike the sync flags
-    /// here (pure app-internal "did WE already try to upload this"
-    /// bookkeeping), `eqsl_rcvd` specifically means the *other* station
-    /// also confirmed via eQSL -- a per-QSO fact this app has no basis to
+    /// `eqsl_sent` (the upload side) is included like every other sync
+    /// flag here. `eqsl_rcvd` is deliberately excluded: unlike the rest
+    /// (pure app-internal "did WE already try to upload this"
+    /// bookkeeping), it specifically means the *other* station also
+    /// confirmed via eQSL -- a per-QSO fact this app has no basis to
     /// assert blanket-true for every row just because the operator caught
-    /// up their own uploads elsewhere. eQSL gets its own dedicated backfill
-    /// once its real upload/download support lands.
+    /// up their own uploads elsewhere.
     pub fn mark_all_synced(&self) -> anyhow::Result<usize> {
         let n = self.conn.lock().execute(
             "UPDATE qso_log SET synced_qrz = 1, synced_cloudlog = 1, lotw_sent = 1, synced_wrl = 1, \
-             synced_hamqth = 1, synced_clublog = 1, synced_hrdlog = 1 \
+             synced_hamqth = 1, synced_clublog = 1, synced_hrdlog = 1, eqsl_sent = 1 \
              WHERE synced_qrz = 0 OR synced_cloudlog = 0 OR lotw_sent = 0 OR synced_wrl = 0 \
-                OR synced_hamqth = 0 OR synced_clublog = 0 OR synced_hrdlog = 0",
+                OR synced_hamqth = 0 OR synced_clublog = 0 OR synced_hrdlog = 0 OR eqsl_sent = 0",
             [],
         )?;
         Ok(n)
@@ -3203,6 +3267,7 @@ mod tests {
         db.mark_synced(fully_synced, "hamqth").unwrap();
         db.mark_synced(fully_synced, "clublog").unwrap();
         db.mark_synced(fully_synced, "hrdlog").unwrap();
+        db.mark_synced(fully_synced, "eqsl").unwrap();
         db.mark_lotw_sent(&[fully_synced]).unwrap();
 
         let partially_synced = db.insert_qso(&rec("K2DEF", "20260604", "121500", false)).unwrap();
@@ -3221,7 +3286,10 @@ mod tests {
             assert!(db.is_synced(id, "hamqth"), "id {id} should be hamqth-synced");
             assert!(db.is_synced(id, "clublog"), "id {id} should be clublog-synced");
             assert!(db.is_synced(id, "hrdlog"), "id {id} should be hrdlog-synced");
+            assert!(db.is_synced(id, "eqsl"), "id {id} should be eqsl-synced (upload side)");
         }
+        // The confirmation (download) side is never touched by this sweep.
+        assert!(!db.list_qsos(10, 0).iter().any(|q| q.eqsl_rcvd));
 
         // A second run finds nothing left to change.
         assert_eq!(db.mark_all_synced().unwrap(), 0);
@@ -4525,5 +4593,38 @@ mod tests {
             band: "40m".into(), mode: "FT4".into(), raw_mode: "MFSK".into(),
         }];
         assert_eq!(db.apply_lotw_confirmations(&qsls), 1);
+    }
+
+    #[test]
+    fn apply_eqsl_inbox_updates_only_a_matched_qso_and_never_inserts() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "1200".into(),
+            band: "40m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        let adif = "<eoh>\n\
+            <call:5>K1ABC<qso_date:8>20260101<time_on:4>1200<band:3>40m<mode:3>FT8<eor>\n\
+            <call:6>N0CALL<qso_date:8>20260101<time_on:4>1200<band:3>40m<mode:3>FT8<eor>\n";
+        let (confirmed, unmatched) = db.apply_eqsl_inbox(adif);
+        assert_eq!(confirmed, 1);
+        assert_eq!(unmatched, 1);
+        // The unmatched record must never have been inserted.
+        assert_eq!(db.count(), 1);
+        let row = &db.list_qsos(10, 0)[0];
+        assert!(row.eqsl_rcvd);
+        assert!(!row.eqsl_sent, "receiving a confirmation must not assert we uploaded our side");
+    }
+
+    #[test]
+    fn apply_eqsl_inbox_is_idempotent_on_a_rerun() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_qso(&QsoRecord {
+            call: "K1ABC".into(), qso_date: "20260101".into(), time_on: "1200".into(),
+            band: "40m".into(), mode: "FT8".into(), ..Default::default()
+        }).unwrap();
+        let adif = "<eoh>\n<call:5>K1ABC<qso_date:8>20260101<time_on:4>1200<band:3>40m<mode:3>FT8<eor>\n";
+        assert_eq!(db.apply_eqsl_inbox(adif), (1, 0));
+        // Already confirmed -- a second pass over the same file changes nothing.
+        assert_eq!(db.apply_eqsl_inbox(adif), (0, 0));
     }
 }

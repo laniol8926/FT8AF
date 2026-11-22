@@ -668,6 +668,22 @@ export const api = {
    *  above -- the real response format is unconfirmed). */
   hrdlogTestConnection: (callsign: string, code: string) =>
     invoke<ConnectionCheck>("hrdlog_test_connection", { callsign, code }),
+
+  /** Settings -> Logging & Awards -> eQSL. Count of logged QSOs not yet
+   *  uploaded (`eqsl_sent = 0`). */
+  eqslPendingUploadCount: () => invoke<number>("eqsl_pending_upload_count"),
+  /** Uploads every not-yet-synced QSO, one `ImportADIF.cfm` request per
+   *  QSO. See `eqsl.rs`'s doc comment -- eQSL's own API docs were
+   *  unreachable during development, so this needs live verification. */
+  eqslUploadPending: () => invoke<EqslUploadResult>("eqsl_upload_pending"),
+  /** Probes the upload credentials with a header-only ADIFData (nothing
+   *  is actually uploaded). Same low-confidence caveat as HRDLog.net. */
+  eqslTestConnection: (username: string, password: string) =>
+    invoke<ConnectionCheck>("eqsl_test_connection", { username, password }),
+  /** Downloads eQSL's inbox and merges it into the local log -- UPDATE
+   *  only, never inserts a new QSO for a record with no local match. */
+  eqslDownloadConfirmations: (fullRefresh: boolean) =>
+    invoke<EqslDownloadResult>("eqsl_download_confirmations", { fullRefresh }),
 };
 
 export interface LotwDownloadResult {
@@ -734,6 +750,19 @@ export interface ClublogUploadResult {
 export interface HrdlogUploadResult {
   uploaded: number;
   failed: number;
+  error: string | null;
+}
+
+export interface EqslUploadResult {
+  uploaded: number;
+  already_present: number;
+  failed: number;
+  error: string | null;
+}
+
+export interface EqslDownloadResult {
+  newly_confirmed: number;
+  unmatched: number;
   error: string | null;
 }
 
