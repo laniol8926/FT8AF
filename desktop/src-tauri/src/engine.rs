@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::adif_log_file;
 use crate::audio::{output, AudioInput, SlotAccumulator};
 use crate::bands;
+use crate::cloudlog;
 use crate::db::{Db, QsoRecord};
 use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
@@ -28,6 +29,7 @@ use crate::qso::{QsoEngine, QsoOutcome, QsoStatus};
 use crate::rig::{RigConfig, RigConnection};
 use crate::tx_protection;
 use crate::util;
+use crate::wrl;
 use crate::us_states;
 use crate::wf::{WfConfig, WfProcessor, WfWindow};
 
@@ -1393,6 +1395,26 @@ impl Engine {
             });
         }
 
+        // Same startup catch-up, for Cloudlog/Wavelog/Nextlog and World
+        // Radio League -- see the QRZ block above for the reasoning
+        // (never block engine construction, gate on a real credential so
+        // a station not using the feature doesn't even spawn the thread).
+        let cloudlog_api_key = engine.db.get_config(cloudlog::CONFIG_API_KEY).unwrap_or_default();
+        if engine.db.get_config(cloudlog::CONFIG_ENABLE).as_deref() == Some("1") && !cloudlog_api_key.trim().is_empty()
+        {
+            let db_for_upload = engine.db.clone();
+            std::thread::spawn(move || {
+                cloudlog::upload_pending(&db_for_upload);
+            });
+        }
+        let wrl_api_key = engine.db.get_config(wrl::CONFIG_API_KEY).unwrap_or_default();
+        if engine.db.get_config(wrl::CONFIG_ENABLE).as_deref() == Some("1") && !wrl_api_key.trim().is_empty() {
+            let db_for_upload = engine.db.clone();
+            std::thread::spawn(move || {
+                wrl::upload_pending(&db_for_upload);
+            });
+        }
+
         engine
     }
 
@@ -1841,6 +1863,27 @@ impl Engine {
                     let record_for_upload = record.clone();
                     std::thread::spawn(move || {
                         qrz::upload_one_logged(&db, &api_key, &record_for_upload);
+                    });
+                }
+                // Same auto-upload-on-log hook, for Cloudlog/Wavelog/Nextlog
+                // and World Radio League -- see `cloudlog.rs`/`wrl.rs`'s own
+                // top doc comments.
+                if self.db.get_config(cloudlog::CONFIG_ENABLE).as_deref() == Some("1") {
+                    let db = self.db.clone();
+                    let address = self.db.get_config(cloudlog::CONFIG_ADDRESS).unwrap_or_default();
+                    let api_key = self.db.get_config(cloudlog::CONFIG_API_KEY).unwrap_or_default();
+                    let station_id = self.db.get_config(cloudlog::CONFIG_STATION_ID).unwrap_or_default();
+                    let record_for_upload = record.clone();
+                    std::thread::spawn(move || {
+                        cloudlog::upload_one_logged(&db, &address, &api_key, &station_id, &record_for_upload);
+                    });
+                }
+                if self.db.get_config(wrl::CONFIG_ENABLE).as_deref() == Some("1") {
+                    let db = self.db.clone();
+                    let api_key = self.db.get_config(wrl::CONFIG_API_KEY).unwrap_or_default();
+                    let record_for_upload = record.clone();
+                    std::thread::spawn(move || {
+                        wrl::upload_one_logged(&db, &api_key, &record_for_upload);
                     });
                 }
                 self.emit(EngineEvent::QsoCompleted(record));

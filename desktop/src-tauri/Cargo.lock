@@ -1219,6 +1219,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "ureq",
+ "url",
  "windows 0.58.0",
  "zbus",
  "zip",

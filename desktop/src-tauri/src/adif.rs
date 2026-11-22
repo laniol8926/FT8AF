@@ -256,6 +256,10 @@ pub fn adif_record_to_qso(fields: &HashMap<String, String>) -> Option<QsoRecord>
         synced_qrz: flag("QRZCOM_QSO_UPLOAD_STATUS")
             || fields.get("APP_QRZLOG_LOGID").is_some_and(|v| !v.trim().is_empty()),
         tx_pwr: get("TX_PWR"),
+        // No ADIF tag carries this -- World Radio League has no import-side
+        // marker the way QRZ/Cloudlog do (see `db.rs`'s `merge_matched_qso`
+        // doc comment on the same point).
+        synced_wrl: false,
     })
 }
 

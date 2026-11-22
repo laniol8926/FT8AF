@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "../ipc";
-import type { UdpConfig } from "../ipc";
-import { SettingsRow, SettingsSection } from "./SettingsPrimitives";
+import type { StationProfile, UdpConfig } from "../ipc";
+import { ListPickerDialog, SettingsRow, SettingsSection } from "./SettingsPrimitives";
 
 /**
- * Logging & Awards, ported from Android's `LoggingSettings.kt`. Priority
- * order per the user: LoTW, QRZ, Cloudlog (World Radio League explicitly
- * not requested).
+ * Logging & Awards, ported from Android's `LoggingSettings.kt`. Built in
+ * priority order per the user, across two sessions: LoTW, QRZ first; then
+ * Cloudlog/Wavelog/Nextlog and World Radio League once the user asked for
+ * them too ("others use them" even though they personally don't).
  *
  * LoTW is real end-to-end: confirmations download (`lotw.rs`, matching
  * Android's own `LotwClient.kt`) plus a new, desktop-only upload path via
@@ -36,12 +37,24 @@ import { SettingsRow, SettingsSection } from "./SettingsPrimitives";
  * dialog below carries its own "Upload to QRZ now" instead of leaving the
  * feature with no manual trigger at all.
  *
- * Cloudlog and World Radio League stay disclosed disabled stubs (WRL
- * per the user's own explicit call -- "I do not use WRL we can activate
- * it later"). "Save SWL Decodes"/"Save SWL QSOs" (logging stations merely
- * *heard*, no completed two-way QSO) stay disclosed disabled stubs too --
- * needs a new SWL DB schema this project's own notes already defer to the
- * later "QSO logic replacement" effort.
+ * Cloudlog/Wavelog/Nextlog (`cloudlog.rs`) and World Radio League
+ * (`wrl.rs`) are both real end-to-end now too, requested directly by the
+ * user ("others use them" -- they don't personally, so neither could be
+ * live-verified against a real server/account the way QRZ/LoTW were).
+ * Each gets the same shape as QRZ: an enable toggle + address/key dialog,
+ * test connection, and a manual catch-up upload alongside the automatic
+ * upload-on-log. Cloudlog is **upload only** -- Android also has an
+ * optional two-way sync that downloads QSOs from the Wavelog logbook and
+ * auto-inserts the ones missing locally (issue #965 there); the user
+ * explicitly chose not to port that half, since it inserts new QSO rows
+ * from a remote server and they have no way to verify it live. WRL needs
+ * a destination logbook before it will accept any contact -- a brand-new
+ * account has none, so its dialog also offers to create one.
+ *
+ * "Save SWL Decodes"/"Save SWL QSOs" (logging stations merely *heard*, no
+ * completed two-way QSO) stay disclosed disabled stubs -- needs a new SWL
+ * DB schema this project's own notes already defer to the later "QSO
+ * logic replacement" effort.
  *
  * PSKReporter's row gates *uploading your own decoded spots* via
  * Android's IPFIX/UDP `PskReporterSender.kt` -- a different, unbuilt
@@ -97,6 +110,12 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   const [udpOpen, setUdpOpen] = useState(false);
   const [udp, setUdp] = useState<UdpConfig>({ enabled: false, host: "127.0.0.1", port: 2237, accept_requests: false });
   const [markAllOpen, setMarkAllOpen] = useState(false);
+  const [cloudlogOpen, setCloudlogOpen] = useState(false);
+  const [cloudlogEnabled, setCloudlogEnabled] = useState(false);
+  const [cloudlogAddress, setCloudlogAddress] = useState("");
+  const [wrlOpen, setWrlOpen] = useState(false);
+  const [wrlEnabled, setWrlEnabled] = useState(false);
+  const [wrlApiKeySet, setWrlApiKeySet] = useState(false);
 
   useEffect(() => {
     api.getConfig("lotwUsername").then((v) => setLotwUsername(v ?? ""));
@@ -113,6 +132,26 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   function saveQrzEnabled(next: boolean) {
     setQrzEnabled(next);
     api.setConfig("enableQRZ", next ? "1" : "0");
+  }
+
+  function refreshCloudlog() {
+    api.getConfig("enableCloudlog").then((v) => setCloudlogEnabled(v === "1"));
+    api.getConfig("cloudlogServerAddress").then((v) => setCloudlogAddress(v ?? ""));
+  }
+  useEffect(refreshCloudlog, [cloudlogOpen]);
+  function saveCloudlogEnabled(next: boolean) {
+    setCloudlogEnabled(next);
+    api.setConfig("enableCloudlog", next ? "1" : "0");
+  }
+
+  function refreshWrl() {
+    api.getConfig("enableWRL").then((v) => setWrlEnabled(v === "1"));
+    api.getConfig("wrlApiKey").then((v) => setWrlApiKeySet(!!v));
+  }
+  useEffect(refreshWrl, [wrlOpen]);
+  function saveWrlEnabled(next: boolean) {
+    setWrlEnabled(next);
+    api.setConfig("enableWRL", next ? "1" : "0");
   }
 
   useEffect(() => {
@@ -170,6 +209,8 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
       {qrzCredsOpen && <QrzCredsDialog onClose={() => setQrzCredsOpen(false)} />}
       {udpOpen && <UdpServerDialog udp={udp} onSave={applyUdp} onClose={() => setUdpOpen(false)} />}
       {markAllOpen && <MarkAllUploadedDialog onClose={() => setMarkAllOpen(false)} />}
+      {cloudlogOpen && <CloudlogDialog onClose={() => setCloudlogOpen(false)} />}
+      {wrlOpen && <WrlDialog callsign={callsign} onClose={() => setWrlOpen(false)} />}
       <SettingsSection title="Logging & Awards" />
       <div className="settings-category-list panel settings-category-card">
         <SettingsRow label="Save SWL Decodes" description="Log all decoded messages to the database" disabled />
@@ -200,11 +241,21 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
           value={qrzXmlUser && qrzXmlPassSet ? qrzXmlUser : "Not configured"}
           onClick={() => setQrzCredsOpen(true)}
         />
-        <SettingsRow label="Cloudlog" description="Upload QSOs to a Cloudlog/Wavelog/Nextlog server" disabled />
+        <SettingsRow
+          label="Cloudlog"
+          description="Upload QSOs to a Cloudlog/Wavelog/Nextlog server"
+          value={cloudlogAddress || "Not configured"}
+          toggle={cloudlogEnabled}
+          onToggleChange={saveCloudlogEnabled}
+          onClick={() => setCloudlogOpen(true)}
+        />
         <SettingsRow
           label="World Radio League"
           description="Auto-upload QSOs to your World Radio League logbook (requires a Developer API key)"
-          disabled
+          value={wrlApiKeySet ? "Configured" : "Not configured"}
+          toggle={wrlEnabled}
+          onToggleChange={saveWrlEnabled}
+          onClick={() => setWrlOpen(true)}
         />
         <SettingsRow
           label="LoTW"
@@ -707,4 +758,416 @@ function QrzCredsDialog({ onClose }: { onClose: () => void }) {
       </div>
     </div>
   );
+}
+
+/**
+ * Cloudlog/Wavelog/Nextlog settings -- server address, API key, Station ID
+ * (`station_profile_id`, a whole number; Android's own real-world lesson,
+ * see `cloudlog.rs`'s doc comment, is that a callsign/name there makes
+ * every upload fail). Test Connection saves the typed values first (the
+ * Rust side reads config directly, matching `QrzLogbookDialog`'s own
+ * restore-on-cancel reasoning) and, on success, fetches station profiles
+ * for the picker below.
+ */
+function CloudlogDialog({ onClose }: { onClose: () => void }) {
+  const [initial, setInitial] = useState<{ address: string; apiKey: string; stationId: string } | null>(null);
+  const [address, setAddress] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [stationId, setStationId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
+  const [stations, setStations] = useState<StationProfile[]>([]);
+  const [showStationPicker, setShowStationPicker] = useState(false);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    Promise.all([
+      api.getConfig("cloudlogServerAddress"),
+      api.getConfig("cloudlogApiKey"),
+      api.getConfig("cloudlogStationID"),
+    ]).then(([a, k, s]) => {
+      setInitial({ address: a ?? "", apiKey: k ?? "", stationId: s ?? "" });
+      setAddress(a ?? "");
+      setApiKey(k ?? "");
+      setStationId(s ?? "");
+      if ((a ?? "").trim() && (k ?? "").trim()) {
+        api.cloudlogFetchStations(a ?? "", k ?? "").then(setStations);
+      }
+    });
+    api.cloudlogPendingUploadCount().then(setPendingCount);
+  }, []);
+
+  const stationIdValid = stationId.trim() === "" || /^[0-9]+$/.test(stationId.trim());
+
+  function dismiss() {
+    if (initial) {
+      api.setConfig("cloudlogServerAddress", initial.address);
+      api.setConfig("cloudlogApiKey", initial.apiKey);
+      api.setConfig("cloudlogStationID", initial.stationId);
+    }
+    onClose();
+  }
+
+  async function test() {
+    await Promise.all([
+      api.setConfig("cloudlogServerAddress", address.trim()),
+      api.setConfig("cloudlogApiKey", apiKey.trim()),
+      api.setConfig("cloudlogStationID", stationId.trim()),
+    ]);
+    setBusy(true);
+    setTestResult(null);
+    const check = await api.cloudlogTestConnection();
+    setTestResult({ text: check.ok ? "Pass" : check.detail || "Fail", ok: check.ok });
+    if (check.ok) {
+      const list = await api.cloudlogFetchStations(address.trim(), apiKey.trim());
+      setStations(list);
+    }
+    setBusy(false);
+  }
+
+  async function save() {
+    await Promise.all([
+      api.setConfig("cloudlogServerAddress", address.trim()),
+      api.setConfig("cloudlogApiKey", apiKey.trim()),
+      api.setConfig("cloudlogStationID", stationId.trim()),
+    ]);
+    onClose();
+  }
+
+  async function upload() {
+    setBusy(true);
+    setUploadStatus(null);
+    const result = await api.cloudlogUploadPending();
+    setBusy(false);
+    api.cloudlogPendingUploadCount().then(setPendingCount);
+    if (result.error) {
+      setUploadStatus({
+        text: `${result.uploaded} uploaded, ${result.already_present} already there, ${result.failed} failed -- ${result.error}`,
+        ok: result.uploaded + result.already_present > 0,
+      });
+    } else {
+      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.already_present} already there`, ok: true });
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={dismiss}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>Cloudlog / Wavelog / Nextlog</h3>
+          <button className="modal-close" aria-label="Close" onClick={dismiss}>✕</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          Your self-hosted (or hosted) logbook server's address and API key, from its own
+          Settings/Integrations page. Upload only -- does not download or import QSOs.
+        </div>
+        <div className="field">
+          <label>Server address</label>
+          <input
+            value={address}
+            onChange={(e) => {
+              setAddress(e.target.value);
+              setTestResult(null);
+              setStations([]);
+            }}
+            placeholder="https://log.example.com/"
+            autoComplete="off"
+          />
+        </div>
+        <div className="field">
+          <label>API key</label>
+          <input
+            value={apiKey}
+            onChange={(e) => {
+              setApiKey(e.target.value);
+              setTestResult(null);
+              setStations([]);
+            }}
+            placeholder="Your Cloudlog/Wavelog API key"
+            autoComplete="off"
+          />
+        </div>
+        <div className="field">
+          <label>Station ID</label>
+          <input
+            value={stationId}
+            onChange={(e) => setStationId(e.target.value.replace(/[^0-9]/g, ""))}
+            placeholder="A whole number, e.g. 1"
+            inputMode="numeric"
+          />
+          {!stationIdValid && (
+            <div className="muted" style={{ fontSize: 12, color: "var(--tx)" }}>
+              Must be a plain number (your station location's id, not a callsign).
+            </div>
+          )}
+          {stations.length > 0 && (
+            <button style={{ marginTop: 6 }} onClick={() => setShowStationPicker(true)}>
+              Choose from {stations.length} station{stations.length === 1 ? "" : "s"}…
+            </button>
+          )}
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+          <button disabled={busy} onClick={test}>{busy ? "Working…" : "Test Connection"}</button>
+          {testResult && (
+            <span style={{ fontSize: 13, fontWeight: 600, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
+              {testResult.text}
+            </span>
+          )}
+        </div>
+
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
+          </div>
+          <button disabled={busy || !pendingCount} onClick={upload}>
+            {busy ? "Uploading…" : "Upload now"}
+          </button>
+          {uploadStatus && (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
+              {uploadStatus.text}
+            </div>
+          )}
+        </div>
+
+        <div className="actions">
+          <button onClick={dismiss}>Cancel</button>
+          <button className="primary" disabled={!stationIdValid} onClick={save}>Save</button>
+        </div>
+      </div>
+      {showStationPicker && (
+        <ListPickerDialog
+          title="Station profile"
+          options={stations.map((s) => ({ value: s.station_id, label: stationLabel(s) }))}
+          value={stationId}
+          onSelect={(v) => {
+            setStationId(v);
+            setShowStationPicker(false);
+          }}
+          onCancel={() => setShowStationPicker(false)}
+          searchable
+        />
+      )}
+    </div>
+  );
+}
+
+function stationLabel(s: StationProfile): string {
+  let out = s.station_id;
+  if (s.profile_name) out += ` - ${s.profile_name}`;
+  if (s.callsign) out += ` (${s.callsign}${s.gridsquare ? `, ${s.gridsquare}` : ""})`;
+  return out;
+}
+
+/**
+ * World Radio League settings -- a Developer API key, no server address
+ * (WRL is a fixed cloud service). A fresh account has no logbook at all,
+ * so a lone "Create logbook" button appears once the key is entered and
+ * the account is confirmed to have none -- matches Android's own
+ * `WrlSettingsDialog`.
+ */
+function WrlDialog({ callsign, onClose }: { callsign: string; onClose: () => void }) {
+  const [initial, setInitial] = useState<{ apiKey: string; logbookId: string } | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [logbookId, setLogbookId] = useState("");
+  const [logbooks, setLogbooks] = useState<StationProfile[] | null>(null);
+  const [fetchingLogbooks, setFetchingLogbooks] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [showLogbookPicker, setShowLogbookPicker] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    Promise.all([api.getConfig("wrlApiKey"), api.getConfig("wrlLogbookId")]).then(([k, l]) => {
+      setInitial({ apiKey: k ?? "", logbookId: l ?? "" });
+      setApiKey(k ?? "");
+      setLogbookId(l ?? "");
+      if ((k ?? "").trim()) {
+        setFetchingLogbooks(true);
+        api.wrlFetchLogbooks(k ?? "").then((books) => {
+          setLogbooks(books);
+          if (books && books.length === 1 && !(l ?? "").trim()) setLogbookId(books[0].station_id);
+          setFetchingLogbooks(false);
+        });
+      }
+    });
+    api.wrlPendingUploadCount().then(setPendingCount);
+  }, []);
+
+  function dismiss() {
+    if (initial) {
+      api.setConfig("wrlApiKey", initial.apiKey);
+      api.setConfig("wrlLogbookId", initial.logbookId);
+    }
+    onClose();
+  }
+
+  async function test() {
+    setBusy(true);
+    setTestResult(null);
+    const key = apiKey.trim();
+    if (key) {
+      setFetchingLogbooks(true);
+      const books = await api.wrlFetchLogbooks(key);
+      setLogbooks(books);
+      let selected = logbookId;
+      if (books && books.length === 1 && !selected.trim()) {
+        selected = books[0].station_id;
+        setLogbookId(selected);
+      }
+      setFetchingLogbooks(false);
+      const check = await api.wrlTestConnection(key, selected);
+      setTestResult({ text: check.ok ? "Pass" : check.detail || "Fail", ok: check.ok });
+    } else {
+      setTestResult({ text: "Enter your World Radio League API key first.", ok: false });
+    }
+    setBusy(false);
+  }
+
+  async function createLogbook() {
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const created = await api.wrlCreateLogbook(apiKey.trim(), "FT8AF", callsign || "");
+      setLogbooks([created]);
+      setLogbookId(created.station_id);
+      const check = await api.wrlTestConnection(apiKey.trim(), created.station_id);
+      setTestResult({ text: check.ok ? "Pass" : check.detail || "Fail", ok: check.ok });
+    } catch (e) {
+      setCreateError(String(e));
+    }
+    setCreating(false);
+  }
+
+  async function save() {
+    await Promise.all([api.setConfig("wrlApiKey", apiKey.trim()), api.setConfig("wrlLogbookId", logbookId.trim())]);
+    onClose();
+  }
+
+  async function upload() {
+    setBusy(true);
+    setUploadStatus(null);
+    const result = await api.wrlUploadPending();
+    setBusy(false);
+    api.wrlPendingUploadCount().then(setPendingCount);
+    if (result.error) {
+      setUploadStatus({
+        text: `${result.uploaded} uploaded, ${result.failed} failed -- ${result.error}`,
+        ok: result.uploaded > 0,
+      });
+    } else {
+      setUploadStatus({ text: `${result.uploaded} uploaded`, ok: true });
+    }
+  }
+
+  const noLogbooksYet = apiKey.trim() !== "" && logbooks !== null && logbooks.length === 0;
+
+  return (
+    <div className="modal-overlay" onClick={dismiss}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>World Radio League</h3>
+          <button className="modal-close" aria-label="Close" onClick={dismiss}>✕</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          Developer API key from World Radio League -&gt; Integrations -&gt; Developer API.
+        </div>
+        <div className="field">
+          <label>API key</label>
+          <input
+            value={apiKey}
+            onChange={(e) => {
+              setApiKey(e.target.value);
+              setTestResult(null);
+              setLogbooks(null);
+              setCreateError(null);
+            }}
+            placeholder="Your World Radio League Developer API key"
+            autoComplete="off"
+          />
+        </div>
+        {fetchingLogbooks ? (
+          <div className="muted" style={{ fontSize: 13 }}>Loading logbooks…</div>
+        ) : (
+          <div className="field">
+            <label>Logbook</label>
+            <button
+              disabled={!logbooks || logbooks.length === 0}
+              onClick={() => setShowLogbookPicker(true)}
+            >
+              {logbookLabel(logbooks ?? [], logbookId)}
+            </button>
+          </div>
+        )}
+        {noLogbooksYet && (
+          <div className="col" style={{ gap: 6 }}>
+            <div className="muted" style={{ fontSize: 12 }}>
+              Your World Radio League account has no logbook yet -- WRL won't accept a
+              contact until it has one.
+            </div>
+            <div className="row" style={{ gap: 8, alignItems: "center" }}>
+              <button disabled={creating} onClick={createLogbook}>
+                {creating ? "Creating…" : "Create \"FT8AF\" logbook"}
+              </button>
+            </div>
+            {createError && <div className="muted" style={{ fontSize: 12, color: "var(--tx)" }}>{createError}</div>}
+          </div>
+        )}
+        <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+          <button disabled={busy} onClick={test}>{busy ? "Working…" : "Test Connection"}</button>
+          {testResult && (
+            <span style={{ fontSize: 13, fontWeight: 600, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
+              {testResult.text}
+            </span>
+          )}
+        </div>
+
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
+          </div>
+          <button disabled={busy || !pendingCount} onClick={upload}>
+            {busy ? "Uploading…" : "Upload now"}
+          </button>
+          {uploadStatus && (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
+              {uploadStatus.text}
+            </div>
+          )}
+        </div>
+
+        <div className="actions">
+          <button onClick={dismiss}>Cancel</button>
+          <button className="primary" onClick={save}>Save</button>
+        </div>
+      </div>
+      {showLogbookPicker && logbooks && logbooks.length > 0 && (
+        <ListPickerDialog
+          title="Logbook"
+          options={logbooks.map((b) => ({ value: b.station_id, label: logbookEntryLabel(b) }))}
+          value={logbookId}
+          onSelect={(v) => {
+            setLogbookId(v);
+            setTestResult(null);
+            setShowLogbookPicker(false);
+          }}
+          onCancel={() => setShowLogbookPicker(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function logbookEntryLabel(p: StationProfile): string {
+  const base = p.profile_name || p.station_id;
+  return p.callsign ? `${base} (${p.callsign})` : base;
+}
+
+function logbookLabel(books: StationProfile[], selectedId: string): string {
+  if (!selectedId.trim()) return "Account default";
+  const found = books.find((b) => b.station_id === selectedId);
+  return found ? logbookEntryLabel(found) : selectedId;
 }

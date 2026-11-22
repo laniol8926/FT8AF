@@ -591,6 +591,43 @@ export const api = {
    *  (never rejects -- unlike the Logbook check, this mirrors Android's
    *  own `testConnection()` returning a string either way). */
   qrzTestXmlConnection: () => invoke<string>("qrz_test_xml_connection"),
+
+  /** Settings -> Logging & Awards -> Cloudlog/Wavelog/Nextlog. Upload only
+   *  -- see `cloudlog.rs`'s top doc comment for why the two-way "download
+   *  QSOs from Wavelog" sync Android also has isn't ported. Count of
+   *  logged QSOs not yet uploaded (`synced_cloudlog = 0`). */
+  cloudlogPendingUploadCount: () => invoke<number>("cloudlog_pending_upload_count"),
+  /** Uploads every not-yet-synced QSO, one `api/qso` POST per QSO. Stops
+   *  early on a Station ID / API key rejection (every remaining row would
+   *  fail the same way) -- see `cloudlog.rs`'s doc comment. */
+  cloudlogUploadPending: () => invoke<CloudlogUploadResult>("cloudlog_upload_pending"),
+  /** Verifies the configured address + API key via `api/auth/[key]`. */
+  cloudlogTestConnection: () => invoke<ConnectionCheck>("cloudlog_test_connection"),
+  /** Station picker for the Settings dialog -- takes the typed (not yet
+   *  saved) address/key so Test Connection can populate it before Save.
+   *  Empty on any failure (network, bad JSON, 404), never rejects. */
+  cloudlogFetchStations: (address: string, apiKey: string) =>
+    invoke<StationProfile[]>("cloudlog_fetch_stations", { address, apiKey }),
+
+  /** Settings -> Logging & Awards -> World Radio League. Count of logged
+   *  QSOs not yet uploaded (`synced_wrl = 0`). */
+  wrlPendingUploadCount: () => invoke<number>("wrl_pending_upload_count"),
+  /** Uploads every not-yet-synced QSO, one `POST /v1/contacts` call per
+   *  QSO. Stops early on a batch-fatal rejection (auth, no logbook, rate
+   *  limit, 5xx) -- see `wrl.rs`'s doc comment. */
+  wrlUploadPending: () => invoke<WrlUploadResult>("wrl_upload_pending"),
+  /** `GET /v1/me` -- confirms the key and, if `logbookId` is set, that it's
+   *  still a real, unlocked logbook on the account. */
+  wrlTestConnection: (apiKey: string, logbookId: string) =>
+    invoke<ConnectionCheck>("wrl_test_connection", { apiKey, logbookId }),
+  /** The account's logbooks, or `null` when the list couldn't be read (no
+   *  key, bad key, offline) -- distinct from a genuinely empty account
+   *  (`[]`), which offers to create one. */
+  wrlFetchLogbooks: (apiKey: string) => invoke<StationProfile[] | null>("wrl_fetch_logbooks", { apiKey }),
+  /** Creates a new World Radio League logbook -- a fresh account starts
+   *  with none, and WRL refuses every contact until it has one. */
+  wrlCreateLogbook: (apiKey: string, name: string, callsign: string) =>
+    invoke<StationProfile>("wrl_create_logbook", { apiKey, name, callsign }),
 };
 
 export interface LotwDownloadResult {
@@ -607,6 +644,35 @@ export interface LotwUploadResult {
 export interface QrzUploadResult {
   uploaded: number;
   duplicates: number;
+  failed: number;
+  error: string | null;
+}
+
+/** `cloudlog::StationProfile` / `wrl::StationProfile` -- a station/logbook
+ *  profile from either service's own picker list (same shape on both). */
+export interface StationProfile {
+  station_id: string;
+  profile_name: string;
+  callsign: string;
+  gridsquare: string;
+}
+
+/** `cloudlog::ConnectionCheck` / `wrl::ConnectionCheck` -- pass/fail plus a
+ *  one-line reason (null when `ok`). */
+export interface ConnectionCheck {
+  ok: boolean;
+  detail: string | null;
+}
+
+export interface CloudlogUploadResult {
+  uploaded: number;
+  already_present: number;
+  failed: number;
+  error: string | null;
+}
+
+export interface WrlUploadResult {
+  uploaded: number;
   failed: number;
   error: string | null;
 }

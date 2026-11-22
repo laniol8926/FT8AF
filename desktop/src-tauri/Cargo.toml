@@ -38,6 +38,11 @@ serialport = "4"
 # (pure Rust, no system OpenSSL dependency, which matters on the ARM SBC
 # this app also targets) rather than native-tls.
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Manual redirect-hop resolution for cloudlog.rs's POST requests (ureq won't
+# auto-follow a 307/308 on a POST, and auto-follows 301/302/303 by dropping
+# the body -- see that module's top doc comment). Already resolved as a
+# transitive dependency via ureq itself, same reasoning as quick-xml below.
+url = "2"
 # PSK Reporter spot XML parsing. Already resolved as a transitive
 # dependency (via `plist`, pulled in by Tauri's own macOS bundling
 # tooling) -- this promotes the exact same locked version, no new

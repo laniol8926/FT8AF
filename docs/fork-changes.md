@@ -722,6 +722,57 @@ for the Hamlib version workaround needed there.
   - A full-history pull on a large log can legitimately take minutes to
     generate server-side, so `full_refresh` now gets a 600s read timeout
     instead of the usual 120s.
+- **New: Cloudlog/Wavelog/Nextlog and World Radio League logbook upload**
+  (Settings -> Logging & Awards), requested directly by the user even
+  though they don't personally use either service ("others use them") --
+  neither could be live-verified against a real server/account the way
+  QRZ/LoTW were, so this is confirmed correct against Android's own source
+  and unit-tested, not confirmed against a live account.
+  - **Cloudlog/Wavelog/Nextlog** (`cloudlog.rs`), ported from
+    `CloudlogEndpoint.java`/`ThirdPartyService.java`'s Cloudlog section/
+    `CloudlogFailureHint.kt`: same shape as QRZ -- an enable toggle +
+    address/API key/Station ID dialog with a station picker, Test
+    Connection (`api/auth/[key]`), a manual catch-up upload, and
+    auto-upload the moment a QSO is logged. Self-hosted installs vary a
+    lot (no scheme typed, no `mod_rewrite`, basic-auth-in-the-URL), so the
+    address-normalizing/candidate-URL-walking logic is ported faithfully,
+    including remembering which URL shape (plain vs `index.php/`) last
+    answered so later uploads skip the 404 round-trip.
+    **Upload only** -- Android also has an optional two-way sync that
+    downloads QSOs from the Wavelog logbook and auto-inserts the ones
+    missing locally (issue #965 there, `CloudlogRemoteLog.java`). The user
+    explicitly chose not to port that half (a materially bigger, riskier
+    feature -- it inserts new QSO rows from a remote server -- that they
+    have no way to verify live), via an explicit scope question. A Station
+    ID / API key rejection stops the rest of a catch-up batch (every
+    remaining row would fail the same way); any other failure just moves
+    on to the next row.
+    **Real bug fixed before this ever shipped, found while porting**:
+    `ureq`'s own redirect handling would have mishandled exactly the
+    308-on-POST Wavelog/Nextlog is documented to send when the configured
+    address has no trailing slash (silently either dropping the POST body
+    by converting to GET, or returning the redirect page's body as if it
+    were a real API response). Redirects are now followed manually
+    (same-host only, never downgrading https to http -- the request can
+    carry the API key), matching Android's own `sendPostRequest` exactly.
+  - **World Radio League** (`wrl.rs`), ported from `WrlApi.java` (issue
+    #800 there): a Developer API key (no server address -- WRL is a fixed
+    cloud service), a logbook picker, Test Connection (`GET /v1/me`), a
+    manual catch-up upload, and auto-upload on log. A fresh WRL account
+    has no logbook at all and refuses every contact until it has one, so
+    the dialog also offers to create one. A 429 with a short `Retry-After`
+    is waited out and retried in-process (a catch-up upload of a real
+    backlog runs straight into WRL's 60-writes/minute window); an
+    auth/quota/5xx rejection stops the rest of a catch-up batch.
+    **Disclosed gap**: WRL's POTA/SOTA/WWFF/IOTA activity fields
+    (`myActivities`/`theirActivities`) have no data source on desktop --
+    there is no POTA/SIG tracking on a logged QSO anywhere yet (same gap
+    `logged_state.rs` already flags). The field-building logic is ported
+    in full and unit-tested for when that data exists, but nothing is ever
+    actually sent today.
+  - `db.rs` v10 migration adds `synced_wrl` (Cloudlog/QRZ already had
+    `synced_cloudlog`/`synced_qrz`); "Mark QSOs as Uploaded to All Logs"
+    (above) now also flips `synced_wrl` in its sweep.
 
 ## Smaller fixes
 

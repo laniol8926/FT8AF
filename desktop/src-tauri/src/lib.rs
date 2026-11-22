@@ -14,6 +14,7 @@ pub mod callsign;
 // they exist here purely so `cargo test` runs their unit tests.
 #[allow(dead_code)]
 mod build_support;
+pub mod cloudlog;
 pub mod db;
 pub mod dsp;
 pub mod dxcc;
@@ -39,3 +40,4 @@ pub mod us_states;
 pub mod util;
 pub mod wf;
 pub mod wpx_prefix;
+pub mod wrl;

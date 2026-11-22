@@ -9,6 +9,7 @@ use tauri::{Emitter, State};
 
 use ft8af::audio::{self, AudioDevice};
 use ft8af::bands::{self, BandEntry, CustomBand};
+use ft8af::cloudlog::{self, CloudlogUploadResult, ConnectionCheck as CloudlogConnectionCheck, StationProfile};
 use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, LogStats, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
 use ft8af::fcc_grid::{self, FccSeedSummary};
@@ -20,6 +21,7 @@ use ft8af::qrz::{self, QrzUploadResult};
 use ft8af::rig::{self, HamlibRig, RigConfig, SerialPortInfo};
 use ft8af::settings_backup::{self, ParsedBackup};
 use ft8af::wf::WfConfig;
+use ft8af::wrl::{self, ConnectionCheck as WrlConnectionCheck, WrlUploadResult};
 
 struct AppState {
     engine: EngineHandle,
@@ -910,14 +912,69 @@ fn qrz_test_xml_connection(state: State<AppState>) -> String {
     qrz::QrzXmlClient::new().test_connection(&username, &password)
 }
 
+// --- Cloudlog / Wavelog / Nextlog --------------------------------------
+
+#[tauri::command]
+fn cloudlog_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_cloudlog_upload().len() as i64
+}
+
+#[tauri::command]
+fn cloudlog_upload_pending(state: State<AppState>) -> CloudlogUploadResult {
+    cloudlog::upload_pending(&state.db)
+}
+
+#[tauri::command]
+fn cloudlog_test_connection(state: State<AppState>) -> CloudlogConnectionCheck {
+    cloudlog::check_connection(&state.db)
+}
+
+/// Station picker for the Settings dialog -- takes the typed (not yet
+/// saved) address/key so Test Connection can populate it before Save.
+#[tauri::command]
+fn cloudlog_fetch_stations(address: String, api_key: String) -> Vec<StationProfile> {
+    cloudlog::fetch_stations(&address, &api_key)
+}
+
+// --- World Radio League -------------------------------------------------
+
+#[tauri::command]
+fn wrl_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_wrl_upload().len() as i64
+}
+
+#[tauri::command]
+fn wrl_upload_pending(state: State<AppState>) -> WrlUploadResult {
+    wrl::upload_pending(&state.db)
+}
+
+#[tauri::command]
+fn wrl_test_connection(api_key: String, logbook_id: String) -> WrlConnectionCheck {
+    wrl::check_connection(&api_key, &logbook_id)
+}
+
+#[tauri::command]
+fn wrl_fetch_logbooks(api_key: String) -> Option<Vec<StationProfile>> {
+    wrl::fetch_logbooks_or_none(&api_key)
+}
+
+/// Creates a new World Radio League logbook (a fresh account starts with
+/// none, and WRL refuses every contact until it has one) -- `callsign`
+/// seeds its default callsign, matching Android's own `GeneralVariables.
+/// myCallsign` pass-through.
+#[tauri::command]
+fn wrl_create_logbook(api_key: String, name: String, callsign: String) -> Result<StationProfile, String> {
+    wrl::create_logbook(&api_key, &name, Some(&callsign))
+}
+
 // --- Logging bulk actions -----------------------------------------------
 
 /// "Mark QSOs as Uploaded to All Logs" (Settings -> Logging & Awards): stops
 /// this app from treating every currently-pending QSO as still needing an
 /// upload, without actually uploading anything -- for a station who already
-/// got their log into QRZ/Cloudlog/LoTW some other way (e.g. an ADIF import
-/// done directly on that service's own website). Returns how many QSOs were
-/// changed, for the confirmation UI to report back.
+/// got their log into QRZ/Cloudlog/LoTW/World Radio League some other way
+/// (e.g. an ADIF import done directly on that service's own website).
+/// Returns how many QSOs were changed, for the confirmation UI to report back.
 #[tauri::command]
 fn mark_all_qsos_uploaded(state: State<AppState>) -> Result<i64, String> {
     state.db.mark_all_synced().map(|n| n as i64).map_err(|e| e.to_string())
@@ -1300,9 +1357,18 @@ fn main() {
             lotw_upload_pending,
             qrz_pending_upload_count,
             qrz_upload_pending,
-            mark_all_qsos_uploaded,
             qrz_test_logbook_connection,
             qrz_test_xml_connection,
+            cloudlog_pending_upload_count,
+            cloudlog_upload_pending,
+            cloudlog_test_connection,
+            cloudlog_fetch_stations,
+            wrl_pending_upload_count,
+            wrl_upload_pending,
+            wrl_test_connection,
+            wrl_fetch_logbooks,
+            wrl_create_logbook,
+            mark_all_qsos_uploaded,
         ])
         .run(tauri::generate_context!())
         .expect("error running FT8AF");
