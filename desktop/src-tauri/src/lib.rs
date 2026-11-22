@@ -14,12 +14,15 @@ pub mod callsign;
 // they exist here purely so `cargo test` runs their unit tests.
 #[allow(dead_code)]
 mod build_support;
+pub mod clublog;
 pub mod cloudlog;
 pub mod db;
 pub mod dsp;
 pub mod dxcc;
 pub mod engine;
 pub mod fcc_grid;
+pub mod hamqth;
+pub mod hrdlog;
 pub mod logged_state;
 pub mod lotw;
 pub mod map_tiles;

@@ -116,6 +116,15 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   const [wrlOpen, setWrlOpen] = useState(false);
   const [wrlEnabled, setWrlEnabled] = useState(false);
   const [wrlApiKeySet, setWrlApiKeySet] = useState(false);
+  const [hamqthOpen, setHamqthOpen] = useState(false);
+  const [hamqthEnabled, setHamqthEnabled] = useState(false);
+  const [hamqthPasswordSet, setHamqthPasswordSet] = useState(false);
+  const [clublogOpen, setClublogOpen] = useState(false);
+  const [clublogEnabled, setClublogEnabled] = useState(false);
+  const [clublogTokenSet, setClublogTokenSet] = useState(false);
+  const [hrdlogOpen, setHrdlogOpen] = useState(false);
+  const [hrdlogEnabled, setHrdlogEnabled] = useState(false);
+  const [hrdlogCodeSet, setHrdlogCodeSet] = useState(false);
 
   useEffect(() => {
     api.getConfig("lotwUsername").then((v) => setLotwUsername(v ?? ""));
@@ -152,6 +161,36 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   function saveWrlEnabled(next: boolean) {
     setWrlEnabled(next);
     api.setConfig("enableWRL", next ? "1" : "0");
+  }
+
+  function refreshHamqth() {
+    api.getConfig("enableHamQTH").then((v) => setHamqthEnabled(v === "1"));
+    api.getConfig("hamqthPassword").then((v) => setHamqthPasswordSet(!!v));
+  }
+  useEffect(refreshHamqth, [hamqthOpen]);
+  function saveHamqthEnabled(next: boolean) {
+    setHamqthEnabled(next);
+    api.setConfig("enableHamQTH", next ? "1" : "0");
+  }
+
+  function refreshClublog() {
+    api.getConfig("enableClublog").then((v) => setClublogEnabled(v === "1"));
+    api.getConfig("clublogToken").then((v) => setClublogTokenSet(!!v));
+  }
+  useEffect(refreshClublog, [clublogOpen]);
+  function saveClublogEnabled(next: boolean) {
+    setClublogEnabled(next);
+    api.setConfig("enableClublog", next ? "1" : "0");
+  }
+
+  function refreshHrdlog() {
+    api.getConfig("enableHRDLog").then((v) => setHrdlogEnabled(v === "1"));
+    api.getConfig("hrdlogCode").then((v) => setHrdlogCodeSet(!!v));
+  }
+  useEffect(refreshHrdlog, [hrdlogOpen]);
+  function saveHrdlogEnabled(next: boolean) {
+    setHrdlogEnabled(next);
+    api.setConfig("enableHRDLog", next ? "1" : "0");
   }
 
   useEffect(() => {
@@ -211,6 +250,9 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
       {markAllOpen && <MarkAllUploadedDialog onClose={() => setMarkAllOpen(false)} />}
       {cloudlogOpen && <CloudlogDialog onClose={() => setCloudlogOpen(false)} />}
       {wrlOpen && <WrlDialog callsign={callsign} onClose={() => setWrlOpen(false)} />}
+      {hamqthOpen && <HamqthDialog callsign={callsign} onClose={() => setHamqthOpen(false)} />}
+      {clublogOpen && <ClublogDialog onClose={() => setClublogOpen(false)} />}
+      {hrdlogOpen && <HrdlogDialog callsign={callsign} onClose={() => setHrdlogOpen(false)} />}
       <SettingsSection title="Logging & Awards" />
       <div className="settings-category-list panel settings-category-card">
         <SettingsRow label="Save SWL Decodes" description="Log all decoded messages to the database" disabled />
@@ -258,6 +300,30 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
           onClick={() => setWrlOpen(true)}
         />
         <SettingsRow
+          label="HamQTH"
+          description="Auto-upload QSOs to your HamQTH logbook"
+          value={hamqthPasswordSet ? "Configured" : "Not configured"}
+          toggle={hamqthEnabled}
+          onToggleChange={saveHamqthEnabled}
+          onClick={() => setHamqthOpen(true)}
+        />
+        <SettingsRow
+          label="Club Log"
+          description="Auto-upload QSOs to Club Log (not to be confused with Cloudlog above)"
+          value={clublogTokenSet ? "Configured" : "Not configured"}
+          toggle={clublogEnabled}
+          onToggleChange={saveClublogEnabled}
+          onClick={() => setClublogOpen(true)}
+        />
+        <SettingsRow
+          label="HRDLog.net"
+          description="Auto-upload QSOs to HRDLog.net"
+          value={hrdlogCodeSet ? "Configured" : "Not configured"}
+          toggle={hrdlogEnabled}
+          onToggleChange={saveHrdlogEnabled}
+          onClick={() => setHrdlogOpen(true)}
+        />
+        <SettingsRow
           label="LoTW"
           description="Download QSL confirmations and upload your log via TQSL"
           value={lotwUsername || "Not configured"}
@@ -265,7 +331,7 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
         />
         <SettingsRow
           label="Mark QSOs as Uploaded to All Logs"
-          description="Already got your log into QRZ, Cloudlog, or LoTW some other way (e.g. an ADIF import done directly on that service's website)? Use this so this app stops trying to upload those same QSOs again."
+          description="Already got your log into QRZ, Cloudlog, LoTW, World Radio League, HamQTH, or Club Log some other way (e.g. an ADIF import done directly on that service's website)? Use this so this app stops trying to upload those same QSOs again."
           onClick={() => setMarkAllOpen(true)}
         />
       </div>
@@ -493,8 +559,9 @@ function MarkAllUploadedDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
           Marks every QSO this app thinks is still pending upload as already
-          uploaded to QRZ, Cloudlog, and LoTW -- without actually contacting
-          any of them. Use this if you've uploaded your log to one of these
+          uploaded to QRZ, Cloudlog, LoTW, World Radio League, HamQTH, and
+          Club Log -- without actually contacting any of them. Use this if
+          you've uploaded your log to one of these
           another way, such as importing an ADIF file directly on that
           service's own website; this app has no way to detect that on its
           own, so it would otherwise keep trying to upload those same QSOs
@@ -1170,4 +1237,338 @@ function logbookLabel(books: StationProfile[], selectedId: string): string {
   if (!selectedId.trim()) return "Account default";
   const found = books.find((b) => b.station_id === selectedId);
   return found ? logbookEntryLabel(found) : selectedId;
+}
+
+/**
+ * HamQTH settings -- password only (HamQTH's own login identifier *is*
+ * the operator's callsign, already known from Settings -> Station, so
+ * it's shown read-only here rather than asked for again). Test Connection
+ * logs in fresh via HamQTH's v2 API; see `hamqth.rs`'s top doc comment.
+ */
+function HamqthDialog({ callsign, onClose }: { callsign: string; onClose: () => void }) {
+  const [initialPassword, setInitialPassword] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    api.getConfig("hamqthPassword").then((v) => {
+      setInitialPassword(v ?? "");
+      setPassword(v ?? "");
+    });
+    api.hamqthPendingUploadCount().then(setPendingCount);
+  }, []);
+
+  function dismiss() {
+    if (initialPassword !== null) api.setConfig("hamqthPassword", initialPassword);
+    onClose();
+  }
+
+  async function test() {
+    await api.setConfig("hamqthPassword", password);
+    setBusy(true);
+    setTestResult(null);
+    const check = await api.hamqthTestConnection(callsign, password);
+    setTestResult({ text: check.ok ? "Pass" : check.detail || "Fail", ok: check.ok });
+    setBusy(false);
+  }
+
+  async function save() {
+    await api.setConfig("hamqthPassword", password);
+    onClose();
+  }
+
+  async function upload() {
+    setBusy(true);
+    setUploadStatus(null);
+    const result = await api.hamqthUploadPending();
+    setBusy(false);
+    api.hamqthPendingUploadCount().then(setPendingCount);
+    if (result.error) {
+      setUploadStatus({
+        text: `${result.uploaded} uploaded, ${result.already_present} already there, ${result.failed} failed -- ${result.error}`,
+        ok: result.uploaded + result.already_present > 0,
+      });
+    } else {
+      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.already_present} already there`, ok: true });
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={dismiss}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>HamQTH</h3>
+          <button className="modal-close" aria-label="Close" onClick={dismiss}>✕</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          Your hamqth.com website login ({callsign || "your callsign"}) + password.
+        </div>
+        <div className="field">
+          <label>Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setTestResult(null);
+            }}
+            autoComplete="off"
+          />
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+          <button disabled={busy} onClick={test}>{busy ? "Working…" : "Test Connection"}</button>
+          {testResult && (
+            <span style={{ fontSize: 13, fontWeight: 600, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
+              {testResult.text}
+            </span>
+          )}
+        </div>
+
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
+          </div>
+          <button disabled={busy || !pendingCount} onClick={upload}>
+            {busy ? "Uploading…" : "Upload now"}
+          </button>
+          {uploadStatus && (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
+              {uploadStatus.text}
+            </div>
+          )}
+        </div>
+
+        <div className="actions">
+          <button onClick={dismiss}>Cancel</button>
+          <button className="primary" onClick={save}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Club Log settings -- a single per-user API token, created at
+ * clublog.org -> Edit Your Settings -> API tab. Not to be confused with
+ * `CloudlogDialog` above (a different, unrelated service) -- see
+ * `clublog.rs`'s top doc comment.
+ */
+function ClublogDialog({ onClose }: { onClose: () => void }) {
+  const [initialToken, setInitialToken] = useState<string | null>(null);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    api.getConfig("clublogToken").then((v) => {
+      setInitialToken(v ?? "");
+      setToken(v ?? "");
+    });
+    api.clublogPendingUploadCount().then(setPendingCount);
+  }, []);
+
+  function dismiss() {
+    if (initialToken !== null) api.setConfig("clublogToken", initialToken);
+    onClose();
+  }
+
+  async function test() {
+    await api.setConfig("clublogToken", token.trim());
+    setBusy(true);
+    setTestResult(null);
+    const check = await api.clublogTestConnection(token.trim());
+    setTestResult({ text: check.ok ? "Pass" : check.detail || "Fail", ok: check.ok });
+    setBusy(false);
+  }
+
+  async function save() {
+    await api.setConfig("clublogToken", token.trim());
+    onClose();
+  }
+
+  async function upload() {
+    setBusy(true);
+    setUploadStatus(null);
+    const result = await api.clublogUploadPending();
+    setBusy(false);
+    api.clublogPendingUploadCount().then(setPendingCount);
+    if (result.error) {
+      setUploadStatus({
+        text: `${result.uploaded} uploaded, ${result.already_present} already there, ${result.failed} failed -- ${result.error}`,
+        ok: result.uploaded + result.already_present > 0,
+      });
+    } else {
+      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.already_present} already there`, ok: true });
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={dismiss}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>Club Log</h3>
+          <button className="modal-close" aria-label="Close" onClick={dismiss}>✕</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          Create a token at clublog.org -&gt; Edit Your Settings -&gt; API. Not the same as
+          Cloudlog above -- Club Log is a different service.
+        </div>
+        <div className="field">
+          <label>API token</label>
+          <input
+            value={token}
+            onChange={(e) => {
+              setToken(e.target.value);
+              setTestResult(null);
+            }}
+            placeholder="cl_..."
+            autoComplete="off"
+          />
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+          <button disabled={busy} onClick={test}>{busy ? "Working…" : "Test Connection"}</button>
+          {testResult && (
+            <span style={{ fontSize: 13, fontWeight: 600, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
+              {testResult.text}
+            </span>
+          )}
+        </div>
+
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
+          </div>
+          <button disabled={busy || !pendingCount} onClick={upload}>
+            {busy ? "Uploading…" : "Upload now"}
+          </button>
+          {uploadStatus && (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
+              {uploadStatus.text}
+            </div>
+          )}
+        </div>
+
+        <div className="actions">
+          <button onClick={dismiss}>Cancel</button>
+          <button className="primary" onClick={save}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * HRDLog.net settings -- callsign (read-only, same as Settings -> Station)
+ * + upload Code. **Lower confidence than the other dialogs here** -- see
+ * `hrdlog.rs`'s top doc comment: the real API docs were unreachable during
+ * development, so Test Connection shows HRDLog's raw response text rather
+ * than a plain Pass/Fail, since this app can't yet reliably tell which is
+ * which.
+ */
+function HrdlogDialog({ callsign, onClose }: { callsign: string; onClose: () => void }) {
+  const [initialCode, setInitialCode] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    api.getConfig("hrdlogCode").then((v) => {
+      setInitialCode(v ?? "");
+      setCode(v ?? "");
+    });
+    api.hrdlogPendingUploadCount().then(setPendingCount);
+  }, []);
+
+  function dismiss() {
+    if (initialCode !== null) api.setConfig("hrdlogCode", initialCode);
+    onClose();
+  }
+
+  async function test() {
+    await api.setConfig("hrdlogCode", code.trim());
+    setBusy(true);
+    setTestResult(null);
+    const check = await api.hrdlogTestConnection(callsign, code.trim());
+    setTestResult({ text: check.detail || (check.ok ? "No response body" : "Fail"), ok: check.ok });
+    setBusy(false);
+  }
+
+  async function save() {
+    await api.setConfig("hrdlogCode", code.trim());
+    onClose();
+  }
+
+  async function upload() {
+    setBusy(true);
+    setUploadStatus(null);
+    const result = await api.hrdlogUploadPending();
+    setBusy(false);
+    api.hrdlogPendingUploadCount().then(setPendingCount);
+    if (result.error) {
+      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.failed} failed -- ${result.error}`, ok: result.uploaded > 0 });
+    } else {
+      setUploadStatus({ text: `${result.uploaded} uploaded`, ok: true });
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={dismiss}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>HRDLog.net</h3>
+          <button className="modal-close" aria-label="Close" onClick={dismiss}>✕</button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+          Your hrdlog.net Code ({callsign || "your callsign"}), emailed after registration.
+          This integration's API details couldn't be confirmed from HRDLog's own docs during
+          development -- test it live before relying on it.
+        </div>
+        <div className="field">
+          <label>Code</label>
+          <input
+            value={code}
+            onChange={(e) => {
+              setCode(e.target.value);
+              setTestResult(null);
+            }}
+            autoComplete="off"
+          />
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
+          <button disabled={busy} onClick={test}>{busy ? "Working…" : "Test Connection"}</button>
+        </div>
+        {testResult && (
+          <div className="muted" style={{ fontSize: 12, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
+            {testResult.text}
+          </div>
+        )}
+
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
+          </div>
+          <button disabled={busy || !pendingCount} onClick={upload}>
+            {busy ? "Uploading…" : "Upload now"}
+          </button>
+          {uploadStatus && (
+            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
+              {uploadStatus.text}
+            </div>
+          )}
+        </div>
+
+        <div className="actions">
+          <button onClick={dismiss}>Cancel</button>
+          <button className="primary" onClick={save}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
 }

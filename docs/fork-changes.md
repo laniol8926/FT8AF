@@ -773,6 +773,60 @@ for the Hamlib version workaround needed there.
   - `db.rs` v10 migration adds `synced_wrl` (Cloudlog/QRZ already had
     `synced_cloudlog`/`synced_qrz`); "Mark QSOs as Uploaded to All Logs"
     (above) now also flips `synced_wrl` in its sweep.
+- **New: HamQTH, Club Log and HRDLog.net upload** (Settings -> Logging &
+  Awards), requested directly by the user. First of a planned two-part
+  addition -- eQSL (needing both upload and a two-part download-then-import
+  step, since eQSL's own "download" is a real ADIF file of confirmed QSOs
+  rather than a confirmations-only report like LoTW's) is deferred to a
+  follow-up. `db.rs` v11 migration adds `synced_hamqth`/`synced_clublog`/
+  `synced_hrdlog` (eQSL needs none -- its upload/confirmation flags
+  already exist as `eqsl_sent`/`eqsl_rcvd`, v4); "Mark QSOs as Uploaded to
+  All Logs" now flips all three too, but deliberately still excludes
+  `eqsl_sent`/`eqsl_rcvd` -- unlike the others, `eqsl_rcvd` specifically
+  means the *other* station also confirmed via eQSL, a per-QSO fact this
+  app has no basis to assert blanket-true for every row.
+  - **HamQTH** (`hamqth.rs`), using HamQTH's modern v2 API (confirmed
+    live against hamqth.com's own developer docs): `POST /api/v2/login`
+    with the operator's callsign + password (HamQTH's own account
+    identifier *is* the callsign, so the Settings dialog only asks for a
+    password) returns a bearer token, cached in memory and reused across
+    uploads; `POST /api/v2/log/qso` uploads one QSO as ADIF-shaped JSON.
+    A 409 (QSO already exists) counts as success; a 401 triggers one
+    fresh-login retry before giving up on the whole batch.
+  - **Club Log** (`clublog.rs`) -- **not the same service as Cloudlog**
+    above, easy to confuse by name. Uses Club Log's modern per-user token
+    API (`clublog.org` -> Edit Your Settings -> API tab -> Tokens),
+    confirmed live from the user's own account -- NOT the older
+    `realtime.php`/`putlogs.php` email+password+per-application-key
+    system most existing third-party documentation describes, which is a
+    different, legacy mechanism requiring a key issued to the *software*
+    by Club Log's support team rather than something any user can
+    generate themselves (a real blocker, raised to the user, that the
+    modern token API turned out to sidestep entirely). `POST /api/v1/qso`
+    (one QSO) and `POST /api/v1/qso/batch` (up to 100 per call -- used for
+    the catch-up upload, a real efficiency QRZ/HamQTH/HRDLog.net can't
+    match since none of them have a batch endpoint); `"duplicate"` and
+    `"updated"` both count as success same as `"created"`. No dedicated
+    test-connection endpoint is documented, so Test Connection posts an
+    empty batch and reads whether the token was accepted (422, the
+    documented response to an empty list) or rejected (401) -- inferred
+    from the documented validation order, not itself a documented
+    connectivity check.
+  - **HRDLog.net** (`hrdlog.rs`) -- **lower confidence than every other
+    integration in this app**, flagged loudly in its own top doc comment,
+    the Settings dialog's own description text, and here: HRDLog.net's
+    documentation pages (docs/, API.aspx, etc.) returned 403s and generic
+    error pages during development and could not be read, so this is
+    built from the best available secondhand description (third-party
+    logging-program source and forum posts, cross-checked across two
+    independent searches) -- `POST https://robot.hrdlog.net/NewEntry.aspx`
+    with `Callsign`/`Code`/`App`/`ADIF` form fields. Because the real
+    response shape is unconfirmed, Test Connection deliberately doesn't
+    try to classify pass/fail itself -- it shows HRDLog's raw response
+    text (from a request with a blank ADIF field, so nothing is actually
+    logged) for the operator to judge. Needs live verification against a
+    real HRDLog.net account before it can be trusted; the endpoint, field
+    names or response handling may all need correcting once that happens.
 
 ## Smaller fixes
 

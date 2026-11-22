@@ -35,6 +35,12 @@ pub const SENSITIVE_KEYS: &[&str] = &[
     "icomPassword",
     "lotwUsername",
     "lotwPassword",
+    // Desktop-only additions (HamQTH's v2 API and Club Log's modern token
+    // API aren't the credential shapes Android's own SettingsBackup.kt
+    // lists -- these three have no Android counterpart to match).
+    "hamqthPassword",
+    "clublogToken",
+    "hrdlogCode",
 ];
 
 pub fn is_sensitive_key(key: &str) -> bool {

@@ -9,10 +9,13 @@ use tauri::{Emitter, State};
 
 use ft8af::audio::{self, AudioDevice};
 use ft8af::bands::{self, BandEntry, CustomBand};
+use ft8af::clublog::{self, ClublogUploadResult, ConnectionCheck as ClublogConnectionCheck};
 use ft8af::cloudlog::{self, CloudlogUploadResult, ConnectionCheck as CloudlogConnectionCheck, StationProfile};
 use ft8af::db::{ConfirmedFilter, Db, ImportProgress, ImportSummary, LogStats, QsoRecord};
 use ft8af::engine::{self, AnswerArgs, EngineCommand, EngineHandle};
 use ft8af::fcc_grid::{self, FccSeedSummary};
+use ft8af::hamqth::{self, ConnectionCheck as HamQthConnectionCheck, HamQthUploadResult};
+use ft8af::hrdlog::{self, ConnectionCheck as HrdlogConnectionCheck, HrdlogUploadResult};
 use ft8af::lotw::{self, LotwDownloadResult, LotwUploadResult};
 use ft8af::map_tiles::MapTiles;
 use ft8af::os_location::{self, OsLocation};
@@ -967,6 +970,62 @@ fn wrl_create_logbook(api_key: String, name: String, callsign: String) -> Result
     wrl::create_logbook(&api_key, &name, Some(&callsign))
 }
 
+// --- HamQTH --------------------------------------------------------------
+
+#[tauri::command]
+fn hamqth_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_hamqth_upload().len() as i64
+}
+
+#[tauri::command]
+fn hamqth_upload_pending(state: State<AppState>) -> HamQthUploadResult {
+    let callsign = state.db.get_config("my_call").unwrap_or_default();
+    let password = state.db.get_config(hamqth::CONFIG_PASSWORD).unwrap_or_default();
+    hamqth::upload_pending(&state.db, &callsign, &password)
+}
+
+#[tauri::command]
+fn hamqth_test_connection(callsign: String, password: String) -> HamQthConnectionCheck {
+    hamqth::check_connection(&callsign, &password)
+}
+
+// --- Club Log --------------------------------------------------------------
+
+#[tauri::command]
+fn clublog_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_clublog_upload().len() as i64
+}
+
+#[tauri::command]
+fn clublog_upload_pending(state: State<AppState>) -> ClublogUploadResult {
+    let token = state.db.get_config(clublog::CONFIG_TOKEN).unwrap_or_default();
+    clublog::upload_pending(&state.db, &token)
+}
+
+#[tauri::command]
+fn clublog_test_connection(token: String) -> ClublogConnectionCheck {
+    clublog::check_connection(&token)
+}
+
+// --- HRDLog.net ------------------------------------------------------------
+
+#[tauri::command]
+fn hrdlog_pending_upload_count(state: State<AppState>) -> i64 {
+    state.db.qsos_pending_hrdlog_upload().len() as i64
+}
+
+#[tauri::command]
+fn hrdlog_upload_pending(state: State<AppState>) -> HrdlogUploadResult {
+    let callsign = state.db.get_config("my_call").unwrap_or_default();
+    let code = state.db.get_config(hrdlog::CONFIG_CODE).unwrap_or_default();
+    hrdlog::upload_pending(&state.db, &callsign, &code)
+}
+
+#[tauri::command]
+fn hrdlog_test_connection(callsign: String, code: String) -> HrdlogConnectionCheck {
+    hrdlog::check_connection(&callsign, &code)
+}
+
 // --- Logging bulk actions -----------------------------------------------
 
 /// "Mark QSOs as Uploaded to All Logs" (Settings -> Logging & Awards): stops
@@ -1368,6 +1427,15 @@ fn main() {
             wrl_test_connection,
             wrl_fetch_logbooks,
             wrl_create_logbook,
+            hamqth_pending_upload_count,
+            hamqth_upload_pending,
+            hamqth_test_connection,
+            clublog_pending_upload_count,
+            clublog_upload_pending,
+            clublog_test_connection,
+            hrdlog_pending_upload_count,
+            hrdlog_upload_pending,
+            hrdlog_test_connection,
             mark_all_qsos_uploaded,
         ])
         .run(tauri::generate_context!())

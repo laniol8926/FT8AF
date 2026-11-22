@@ -628,6 +628,46 @@ export const api = {
    *  with none, and WRL refuses every contact until it has one. */
   wrlCreateLogbook: (apiKey: string, name: string, callsign: string) =>
     invoke<StationProfile>("wrl_create_logbook", { apiKey, name, callsign }),
+
+  /** Settings -> Logging & Awards -> HamQTH. Count of logged QSOs not yet
+   *  uploaded (`synced_hamqth = 0`). */
+  hamqthPendingUploadCount: () => invoke<number>("hamqth_pending_upload_count"),
+  /** Uploads every not-yet-synced QSO via HamQTH's v2 API
+   *  (`POST /api/v2/log/qso`). Stops early if the login itself is
+   *  rejected. */
+  hamqthUploadPending: () => invoke<HamQthUploadResult>("hamqth_upload_pending"),
+  /** Logs in fresh with the given callsign/password -- confirms the
+   *  credentials without uploading anything. */
+  hamqthTestConnection: (callsign: string, password: string) =>
+    invoke<ConnectionCheck>("hamqth_test_connection", { callsign, password }),
+
+  /** Settings -> Logging & Awards -> Club Log. Count of logged QSOs not
+   *  yet uploaded (`synced_clublog = 0`). Not to be confused with
+   *  `cloudlogPendingUploadCount` -- Club Log and Cloudlog are different
+   *  services. */
+  clublogPendingUploadCount: () => invoke<number>("clublog_pending_upload_count"),
+  /** Uploads every not-yet-synced QSO in batches of up to 100 via
+   *  `POST /api/v1/qso/batch`. Stops early if the token itself is
+   *  rejected. */
+  clublogUploadPending: () => invoke<ClublogUploadResult>("clublog_upload_pending"),
+  /** See `clublog.rs`'s doc comment: there's no dedicated test endpoint,
+   *  so this posts an empty batch and reads whether the token was
+   *  accepted (422, token good) or rejected (401). */
+  clublogTestConnection: (token: string) => invoke<ConnectionCheck>("clublog_test_connection", { token }),
+
+  /** Settings -> Logging & Awards -> HRDLog.net. Count of logged QSOs not
+   *  yet uploaded (`synced_hrdlog = 0`). */
+  hrdlogPendingUploadCount: () => invoke<number>("hrdlog_pending_upload_count"),
+  /** Uploads every not-yet-synced QSO, one request per QSO. See
+   *  `hrdlog.rs`'s doc comment -- HRDLog.net's own API docs were
+   *  unreachable during development, so this is a best-effort
+   *  implementation that needs live verification. */
+  hrdlogUploadPending: () => invoke<HrdlogUploadResult>("hrdlog_upload_pending"),
+  /** Sends an empty-ADIF request and returns HRDLog's raw response text
+   *  rather than trying to classify pass/fail itself (same reason as
+   *  above -- the real response format is unconfirmed). */
+  hrdlogTestConnection: (callsign: string, code: string) =>
+    invoke<ConnectionCheck>("hrdlog_test_connection", { callsign, code }),
 };
 
 export interface LotwDownloadResult {
@@ -672,6 +712,26 @@ export interface CloudlogUploadResult {
 }
 
 export interface WrlUploadResult {
+  uploaded: number;
+  failed: number;
+  error: string | null;
+}
+
+export interface HamQthUploadResult {
+  uploaded: number;
+  already_present: number;
+  failed: number;
+  error: string | null;
+}
+
+export interface ClublogUploadResult {
+  uploaded: number;
+  already_present: number;
+  failed: number;
+  error: string | null;
+}
+
+export interface HrdlogUploadResult {
   uploaded: number;
   failed: number;
   error: string | null;

@@ -14,11 +14,14 @@ use serde::{Deserialize, Serialize};
 use crate::adif_log_file;
 use crate::audio::{output, AudioInput, SlotAccumulator};
 use crate::bands;
+use crate::clublog;
 use crate::cloudlog;
 use crate::db::{Db, QsoRecord};
 use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
 use crate::dxcc;
+use crate::hamqth;
+use crate::hrdlog;
 use crate::logged_state;
 use crate::mode::Mode;
 use crate::qmx_cat_tones as cat_tones;
@@ -1414,6 +1417,30 @@ impl Engine {
                 wrl::upload_pending(&db_for_upload);
             });
         }
+        // Same startup catch-up, for HamQTH, Club Log and HRDLog.net.
+        let hamqth_password = engine.db.get_config(hamqth::CONFIG_PASSWORD).unwrap_or_default();
+        if engine.db.get_config(hamqth::CONFIG_ENABLE).as_deref() == Some("1") && !hamqth_password.is_empty() {
+            let db_for_upload = engine.db.clone();
+            let callsign = engine.db.get_config("my_call").unwrap_or_default();
+            std::thread::spawn(move || {
+                hamqth::upload_pending(&db_for_upload, &callsign, &hamqth_password);
+            });
+        }
+        let clublog_token = engine.db.get_config(clublog::CONFIG_TOKEN).unwrap_or_default();
+        if engine.db.get_config(clublog::CONFIG_ENABLE).as_deref() == Some("1") && !clublog_token.trim().is_empty() {
+            let db_for_upload = engine.db.clone();
+            std::thread::spawn(move || {
+                clublog::upload_pending(&db_for_upload, &clublog_token);
+            });
+        }
+        let hrdlog_code = engine.db.get_config(hrdlog::CONFIG_CODE).unwrap_or_default();
+        if engine.db.get_config(hrdlog::CONFIG_ENABLE).as_deref() == Some("1") && !hrdlog_code.trim().is_empty() {
+            let db_for_upload = engine.db.clone();
+            let callsign = engine.db.get_config("my_call").unwrap_or_default();
+            std::thread::spawn(move || {
+                hrdlog::upload_pending(&db_for_upload, &callsign, &hrdlog_code);
+            });
+        }
 
         engine
     }
@@ -1884,6 +1911,33 @@ impl Engine {
                     let record_for_upload = record.clone();
                     std::thread::spawn(move || {
                         wrl::upload_one_logged(&db, &api_key, &record_for_upload);
+                    });
+                }
+                // Same auto-upload-on-log hook, for HamQTH, Club Log and
+                // HRDLog.net -- see `hamqth.rs`/`clublog.rs`/`hrdlog.rs`'s
+                // own top doc comments.
+                if self.db.get_config(hamqth::CONFIG_ENABLE).as_deref() == Some("1") {
+                    let db = self.db.clone();
+                    let password = self.db.get_config(hamqth::CONFIG_PASSWORD).unwrap_or_default();
+                    let record_for_upload = record.clone();
+                    std::thread::spawn(move || {
+                        hamqth::upload_one_logged(&db, &record_for_upload.station_callsign, &password, &record_for_upload);
+                    });
+                }
+                if self.db.get_config(clublog::CONFIG_ENABLE).as_deref() == Some("1") {
+                    let db = self.db.clone();
+                    let token = self.db.get_config(clublog::CONFIG_TOKEN).unwrap_or_default();
+                    let record_for_upload = record.clone();
+                    std::thread::spawn(move || {
+                        clublog::upload_one_logged(&db, &token, &record_for_upload);
+                    });
+                }
+                if self.db.get_config(hrdlog::CONFIG_ENABLE).as_deref() == Some("1") {
+                    let db = self.db.clone();
+                    let code = self.db.get_config(hrdlog::CONFIG_CODE).unwrap_or_default();
+                    let record_for_upload = record.clone();
+                    std::thread::spawn(move || {
+                        hrdlog::upload_one_logged(&db, &record_for_upload.station_callsign, &code, &record_for_upload);
                     });
                 }
                 self.emit(EngineEvent::QsoCompleted(record));

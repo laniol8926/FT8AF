@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// One logged QSO. Field names follow ADIF.
 ///
@@ -91,6 +91,15 @@ pub struct QsoRecord {
     /// Already uploaded to World Radio League. Read-only here — see `synced_cloudlog`.
     #[serde(default)]
     pub synced_wrl: bool,
+    /// Already uploaded to HamQTH's logbook. Read-only here — see `synced_cloudlog`.
+    #[serde(default)]
+    pub synced_hamqth: bool,
+    /// Already uploaded to Club Log. Read-only here — see `synced_cloudlog`.
+    #[serde(default)]
+    pub synced_clublog: bool,
+    /// Already uploaded to HRDLog.net. Read-only here — see `synced_cloudlog`.
+    #[serde(default)]
+    pub synced_hrdlog: bool,
     /// Transmit power in watts at QSO completion (ADIF `TX_PWR`), matching
     /// Android's own `QSLTable.tx_pwr` (v23 there). A plain string, not a
     /// number, same as Android -- it's just whatever the operator's
@@ -110,7 +119,7 @@ fn default_mode() -> String {
 const QSO_SELECT_COLUMNS: &str = "id, call, gridsquare, mode, rst_sent, rst_rcvd, qso_date, \
     time_on, qso_date_off, time_off, band, freq, station_callsign, my_gridsquare, comment, \
     qsl_rcvd, qsl_sent, lotw_sent, lotw_rcvd, eqsl_sent, eqsl_rcvd, qrz_qsl, state, country, \
-    synced_cloudlog, synced_qrz, tx_pwr, synced_wrl";
+    synced_cloudlog, synced_qrz, tx_pwr, synced_wrl, synced_hamqth, synced_clublog, synced_hrdlog";
 
 /// The `logbookPlace` (State/place column) value as a SQL expression: country
 /// when it's non-US, else the logged state (falling back to the country
@@ -483,6 +492,19 @@ impl Db {
             // already covers those two.
             conn.execute_batch("ALTER TABLE qso_log ADD COLUMN synced_wrl INTEGER NOT NULL DEFAULT 0;")?;
         }
+        if version < 11 {
+            // v11: HamQTH, Club Log and HRDLog.net sync tracking, same shape
+            // as v10's `synced_wrl` -- added alongside real upload support
+            // in `hamqth.rs`/`clublog.rs`/`hrdlog.rs`. eQSL already has its
+            // own `eqsl_sent`/`eqsl_rcvd` (v4) and needs no new column here.
+            for col in [
+                "ALTER TABLE qso_log ADD COLUMN synced_hamqth INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE qso_log ADD COLUMN synced_clublog INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE qso_log ADD COLUMN synced_hrdlog INTEGER NOT NULL DEFAULT 0",
+            ] {
+                conn.execute(col, [])?;
+            }
+        }
         // Never write a LOWER version than what's already there. Real
         // incident: running an older branch's binary (its own SCHEMA_VERSION
         // below this one) against a database a newer binary had already
@@ -569,9 +591,10 @@ impl Db {
                  qso_date_off, time_off, band, freq, station_callsign,
                  my_gridsquare, comment, qsl_rcvd, qsl_sent, lotw_sent, lotw_rcvd,
                  eqsl_sent, eqsl_rcvd, qrz_qsl, state, country,
-                 synced_cloudlog, synced_qrz, tx_pwr, synced_wrl, created_at)
+                 synced_cloudlog, synced_qrz, tx_pwr, synced_wrl,
+                 synced_hamqth, synced_clublog, synced_hrdlog, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
-                     ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+                     ?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)
              ON CONFLICT(call, qso_date, time_on, mode) DO UPDATE SET
                 gridsquare=excluded.gridsquare, rst_sent=excluded.rst_sent,
                 rst_rcvd=excluded.rst_rcvd, qso_date_off=excluded.qso_date_off,
@@ -583,7 +606,9 @@ impl Db {
                 eqsl_sent=excluded.eqsl_sent, eqsl_rcvd=excluded.eqsl_rcvd,
                 qrz_qsl=excluded.qrz_qsl, state=excluded.state, country=excluded.country,
                 synced_cloudlog=excluded.synced_cloudlog, synced_qrz=excluded.synced_qrz,
-                tx_pwr=excluded.tx_pwr, synced_wrl=excluded.synced_wrl",
+                tx_pwr=excluded.tx_pwr, synced_wrl=excluded.synced_wrl,
+                synced_hamqth=excluded.synced_hamqth, synced_clublog=excluded.synced_clublog,
+                synced_hrdlog=excluded.synced_hrdlog",
         )?
         .execute(params![
             r.call, r.gridsquare, r.mode, r.rst_sent, r.rst_rcvd, r.qso_date,
@@ -592,7 +617,8 @@ impl Db {
             r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
             r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64,
             r.state, r.country, r.synced_cloudlog as i64, r.synced_qrz as i64,
-            r.tx_pwr, r.synced_wrl as i64, crate::util::now_unix_ms(),
+            r.tx_pwr, r.synced_wrl as i64, r.synced_hamqth as i64,
+            r.synced_clublog as i64, r.synced_hrdlog as i64, crate::util::now_unix_ms(),
         ])?;
         Ok(conn.last_insert_rowid())
     }
@@ -1023,12 +1049,16 @@ impl Db {
     }
 
     /// Flag a QSO as synced to an online service so re-runs are idempotent.
-    /// `service` is `"cloudlog"`, `"qrz"` or `"wrl"`; unknown services are a no-op.
+    /// `service` is `"cloudlog"`, `"qrz"`, `"wrl"`, `"hamqth"`, `"clublog"`
+    /// or `"hrdlog"`; unknown services are a no-op.
     pub fn mark_synced(&self, id: i64, service: &str) -> anyhow::Result<()> {
         let column = match service {
             "cloudlog" => "synced_cloudlog",
             "qrz" => "synced_qrz",
             "wrl" => "synced_wrl",
+            "hamqth" => "synced_hamqth",
+            "clublog" => "synced_clublog",
+            "hrdlog" => "synced_hrdlog",
             _ => return Ok(()),
         };
         self.conn.lock().execute(
@@ -1044,6 +1074,9 @@ impl Db {
             "cloudlog" => "synced_cloudlog",
             "qrz" => "synced_qrz",
             "wrl" => "synced_wrl",
+            "hamqth" => "synced_hamqth",
+            "clublog" => "synced_clublog",
+            "hrdlog" => "synced_hrdlog",
             _ => return false,
         };
         self.conn
@@ -1176,6 +1209,51 @@ impl Db {
             .unwrap_or_default()
     }
 
+    /// QSOs not yet uploaded to HamQTH's logbook (`synced_hamqth = 0`),
+    /// oldest first -- same shape/ordering rationale as [`Self::qsos_pending_qrz_upload`].
+    pub fn qsos_pending_hamqth_upload(&self) -> Vec<QsoRecord> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE synced_hamqth = 0 ORDER BY id ASC",
+        )) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], row_to_qso)
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// QSOs not yet uploaded to Club Log (`synced_clublog = 0`), oldest
+    /// first -- same shape/ordering rationale as [`Self::qsos_pending_qrz_upload`].
+    pub fn qsos_pending_clublog_upload(&self) -> Vec<QsoRecord> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE synced_clublog = 0 ORDER BY id ASC",
+        )) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], row_to_qso)
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// QSOs not yet uploaded to HRDLog.net (`synced_hrdlog = 0`), oldest
+    /// first -- same shape/ordering rationale as [`Self::qsos_pending_qrz_upload`].
+    pub fn qsos_pending_hrdlog_upload(&self) -> Vec<QsoRecord> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT {QSO_SELECT_COLUMNS} FROM qso_log WHERE synced_hrdlog = 0 ORDER BY id ASC",
+        )) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], row_to_qso)
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
     /// Marks every QSO as already uploaded to every online log this app
     /// tracks (QRZ, Cloudlog, LoTW-sent) in one sweep, without contacting
     /// any of them. Real gap, stated by the user: a station can upload
@@ -1188,10 +1266,19 @@ impl Db {
     /// action, not a real upload. Only rows not already fully synced are
     /// touched, so the returned count (rows changed) is meaningful to show
     /// the operator.
+    /// Deliberately excludes `eqsl_sent`/`eqsl_rcvd`: unlike the sync flags
+    /// here (pure app-internal "did WE already try to upload this"
+    /// bookkeeping), `eqsl_rcvd` specifically means the *other* station
+    /// also confirmed via eQSL -- a per-QSO fact this app has no basis to
+    /// assert blanket-true for every row just because the operator caught
+    /// up their own uploads elsewhere. eQSL gets its own dedicated backfill
+    /// once its real upload/download support lands.
     pub fn mark_all_synced(&self) -> anyhow::Result<usize> {
         let n = self.conn.lock().execute(
-            "UPDATE qso_log SET synced_qrz = 1, synced_cloudlog = 1, lotw_sent = 1, synced_wrl = 1 \
-             WHERE synced_qrz = 0 OR synced_cloudlog = 0 OR lotw_sent = 0 OR synced_wrl = 0",
+            "UPDATE qso_log SET synced_qrz = 1, synced_cloudlog = 1, lotw_sent = 1, synced_wrl = 1, \
+             synced_hamqth = 1, synced_clublog = 1, synced_hrdlog = 1 \
+             WHERE synced_qrz = 0 OR synced_cloudlog = 0 OR lotw_sent = 0 OR synced_wrl = 0 \
+                OR synced_hamqth = 0 OR synced_clublog = 0 OR synced_hrdlog = 0",
             [],
         )?;
         Ok(n)
@@ -1537,14 +1624,16 @@ impl Db {
             "UPDATE qso_log SET qsl_rcvd=?1, qsl_sent=?2, lotw_sent=?3, lotw_rcvd=?4,
                 eqsl_sent=?5, eqsl_rcvd=?6, qrz_qsl=?7, state=?8, country=?9, time_on=?10,
                 mode=?11, time_off=?12, rst_sent=?13, rst_rcvd=?14, freq=?15, gridsquare=?16,
-                synced_cloudlog=?17, synced_qrz=?18, synced_wrl=?19
-             WHERE id=?20",
+                synced_cloudlog=?17, synced_qrz=?18, synced_wrl=?19,
+                synced_hamqth=?20, synced_clublog=?21, synced_hrdlog=?22
+             WHERE id=?23",
         )?
         .execute(params![
             r.confirmed as i64, r.qsl_sent as i64, r.lotw_sent as i64, r.lotw_rcvd as i64,
             r.eqsl_sent as i64, r.eqsl_rcvd as i64, r.qrz_qsl as i64, r.state, r.country,
             r.time_on, r.mode, r.time_off, r.rst_sent, r.rst_rcvd, r.freq, r.gridsquare,
-            r.synced_cloudlog as i64, r.synced_qrz as i64, r.synced_wrl as i64, id,
+            r.synced_cloudlog as i64, r.synced_qrz as i64, r.synced_wrl as i64,
+            r.synced_hamqth as i64, r.synced_clublog as i64, r.synced_hrdlog as i64, id,
         ])?;
         Ok(())
     }
@@ -1759,6 +1848,9 @@ fn row_to_qso(r: &rusqlite::Row) -> rusqlite::Result<QsoRecord> {
         synced_qrz: r.get::<_, Option<i64>>(25)?.unwrap_or(0) != 0,
         tx_pwr: r.get::<_, Option<String>>(26)?.unwrap_or_default(),
         synced_wrl: r.get::<_, Option<i64>>(27)?.unwrap_or(0) != 0,
+        synced_hamqth: r.get::<_, Option<i64>>(28)?.unwrap_or(0) != 0,
+        synced_clublog: r.get::<_, Option<i64>>(29)?.unwrap_or(0) != 0,
+        synced_hrdlog: r.get::<_, Option<i64>>(30)?.unwrap_or(0) != 0,
     })
 }
 
@@ -1932,6 +2024,11 @@ fn merge_matched_qso(existing: &QsoRecord, imported: &QsoRecord) -> Option<QsoRe
     // above; always a no-op in practice since `adif_record_to_qso` never
     // sets `imported.synced_wrl`.
     or_in!(synced_wrl);
+    // Same as synced_wrl -- HamQTH/Club Log/HRDLog.net have no ADIF
+    // import-side marker either.
+    or_in!(synced_hamqth);
+    or_in!(synced_clublog);
+    or_in!(synced_hrdlog);
     if is_generic_mode_family(&merged.mode) && !is_generic_mode_family(&imported.mode) {
         merged.mode = imported.mode.clone();
         changed = true;
@@ -3103,6 +3200,9 @@ mod tests {
         db.mark_synced(fully_synced, "cloudlog").unwrap();
         db.mark_synced(fully_synced, "qrz").unwrap();
         db.mark_synced(fully_synced, "wrl").unwrap();
+        db.mark_synced(fully_synced, "hamqth").unwrap();
+        db.mark_synced(fully_synced, "clublog").unwrap();
+        db.mark_synced(fully_synced, "hrdlog").unwrap();
         db.mark_lotw_sent(&[fully_synced]).unwrap();
 
         let partially_synced = db.insert_qso(&rec("K2DEF", "20260604", "121500", false)).unwrap();
@@ -3118,6 +3218,9 @@ mod tests {
             assert!(db.is_synced(id, "cloudlog"), "id {id} should be cloudlog-synced");
             assert!(db.is_synced(id, "qrz"), "id {id} should be qrz-synced");
             assert!(db.is_synced(id, "wrl"), "id {id} should be wrl-synced");
+            assert!(db.is_synced(id, "hamqth"), "id {id} should be hamqth-synced");
+            assert!(db.is_synced(id, "clublog"), "id {id} should be clublog-synced");
+            assert!(db.is_synced(id, "hrdlog"), "id {id} should be hrdlog-synced");
         }
 
         // A second run finds nothing left to change.
