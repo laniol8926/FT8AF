@@ -97,7 +97,16 @@ fn send(callsign: &str, code: &str, adif: &str) -> Result<RawResponse, String> {
         Err(ureq::Error::Status(status, response)) => {
             Ok(RawResponse { status, body: response.into_string().unwrap_or_default() })
         }
-        Err(ureq::Error::Transport(t)) => Err(format!("{}", t.kind())),
+        // Prefixed so a TCP/TLS-level failure to reach the server (e.g.
+        // ureq's own `ErrorKind::ConnectionFailed`, whose Display text is
+        // literally "Connection Failed") is never mistaken for a real
+        // HRDLog.net response rejecting the request -- confirmed live
+        // 2026-11-22 that the real server accepts this project's exact
+        // Callsign/Code pair (it replied with a normal "missing QSO
+        // fields" error for a blank test ping, not an auth rejection), so
+        // a bare transport error here means the network hiccuped, not
+        // that credentials are wrong.
+        Err(ureq::Error::Transport(t)) => Err(format!("Network error: {}", t.kind())),
     }
 }
 
