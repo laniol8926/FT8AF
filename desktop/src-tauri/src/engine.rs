@@ -1302,7 +1302,7 @@ impl Engine {
             });
         }
 
-        Engine {
+        let engine = Engine {
             db,
             decode_deep,
             evt,
@@ -1363,7 +1363,37 @@ impl Engine {
             rx_latency_ms,
             ptt_delay_ms,
             late_start_tolerance_ms,
+        };
+
+        // Catch up on any QSO that failed to auto-upload to QRZ in a
+        // previous session (e.g. no internet at the time it was logged) --
+        // real gap, found live: the per-QSO auto-upload (log_completed_qso,
+        // below) is a single attempt with no retry, and the one UI control
+        // that looks like it should retry a backlog ("Sync to logging
+        // services") is a stale stub predating that feature entirely,
+        // unconnected to it. Spawned on a background thread, same reasoning
+        // as the per-QSO upload -- a slow/blocked network call must never
+        // stall engine construction. Each record stays `synced_qrz = 0`
+        // until it actually succeeds, so a failed attempt here (e.g.
+        // network not up yet this early in boot) just tries again next
+        // launch, same as it would have before this existed.
+        //
+        // Requires a real API key, not just the enable toggle -- stated
+        // live: "the qrz upload should only run at startup if the qrz api
+        // key is not empty because an empty key means a station does not
+        // subscribe to the qrz auto upload." `upload_pending` itself
+        // already no-ops on an empty key, but checking here too avoids
+        // spawning a thread (and a DB scan for pending rows) for a station
+        // that isn't using this feature at all.
+        let qrz_api_key = engine.db.get_config(qrz::CONFIG_API_KEY).unwrap_or_default();
+        if engine.db.get_config(qrz::CONFIG_ENABLE).as_deref() == Some("1") && !qrz_api_key.trim().is_empty() {
+            let db_for_upload = engine.db.clone();
+            std::thread::spawn(move || {
+                qrz::upload_pending(&db_for_upload, &qrz_api_key);
+            });
         }
+
+        engine
     }
 
     /// Load the persisted WSJT-X UDP settings into a config struct. Falls back to

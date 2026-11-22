@@ -664,6 +664,18 @@ for the Hamlib version workaround needed there.
   either (1) he responds or (2) the send 73 limit is reached whichever
   comes first." The docked panel now just follows the engine's own
   `active` state for the whole RR73 phase, with no special early revert.
+- **QRZ pending-upload backlog now retries automatically on launch.** The
+  per-QSO auto-upload fired the instant a QSO logs is a single attempt
+  with no retry (e.g. no internet at the time), and the only UI control
+  that looks like it should catch up a backlog ("Sync to logging
+  services") is a stale stub predating this feature, not wired to it.
+  `Engine::new` now spawns a background sweep of every `synced_qrz = 0`
+  record on startup, gated on a real API key being set (not just the
+  enable toggle) — stated live: "the qrz upload should only run at
+  startup if the qrz api key is not empty because an empty key means a
+  station does not subscribe to the qrz auto upload." A record that still
+  fails (e.g. network not up yet this early in boot) stays unsynced and
+  just tries again next launch, same as before this existed.
 
 ## Smaller fixes
 
