@@ -81,10 +81,15 @@ class ReleasePolicyTest(unittest.TestCase):
                     result = self.run_script("desktop", "tag", event, ref)
                     internal = event == "push" and ref == "refs/heads/main"
                     production = event == "push" and ref == "refs/tags/desktop-v2.7.1"
-                    self.assertEqual(result["should_release"], str(internal or production).lower())
-                    self.assertEqual(result["is_prerelease"], str(internal).lower())
-                    self.assertEqual(result["release_tag"], "desktop-dev.81" if internal else "desktop-v2.7.1" if production else "")
-                    self.assertEqual(result["app_version"], "1.4.11-81" if internal else "2.7.1" if production else "")
+                    # Manual on-demand bundled build (any ref) -- see
+                    # desktop.yml's `workflow_dispatch` tag branch. Always a
+                    # throwaway desktop-manual.<run> prerelease, regardless of
+                    # which branch/tag it was dispatched from.
+                    manual = event == "workflow_dispatch"
+                    self.assertEqual(result["should_release"], str(internal or production or manual).lower())
+                    self.assertEqual(result["is_prerelease"], str(internal or manual).lower())
+                    self.assertEqual(result["release_tag"], "desktop-dev.81" if internal else "desktop-v2.7.1" if production else "desktop-manual.81" if manual else "")
+                    self.assertEqual(result["app_version"], "1.4.11-81" if internal else "2.7.1" if production else "1.4.11-81" if manual else "")
 
     def test_internal_builds_without_production_tag_history(self):
         for branch in ("main",):
