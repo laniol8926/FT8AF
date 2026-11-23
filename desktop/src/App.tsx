@@ -471,10 +471,6 @@ export default function App() {
   const panelShouldShow = txActive && (keyedThisRun || logTarget != null);
 
   useEffect(() => {
-    // TEMPORARY diagnostic (phantom TX log entry report) -- remove once a
-    // real trace confirms or rules this out.
-    const wasT = wasTransmittingRef.current;
-    const pendBefore = pendingTxLogRef.current;
     const decision = decideTxLog(
       wasTransmittingRef.current,
       isTransmitting,
@@ -490,7 +486,7 @@ export default function App() {
         {
           direction: "tx" as const,
           utcMs: Date.now(),
-          text: formatTxLogText(txMessageNow, txFreq) + ` [wasT=${wasT} isT=${isTransmitting} pendB=${pendBefore} pendA=${decision.pendingAfter} active=${txActive}]`,
+          text: formatTxLogText(txMessageNow, txFreq),
           snr: null,
         },
       ]);
