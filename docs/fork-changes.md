@@ -902,8 +902,21 @@ for the Hamlib version workaround needed there.
     already there` -- the 18 came back from eQSL's own server as
     `"duplicate"`, confirming both the upload field shape and the
     duplicate-detection string against the real server, not just a
-    plausible guess. Inbox download has not been live-tested yet and
-    remains the one unconfirmed piece of this feature.
+    plausible guess.
+  - **Inbox download live-tested 2026-11-23, one real bug found and
+    fixed**: eQSL's actual "nothing new" wording is `"You have no log
+    entries"` -- nothing like the three guessed phrases this module had
+    before (`"no new"`/`"0 new"`/`"nothing new"`, none ever confirmed
+    against a real response), so a real zero-new-confirmations result
+    was being misread as a download error. After the fix: "Download
+    new" against a ~9-hour-old checkpoint correctly reported 0/0/no
+    error, and a full "Download all" against the real account's full
+    29,724-record inbox completed in ~21 seconds -- 22 newly confirmed,
+    9,742 unmatched (reported, never inserted), total QSO count
+    unchanged before and after (45,481), confirming the "never insert"
+    rule holds under a real large import, not just unit tests.
+    `extract_adif_url` itself needed no fix -- it already correctly
+    parses the real server's relative-href link format.
   - **Progress feedback fixed 2026-11-23**, reported live: "need some
     type of progress indicator when downloading confirmations from eQSL
     so it doesn't look like the application is just sitting there doing
