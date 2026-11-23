@@ -1,26 +1,27 @@
-//! HRDLog.net QSO upload. **Lower confidence than this project's other
-//! logging integrations** -- HRDLog.net's own documentation pages
-//! (hrdlog.net/docs/, /API.aspx, etc.) could not be reached (403s and
-//! generic error pages during research), so this is built against the
-//! best available secondhand description (third-party logging-program
-//! source and forum posts, cross-checked across two independent
-//! searches, not HRDLog's own authoritative docs): `POST` to
-//! `https://robot.hrdlog.net/NewEntry.aspx` with form fields `Callsign`
-//! (the operator's own callsign), `Code` (the upload code HRDLog emails
-//! after registration -- found at hrdlog.net under the account's own
-//! settings), `App` (software name), and `ADIF` (one record, `<eor>`
-//! included). **Needs live verification against a real HRDLog.net
-//! account** -- the endpoint, field names, and response shape here may
-//! need correcting once that happens.
+//! HRDLog.net QSO upload.
 //!
-//! Because the real response format is unconfirmed, [`check_connection`]
-//! deliberately does not try to classify pass/fail itself: it reports
-//! whether the server answered at all (HTTP 2xx) and returns the raw
-//! response text for the operator to read, rather than risk guessing a
-//! success/failure keyword wrong. The same uncertainty means duplicate-QSO
-//! detection isn't implemented -- any rejection (a real error, or a
-//! duplicate HRDLog already has) is treated as a plain failure and left
-//! unsynced for the next attempt, rather than guessing which one it was.
+//! **Live-confirmed 2026-11-23: the upload field name was wrong.** This
+//! module originally sent the ADIF record as a form field named `ADIF`,
+//! guessed from secondhand forum reports since HRDLog's own docs
+//! (hrdlog.net/docs/, /API.aspx, etc.) returned 403s and generic error
+//! pages during research. Live-tested with the user's real account: even
+//! a fully well-formed, non-blank ADIF record under that field name still
+//! got the server's generic `Missing Call QSO_Date Time_On Band Mode`
+//! rejection every time -- the real field was never reaching the parser
+//! at all. Confirmed against two independent real source files reading
+//! `https://robot.hrdlog.net/NewEntry.aspx` directly: IW1QLH's own
+//! `HRDLOG-net-library` (IW1QLH runs hrdlog.net itself) and the
+//! `wsjtx-tools` project's `hrdlog-upload.py` -- both use `Callsign`,
+//! `Code`, `App`, and **`ADIFData`** (not `ADIF`) for the record, and both
+//! check the reply for `<insert>1` (newly stored) / `<insert>0`
+//! (already present -- a real duplicate, not an error) / `<error>...`
+//! (a genuine rejection). [`upload_and_mark_one`] now classifies on that
+//! basis instead of only "any non-2xx-shaped text counts as a failure."
+//!
+//! Field formats confirmed by the same two sources: `QSO_DATE` as
+//! `YYYYMMDD` (no dashes), `TIME_ON` as 6-digit `HHMMSS`, `BAND` lowercase
+//! (`"20m"`), matching what this module already sends -- those parts were
+//! never the problem.
 //!
 //! **Live-confirmed 2026-11-22: this module needs its own TLS stack.**
 //! The user's real Callsign/Code pair got a real "Connection Failed"
@@ -65,12 +66,28 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-/// Keywords a rejection is likely to contain -- used only to decide
-/// whether an upload counts as accepted, never to build a user-facing
-/// message (the raw body is already short and shown verbatim instead).
-fn looks_like_rejection(body: &str) -> bool {
-    let b = body.to_lowercase();
-    b.contains("error") || b.contains("invalid") || b.contains("fail") || b.contains("denied") || b.contains("unauthorized")
+/// Classifies a real `NewEntry.aspx` reply -- confirmed against two
+/// independent real source files (see this module's top doc comment):
+/// `<insert>1` means the record was newly stored, `<insert>0` means
+/// HRDLog already had it (a real duplicate, not a failure). Anything else
+/// (including the `<error>...</error>` shape this module's own Test
+/// Connection responses show) is treated as a rejection -- there's no
+/// confirmed third outcome shape to special-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertOutcome {
+    Stored,
+    AlreadyPresent,
+    Rejected,
+}
+
+fn insert_outcome(body: &str) -> InsertOutcome {
+    if body.contains("<insert>1") {
+        InsertOutcome::Stored
+    } else if body.contains("<insert>0") {
+        InsertOutcome::AlreadyPresent
+    } else {
+        InsertOutcome::Rejected
+    }
 }
 
 fn clip(s: &str) -> String {
@@ -146,7 +163,7 @@ fn send(callsign: &str, code: &str, adif: &str) -> Result<RawResponse, String> {
         ("Callsign", callsign),
         ("Code", code),
         ("App", APP_NAME),
-        ("ADIF", adif),
+        ("ADIFData", adif),
     ]);
     match result {
         Ok(r) => Ok(RawResponse { status: r.status(), body: r.into_string().unwrap_or_default() }),
@@ -165,7 +182,8 @@ pub struct ConnectionCheck {
 
 /// See this module's top doc comment: reports whether HRDLog answered at
 /// all, with its raw (short, flattened) response text for the operator to
-/// judge -- an empty `ADIF` field is sent so nothing is actually logged.
+/// judge -- an empty `ADIFData` field is sent so nothing is actually
+/// logged.
 pub fn check_connection(callsign: &str, code: &str) -> ConnectionCheck {
     if callsign.trim().is_empty() || code.trim().is_empty() {
         return ConnectionCheck { ok: false, detail: Some("Enter your HRDLog.net callsign and Code first.".to_string()) };
@@ -182,23 +200,45 @@ pub fn check_connection(callsign: &str, code: &str) -> ConnectionCheck {
 #[derive(Debug, Default, Serialize)]
 pub struct HrdlogUploadResult {
     pub uploaded: usize,
+    pub already_present: usize,
     pub failed: usize,
     pub error: Option<String>,
 }
 
-fn upload_and_mark_one(db: &Db, callsign: &str, code: &str, q: &QsoRecord) -> Result<(), String> {
+enum UploadOutcome {
+    Stored,
+    AlreadyPresent,
+    Failed(String),
+}
+
+fn upload_contact(callsign: &str, code: &str, q: &QsoRecord) -> UploadOutcome {
     let adif = adif_record(callsign, q);
-    let resp = send(callsign, code, &adif)?;
+    let resp = match send(callsign, code, &adif) {
+        Ok(r) => r,
+        Err(e) => return UploadOutcome::Failed(e),
+    };
     if !(200..300).contains(&resp.status) {
-        return Err(format!("HTTP {}: {}", resp.status, clip(&resp.body)));
+        return UploadOutcome::Failed(format!("HTTP {}: {}", resp.status, clip(&resp.body)));
     }
-    if looks_like_rejection(&resp.body) {
-        return Err(clip(&resp.body));
+    match insert_outcome(&resp.body) {
+        InsertOutcome::Stored => UploadOutcome::Stored,
+        InsertOutcome::AlreadyPresent => UploadOutcome::AlreadyPresent,
+        // Not a confirmed <insert>0/1 -- a genuine <error>, or an
+        // unrecognized shape. Either way, treat as a failure (left
+        // unsynced for the next attempt) rather than silently assume
+        // success for a reply we don't understand.
+        InsertOutcome::Rejected => UploadOutcome::Failed(clip(&resp.body)),
     }
-    if let Some(id) = q.id {
-        let _ = db.mark_synced(id, "hrdlog");
+}
+
+fn upload_and_mark_one(db: &Db, callsign: &str, code: &str, q: &QsoRecord) -> UploadOutcome {
+    let outcome = upload_contact(callsign, code, q);
+    if matches!(outcome, UploadOutcome::Stored | UploadOutcome::AlreadyPresent) {
+        if let Some(id) = q.id {
+            let _ = db.mark_synced(id, "hrdlog");
+        }
     }
-    Ok(())
+    outcome
 }
 
 /// Uploads every QSO not yet marked synced to HRDLog.net
@@ -215,8 +255,9 @@ pub fn upload_pending(db: &Db, callsign: &str, code: &str) -> HrdlogUploadResult
     let mut result = HrdlogUploadResult::default();
     for q in &pending {
         match upload_and_mark_one(db, callsign.trim(), code.trim(), q) {
-            Ok(()) => result.uploaded += 1,
-            Err(e) => {
+            UploadOutcome::Stored => result.uploaded += 1,
+            UploadOutcome::AlreadyPresent => result.already_present += 1,
+            UploadOutcome::Failed(e) => {
                 if result.error.is_none() {
                     result.error = Some(e);
                 }
@@ -273,10 +314,13 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_rejection_matches_common_error_wording() {
-        assert!(looks_like_rejection("Error: invalid code"));
-        assert!(looks_like_rejection("ACCESS DENIED"));
-        assert!(!looks_like_rejection("OK, 1 QSO added"));
+    fn insert_outcome_classifies_the_confirmed_reply_shapes() {
+        assert_eq!(insert_outcome("<insert>1"), InsertOutcome::Stored);
+        assert_eq!(insert_outcome("<insert>0"), InsertOutcome::AlreadyPresent);
+        assert_eq!(
+            insert_outcome("<error>Missing Call QSO_Date Time_On Band Mode...</error>"),
+            InsertOutcome::Rejected
+        );
     }
 
     #[test]

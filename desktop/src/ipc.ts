@@ -765,6 +765,7 @@ export interface ClublogUploadResult {
 
 export interface HrdlogUploadResult {
   uploaded: number;
+  already_present: number;
   failed: number;
   error: string | null;
 }

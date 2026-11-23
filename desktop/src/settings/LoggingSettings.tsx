@@ -1534,9 +1534,12 @@ function HrdlogDialog({ callsign, onClose }: { callsign: string; onClose: () => 
     setBusy(false);
     api.hrdlogPendingUploadCount().then(setPendingCount);
     if (result.error) {
-      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.failed} failed -- ${result.error}`, ok: result.uploaded > 0 });
+      setUploadStatus({
+        text: `${result.uploaded} uploaded, ${result.already_present} already there, ${result.failed} failed -- ${result.error}`,
+        ok: result.uploaded + result.already_present > 0,
+      });
     } else {
-      setUploadStatus({ text: `${result.uploaded} uploaded`, ok: true });
+      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.already_present} already there`, ok: true });
     }
   }
 
