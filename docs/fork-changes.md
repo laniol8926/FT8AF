@@ -933,6 +933,25 @@ for the Hamlib version workaround needed there.
     together -- `qrz_qsl` and `lotw_rcvd` are set independently from the
     two separate fields, never conflated as the same fact.
 
+- **Real data-integrity bug found and fixed 2026-11-23: the Rust test
+  suite was writing fake QSOs into the real `~/Downloads/FT8AF/
+  ft8af_log.adi`.** `engine.rs`'s own tests complete full simulated QSOs
+  using placeholder callsigns (`K0XYZ`/`K1ABC`, etc.), and the "ADIF log
+  file" mirror feature (`adif_log_file.rs`) defaults to *on* when its
+  config key is unset -- which a test's fresh in-memory `Db` always is.
+  With `log_file_path()` unconditionally resolving to the real OS
+  Downloads directory, every `cargo test` run on a developer's machine
+  silently appended a fake record into that machine's real log mirror
+  file. Confirmed the actual damage on the machine this was found on:
+  226 of the file's 255 lines were fake (`station_callsign=K0XYZ`),
+  built up across however many test runs happened before this was
+  caught -- only 28 lines were real QSOs. The original file was backed
+  up and the fake lines removed, keeping the real ones in order. Fixed
+  at the source: `log_file_path()` now unconditionally returns `None`
+  under `#[cfg(test)]`, protecting every current and future test that
+  exercises the QSO-completion path, not just a specific test someone
+  remembers to patch.
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now
