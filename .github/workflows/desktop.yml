@@ -24,6 +24,10 @@ on:
       - 'desktop-v*'
   pull_request:
     branches: [main, dev]
+  # Manual, on-demand bundled build from any branch (e.g. to hand someone an
+  # installer to test without merging WIP into main) -- see the `version` job's
+  # `workflow_dispatch` tag branch below for the one-off tag scheme this uses.
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -71,7 +75,11 @@ jobs:
           # main pushes and desktop-v* tags always build the full
           # release; otherwise (dev push, PRs) build only when desktop-relevant
           # files changed.
-          if [[ "$GITHUB_EVENT_NAME" == "push" && ( "$GITHUB_REF" == "refs/heads/main" || "$GITHUB_REF" == refs/tags/desktop-v* ) ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            # Manual run: always build, on whatever branch it was dispatched
+            # from -- there's no base ref to path-filter against.
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && ( "$GITHUB_REF" == "refs/heads/main" || "$GITHUB_REF" == refs/tags/desktop-v* ) ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif [[ "$CHANGED" == "true" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -105,7 +113,26 @@ jobs:
           set -euo pipefail
           # Mirrors the Android lane logic but in the desktop-v* / desktop-dev-N
           # namespace so desktop releases sort separately from the app's.
-          if [[ "$GITHUB_EVENT_NAME" == "push" && "${GITHUB_REF}" == refs/tags/desktop-v* ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            # On-demand bundled build from whatever branch this was dispatched
+            # on (see the `on:` block's workflow_dispatch comment) -- a
+            # throwaway, clearly-labeled prerelease tag, never desktop-v* and
+            # never the main-push desktop-dev.N scheme, so it can't collide
+            # with either.
+            branch_slug="${GITHUB_REF_NAME//\//-}"
+            new_tag="desktop-manual.${GITHUB_RUN_NUMBER}"
+            latest=$(git tag --list 'desktop-v*' --sort=-v:refname | head -n1)
+            base_ver="${latest:+${latest#desktop-v}}"
+            base_ver="${base_ver:-0.1.0}"
+            echo "release_tag=$new_tag" >> "$GITHUB_OUTPUT"
+            echo "version_name=${base_ver}-manual.${GITHUB_RUN_NUMBER} (${branch_slug})" >> "$GITHUB_OUTPUT"
+            IFS='.' read -ra parts <<< "$base_ver"
+            last_idx=$((${#parts[@]} - 1))
+            parts[$last_idx]=$((parts[$last_idx] + 1))
+            echo "app_version=$(IFS=.; echo "${parts[*]}")-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && "${GITHUB_REF}" == refs/tags/desktop-v* ]]; then
             echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
             echo "version_name=${GITHUB_REF_NAME#desktop-v}" >> "$GITHUB_OUTPUT"
             echo "app_version=${GITHUB_REF_NAME#desktop-v}" >> "$GITHUB_OUTPUT"
