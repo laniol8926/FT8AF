@@ -812,6 +812,21 @@ for the Hamlib version workaround needed there.
     documented response to an empty list) or rejected (401) -- inferred
     from the documented validation order, not itself a documented
     connectivity check.
+  - **Real bug found live 2026-11-23, not a code bug but a token
+    config issue**: "our app upload did not work for clublog" -- QSOs
+    this app had marked synced never actually appeared on the user's
+    real account. A real single-QSO upload (something Test Connection's
+    empty-batch probe never exercises) revealed the cause: the user's
+    token was created with Club Log's own "Test mode" checkbox on.
+    Every upload gets a completely normal `"status":"created"` reply,
+    but `"test_mode":true` plus `"Test mode: parameters ok, nothing
+    stored."` means nothing is ever actually written. `item_outcome`
+    now checks for `test_mode` first, before anything else, so this can
+    never again be silently counted as success -- surfaces a clear
+    "this token is in Test Mode" error instead. The operator needs a
+    fresh, non-test-mode token, and every QSO's `synced_clublog` flag
+    needs resetting once they have one, since every prior "success" was
+    fake.
   - **HRDLog.net** (`hrdlog.rs`) -- **lower confidence than every other
     integration in this app**, flagged loudly in its own top doc comment,
     the Settings dialog's own description text, and here: HRDLog.net's
