@@ -29,6 +29,7 @@ import {
   type OperatingMode,
   type PskReporterSpot,
   type QsoRecord,
+  type QueuedCaller,
   type RigStatusEvent,
   type TxStateEvent,
   type UiMessage,
@@ -91,6 +92,7 @@ import {
 import {
   buildQsoLog, decideTxLog, formatTxLogText, mergeRxLog, qsoHeaderText, seedCqEntry, type QsoLogEntry,
 } from "./activeQsoPanel";
+import { callerSnrLabel, orderCallerQueue } from "./callerQueue";
 import {
   buildQsoSteps, computeBeamHeadings, computeCurrentStepIndex, computeDistanceText,
   computeGrayLineStatusText, computeLastHeard, formatHeading, formatLocationLine,
@@ -644,6 +646,11 @@ export default function App() {
   // (not just inside Settings) because it drives the QSO Sheet's Call
   // button, not just the Settings row itself.
   const [holdTxFreq, setHoldTxFreq] = useState(true);
+  // Settings -> Transmission's "Work strongest caller first" (Android's
+  // own `pileupStrongestFirst`, exact key name, default false/FIFO).
+  // Read here (not just inside Settings) because it also orders the
+  // caller-queue bar's chips in the active-QSO panel below.
+  const [pileupStrongestFirst, setPileupStrongestFirst] = useState(false);
 
   // Shared by the decode row's direct click and the QSO Sheet's Call
   // button, so both paths send the exact same answer.
@@ -658,6 +665,13 @@ export default function App() {
       delta_freq: holdTxFreq ? 0 : Math.round(m.freq_hz),
       msg_utc_ms: m.utc_ms,
     });
+  }
+
+  // Operator tapped a caller-queue chip -- see QueuedCaller. Same "no seed"
+  // shape as answering a plain directed reply above (not a CQ), since a
+  // queued caller got there by calling us directly, not broadcasting CQ.
+  function answerQueuedCaller(callsign: string) {
+    api.answerQueuedCaller(callsign);
   }
 
   function refreshWorkedCalls() {
@@ -988,6 +1002,7 @@ export default function App() {
       setHuntMinSnr(Number.isNaN(n) ? null : n);
     });
     api.getConfig("holdTxFreq").then((v) => setHoldTxFreq(v !== "0"));
+    api.getConfig("pileupStrongestFirst").then((v) => setPileupStrongestFirst(v === "1"));
     maybeAutoStartDecode();
     return () => {
       cancelled = true;
@@ -1459,6 +1474,9 @@ export default function App() {
             targetFreqHz={targetFreqHz}
             qsoTransmitting={isTransmitting}
             qsoPowerWatts={meter?.power_watts ?? null}
+            callerQueue={txState?.status.caller_queue ?? []}
+            pileupStrongestFirst={pileupStrongestFirst}
+            onAnswerQueuedCaller={answerQueuedCaller}
           />
         )}
         {tab === "waterfall" && (
@@ -1568,6 +1586,11 @@ export default function App() {
             onHoldTxFreq={(v) => {
               setHoldTxFreq(v);
               api.setConfig("holdTxFreq", v ? "1" : "0");
+            }}
+            pileupStrongestFirst={pileupStrongestFirst}
+            onPileupStrongestFirst={(v) => {
+              setPileupStrongestFirst(v);
+              api.setConfig("pileupStrongestFirst", v ? "1" : "0");
             }}
             inputGain={inputGain}
             onInputGain={onInputGain}
@@ -3745,9 +3768,9 @@ function EmptyState({ filter, operatingMode }: { filter: Filter; operatingMode: 
  * CQ or QSO is running -- see activeQsoPanel.ts for the ported logic and
  * App.tsx's wiring (qsoActive/qsoLog/qsoTarget/qsoTransmitting/
  * qsoPowerWatts). Ported from Android's ActiveQsoPanel.kt's header +
- * message-log rows; the PAUSE/LOG buttons, caller-queue bar, and manual
- * TX1-5 selector are deliberately not here -- see activeQsoPanel.ts's doc
- * comment for why.
+ * message-log rows + caller-queue bar; the PAUSE/LOG buttons and manual
+ * TX1-5 selector are still deliberately not here -- see activeQsoPanel.ts's
+ * doc comment for why.
  */
 function ActiveQsoPanelView({
   entries,
@@ -3755,12 +3778,18 @@ function ActiveQsoPanelView({
   target,
   isTransmitting,
   powerWatts,
+  callerQueue,
+  strongestFirst,
+  onAnswerCaller,
 }: {
   entries: QsoLogEntry[];
   hasTarget: boolean;
   target: string | null;
   isTransmitting: boolean;
   powerWatts: number | null;
+  callerQueue: QueuedCaller[];
+  strongestFirst: boolean;
+  onAnswerCaller: (callsign: string) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -3776,6 +3805,22 @@ function ActiveQsoPanelView({
           <span className="qso-panel-power">{formatPowerWatts(powerWatts)}</span>
         )}
       </div>
+      {callerQueue.length > 0 && (
+        <div className="qso-panel-caller-queue">
+          <span className="qso-panel-caller-queue-label">calling:</span>
+          {orderCallerQueue(callerQueue, strongestFirst).map((c) => (
+            <button
+              key={c.callsign}
+              className="qso-panel-caller-chip"
+              onClick={() => onAnswerCaller(c.callsign)}
+              title={`Answer ${c.callsign} now (ends the current QSO's courtesy close)`}
+            >
+              <span className="qso-panel-caller-chip-call">{c.callsign}</span>
+              <span className="qso-panel-caller-chip-snr">{callerSnrLabel(c.snr)}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="qso-panel-log" ref={listRef}>
         {entries.length === 0 ? (
           <div className="qso-panel-waiting">Waiting for messages...</div>
@@ -4131,6 +4176,12 @@ function DecodeScreen(props: {
   targetFreqHz: number | null;
   qsoTransmitting: boolean;
   qsoPowerWatts: number | null;
+  // Caller queue (pileup-while-busy) -- other stations calling us while
+  // qsoActive, shown as tappable chips inside the locked panel. See
+  // callerQueue.ts and qso.rs's QueuedCaller doc comment.
+  callerQueue: QueuedCaller[];
+  pileupStrongestFirst: boolean;
+  onAnswerQueuedCaller: (callsign: string) => void;
 }) {
   const {
     rightPane, messages, sortMode, myGrid, myCall, dialHz, txTarget, operatingMode, filter, setFilter,
@@ -4139,6 +4190,7 @@ function DecodeScreen(props: {
     txFreq, onSelectFreq, onAnswer, onInfo,
     decoding, audio, displayHz, onDisplayHz, denoise, onDenoise, showMessages, onToggleMessages,
     qsoActive, qsoLog, qsoTarget, targetFreqHz, qsoTransmitting, qsoPowerWatts,
+    callerQueue, pileupStrongestFirst, onAnswerQueuedCaller,
   } = props;
 
   // Default "time" mode keeps the existing full-history, per-slot-grouped
@@ -4186,6 +4238,9 @@ function DecodeScreen(props: {
                 target={qsoTarget}
                 isTransmitting={qsoTransmitting}
                 powerWatts={qsoPowerWatts}
+                callerQueue={callerQueue}
+                strongestFirst={pileupStrongestFirst}
+                onAnswerCaller={onAnswerQueuedCaller}
               />
             ) : (
             <>

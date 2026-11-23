@@ -50,6 +50,18 @@ export interface InputLevelEvent {
   status: InputLevelStatus;
 }
 
+/** A station other than our current target calling us while a QSO is in
+ *  progress -- see `qso.rs`'s `QueuedCaller` doc comment. */
+export interface QueuedCaller {
+  callsign: string;
+  grid: string;
+  snr: number;
+  freq_hz: number;
+  extra: string;
+  queued_at_ms: number;
+  last_heard_ms: number;
+}
+
 export interface QsoStatus {
   active: boolean;
   stage: TxStage;
@@ -57,6 +69,7 @@ export interface QsoStatus {
   tx_message: string | null;
   report_sent: number | null;
   report_rcvd: number | null;
+  caller_queue: QueuedCaller[];
 }
 
 export interface TxStateEvent {
@@ -427,6 +440,9 @@ export const api = {
    *  current TX offset -- see Settings -> Transmission's "Hold TX freq". */
   answer: (args: { call_from: string; grid: string; snr: number; delta_freq?: number; msg_utc_ms?: number }) =>
     invoke("answer", { args }),
+  /** Operator tapped a caller-queue chip (a station calling us while busy
+   *  with a different target) -- see `QueuedCaller`. */
+  answerQueuedCaller: (callsign: string) => invoke("answer_queued_caller", { callsign }),
   setStage: (stage: TxStage) => invoke("set_stage", { stage }),
   stopTx: () => invoke("stop_tx"),
   setTxPeriod: (parity: number | null) => invoke("set_tx_period", { parity }),

@@ -509,6 +509,18 @@ select option {
 .qso-panel-row-time { flex: none; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .qso-panel-row-text { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qso-panel-row-snr { flex: none; color: var(--signal); font-variant-numeric: tabular-nums; }
+.qso-panel-caller-queue {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px;
+}
+.qso-panel-caller-queue-label {
+  color: var(--text-faint); font-size: 9px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+}
+.qso-panel-caller-chip {
+  display: flex; align-items: center; gap: 4px; border: none; border-radius: var(--radius-xs);
+  background: var(--signal-soft); padding: 2px 6px; cursor: pointer; font-family: inherit;
+}
+.qso-panel-caller-chip-call { color: var(--signal); font-size: 10px; font-weight: 600; }
+.qso-panel-caller-chip-snr { color: var(--signal); opacity: 0.65; font-size: 9px; font-variant-numeric: tabular-nums; }
 
 /* The slot-boundary divider, with the UTC time/station-count label
    superimposed on the center of the bold line itself (rather than a

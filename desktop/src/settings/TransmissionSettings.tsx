@@ -93,13 +93,18 @@ const TUNE_METHOD_OPTIONS: { value: number; label: string }[] = [
  *   real (`autoCQAfterQSO`) -- note its *default* is kept at desktop's own
  *   historical always-on behavior, not Android's off-by-default, to avoid
  *   silently changing how every existing install behaves (see `engine.rs`'s
- *   `Engine::new` doc comment). Hunt + CQ, Auto-call Followed, Fast
- *   turnaround, and Work strongest caller first are disclosed stubs: each
- *   needs new auto-sequencer logic (idle-CQ/Hunt switching, a caller queue,
- *   decode-window timing in the same safety-sensitive class as Advanced's
- *   PTT/TX Delay) that didn't fit in this pass. Auto clear TX offset is
- *   also a disclosed stub -- it needs a real band-activity clear-spot
- *   scan (`ClearFrequencyFinder` in Android), new DSP/logic work.
+ *   `Engine::new` doc comment). Hunt + CQ, Auto-call Followed, and Fast
+ *   turnaround are disclosed stubs: each needs new auto-sequencer logic
+ *   (idle-CQ/Hunt switching, decode-window timing in the same
+ *   safety-sensitive class as Advanced's PTT/TX Delay) that didn't fit in
+ *   this pass. Auto clear TX offset is also a disclosed stub -- it needs a
+ *   real band-activity clear-spot scan (`ClearFrequencyFinder` in
+ *   Android), new DSP/logic work. Work strongest caller first is now real
+ *   (`pileupStrongestFirst`, Android's own key name) -- it orders the
+ *   caller-queue bar's chips (`App.tsx`'s `ActiveQsoPanelView`, `qso.rs`'s
+ *   `QueuedCaller`/`offer_callers`); auto-working the queue without a tap
+ *   is a separate, not-yet-built follow-on (see that feature's own plan
+ *   doc), so this setting only affects display order for now.
  */
 export function TransmissionSettings({
   huntEnabled,
@@ -112,6 +117,8 @@ export function TransmissionSettings({
   onHuntMinSnr,
   holdTxFreq,
   onHoldTxFreq,
+  pileupStrongestFirst,
+  onPileupStrongestFirst,
 }: {
   huntEnabled: boolean;
   onHuntEnabled: (v: boolean) => void;
@@ -123,6 +130,8 @@ export function TransmissionSettings({
   onHuntMinSnr: (v: number | null) => void;
   holdTxFreq: boolean;
   onHoldTxFreq: (v: boolean) => void;
+  pileupStrongestFirst: boolean;
+  onPileupStrongestFirst: (v: boolean) => void;
 }) {
   const [openDialog, setOpenDialog] = useState<OpenDialog>(null);
 
@@ -354,8 +363,9 @@ export function TransmissionSettings({
           />
           <SettingsRow
             label="Work strongest caller first"
-            description="In a pileup, auto-work the strongest waiting caller next instead of the one who called earliest -- needs a caller queue desktop's single-target QSO model doesn't have yet"
-            disabled
+            description="Orders the caller-queue bar's chips by signal strength instead of who called first. Only affects the chip order and this setting's own display order -- auto-working the queue without a tap isn't built yet, so this doesn't change anything on its own until you tap a chip."
+            toggle={pileupStrongestFirst}
+            onToggleChange={onPileupStrongestFirst}
           />
           <SettingsRow
             label="Auto clear TX offset"

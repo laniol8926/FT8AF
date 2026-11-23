@@ -312,6 +312,13 @@ fn answer(state: State<AppState>, args: AnswerArgs) {
     state.engine.send(EngineCommand::Answer(args));
 }
 
+/// Operator tapped a caller-queue chip in the active-QSO panel -- see
+/// `qso.rs`'s `QueuedCaller` doc comment.
+#[tauri::command]
+fn answer_queued_caller(state: State<AppState>, callsign: String) {
+    state.engine.send(EngineCommand::AnswerQueuedCaller { callsign });
+}
+
 #[tauri::command]
 fn set_stage(state: State<AppState>, stage: ft8af::qso::TxStage) {
     state.engine.send(EngineCommand::SetStage(stage));
@@ -1399,6 +1406,7 @@ fn main() {
             set_clock_offset,
             start_cq,
             answer,
+            answer_queued_caller,
             set_stage,
             stop_tx,
             set_tx_period,

@@ -13,15 +13,21 @@
  * natural fit for desktop's single always-visible panel (no separate
  * portrait/landscape mode to choose between).
  *
- * Deliberately not ported (real backend features that don't exist on
- * desktop yet, not a UI oversight): the PAUSE button (Android's hold-TX-
- * to-listen mechanic), the LOG button (force-log-and-move-on), the caller
- * queue bar, and the manual TX1-5 stage selector row (desktop's own
- * `set_stage`/`EngineCommand::SetStage` already covers manual stage
- * selection elsewhere in the UI). Each needs backend work the earlier
- * Call CQ/Answer CQ audit already catalogued as separate, unbuilt pieces
- * (Hunt/caller-queue, the pause mechanic, forceLogAndMoveOn) -- building a
- * button here that calls nothing real would be the opposite of disclosure.
+ * The caller-queue bar (other stations calling us while busy with a
+ * different target) is now real -- see `callerQueue.ts` and `App.tsx`'s
+ * `ActiveQsoPanelView`/`qso.rs`'s `QueuedCaller`/`offer_callers`. Still
+ * deliberately not ported (real backend features that don't exist on
+ * desktop yet, not a UI oversight): the PAUSE button (not stock
+ * Android/WSJT-X behavior -- the user's own fork's addition: momentarily
+ * suspends TX so a low-power (e.g. 5W) operator can check the waterfall
+ * for another station stepping on the same frequency, with a short window
+ * to QSY if so, before resuming), the LOG button (`forceLogAndMoveOn`'s
+ * force-log-a-partial-QSO behavior -- the caller-queue chips reuse plain
+ * `answer()`'s
+ * existing "abandon, don't log the old one" behavior instead, see that
+ * feature's own plan doc's "Scope decision"), and the manual TX1-5 stage
+ * selector row (desktop's own `set_stage`/`EngineCommand::SetStage`
+ * already covers manual stage selection elsewhere in the UI).
  */
 
 import type { UiMessage } from "./ipc";

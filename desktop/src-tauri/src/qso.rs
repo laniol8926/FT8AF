@@ -44,6 +44,29 @@ pub struct QsoStatus {
     pub tx_message: Option<String>,
     pub report_sent: Option<i32>,
     pub report_rcvd: Option<i32>,
+    /// Other stations currently calling us while we're busy with `target` --
+    /// see `QueuedCaller`'s own doc comment.
+    pub caller_queue: Vec<QueuedCaller>,
+}
+
+/// A station other than our current target that called us (a directed
+/// message naming our callsign) while a QSO was already in progress --
+/// ported from Android's `QueuedCaller`/`FT8TransmitSignal.callerQueue`.
+/// Unlike [`DormantQso`] (which only ever tracks OUR just-finished partner
+/// for a repeat-73 courtesy answer), this tracks genuinely different
+/// stations so the operator can jump to one without losing the locked
+/// active-QSO panel view or interrupting the TX already in flight to the
+/// current target. See `QsoEngine::offer_callers`'s doc comment for
+/// exactly when an entry is added/refreshed/pruned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedCaller {
+    pub callsign: String,
+    pub grid: String,
+    pub snr: i32,
+    pub freq_hz: f32,
+    pub extra: String,
+    pub queued_at_ms: i64,
+    pub last_heard_ms: i64,
 }
 
 /// What the engine wants the scheduler to do after processing a slot.
@@ -60,7 +83,7 @@ pub enum QsoOutcome {
     GaveUpTarget,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Content {
     Grid(String),
     Report(i32),
@@ -202,7 +225,16 @@ pub struct QsoEngine {
     /// entry) instead of being gated by stage/content the way a normal
     /// completion is.
     answering_dormant_repeat: bool,
+    /// See `QueuedCaller`'s doc comment. Deliberately NOT cleared by
+    /// `reset_qso`/`answer` (switching to a different, possibly
+    /// queue-sourced target must leave any OTHER queued callers intact for
+    /// a later tap) -- only `stop()` and `start_cq()` clear it, matching
+    /// Android's own clear call sites (TX deactivated, operator pressed CQ).
+    caller_queue: Vec<QueuedCaller>,
 }
+
+/// Matches Android's `FT8TransmitSignal.MAX_QUEUE_SIZE`.
+const MAX_CALLER_QUEUE: usize = 10;
 
 /// See `QsoEngine::dormant`'s doc comment.
 #[derive(Debug, Clone)]
@@ -252,6 +284,7 @@ impl QsoEngine {
             final_ack_sends: 0,
             dormant: None,
             answering_dormant_repeat: false,
+            caller_queue: Vec::new(),
         }
     }
 
@@ -263,6 +296,7 @@ impl QsoEngine {
             tx_message: self.tx_message.clone(),
             report_sent: self.report_sent,
             report_rcvd: self.report_rcvd,
+            caller_queue: self.caller_queue.clone(),
         }
     }
 
@@ -358,6 +392,7 @@ impl QsoEngine {
     pub fn start_cq(&mut self) {
         self.reset_qso();
         self.dormant = None; // a deliberate new CQ abandons any repeat-answer window
+        self.clear_caller_queue();
         self.active = true;
         self.stage = TxStage::Cq;
         self.tx_message = Some(format!("CQ {} {}", self.my_call, self.my_grid));
@@ -429,6 +464,7 @@ impl QsoEngine {
         // re-activate and transmit to a stale target/report from the QSO we
         // just stopped (mirrors the iOS QsoEngine.stop()).
         self.reset_qso();
+        self.clear_caller_queue();
     }
 
     fn reset_qso(&mut self) {
@@ -654,6 +690,104 @@ impl QsoEngine {
             TxStage::Bye73 | TxStage::Idle => {}
         }
         None
+    }
+
+    /// Scan a decoded slot for stations OTHER than our current target
+    /// calling us, and queue/refresh/prune them -- ported from Android's
+    /// `FT8TransmitSignal.refreshCallerQueue`. Deliberately a SEPARATE pass
+    /// over `messages` from `process_rx`, called unconditionally every
+    /// cycle regardless of stage: `process_rx` itself early-returns at
+    /// `TxStage::Bye73` (see its own comment) before ever looking at
+    /// `messages` for a third party, which is exactly why a station calling
+    /// during our courtesy-73 retries was invisible before this existed
+    /// (the live bug this ports Android's fix for).
+    ///
+    /// `cycle_ms` is the current mode's slot length (15 s FT8 / 7.5 s FT4,
+    /// `Mode::cycle_ms()` in `engine.rs`) -- passed in rather than stored,
+    /// so this pure state machine doesn't need to depend on `crate::mode`
+    /// for what both other give-up timers already treat as an engine-side
+    /// concern. Pruning uses "one full cycle without being heard again"
+    /// (`2 * cycle_ms`, boundary inclusive), matching Android's
+    /// `CallerQueueOrdering.hasGivenUp`.
+    pub fn offer_callers(&mut self, messages: &[DecodedMessage], now_ms: i64, cycle_ms: i64) {
+        if !self.active || self.target.is_none() {
+            return;
+        }
+        let target = self.target.clone();
+        for m in messages {
+            if !crate::callsign::is_my_callsign(&m.call_to, &self.my_call) {
+                continue;
+            }
+            if target.as_deref().is_some_and(|t| m.call_from.eq_ignore_ascii_case(t)) {
+                continue; // our own QSO partner, not a third party
+            }
+            if classify(m) == Content::Bye73 {
+                continue; // a bare courtesy "73" carries nothing worth queuing
+            }
+            let call = m.call_from.to_uppercase();
+            if let Some(existing) = self.caller_queue.iter_mut().find(|q| q.callsign == call) {
+                // Mirrors QueuedCaller.refresh: take the new SNR, never move
+                // last_heard_ms backward (an evidence/deep pass can replay
+                // an older slot's decode after a newer one already counted).
+                existing.snr = m.snr;
+                existing.grid = m.grid.clone();
+                existing.extra = m.extra.clone();
+                existing.freq_hz = m.freq_hz;
+                existing.last_heard_ms = existing.last_heard_ms.max(now_ms);
+            } else if self.caller_queue.len() < MAX_CALLER_QUEUE {
+                self.caller_queue.push(QueuedCaller {
+                    callsign: call,
+                    grid: m.grid.clone(),
+                    snr: m.snr,
+                    freq_hz: m.freq_hz,
+                    extra: m.extra.clone(),
+                    queued_at_ms: now_ms,
+                    last_heard_ms: now_ms,
+                });
+            }
+        }
+        self.prune_given_up_callers(now_ms, cycle_ms);
+    }
+
+    fn prune_given_up_callers(&mut self, now_ms: i64, cycle_ms: i64) {
+        let max_idle_ms = 2 * cycle_ms;
+        self.caller_queue.retain(|q| now_ms - q.last_heard_ms <= max_idle_ms);
+    }
+
+    /// Remove and return a specific queued caller regardless of staleness --
+    /// the operator's own explicit tap, which should always be honored
+    /// (matches Android's `dequeueSpecificCaller` deliberately skipping the
+    /// give-up prune).
+    pub fn dequeue_specific(&mut self, callsign: &str) -> Option<QueuedCaller> {
+        let idx = self.caller_queue.iter().position(|q| q.callsign.eq_ignore_ascii_case(callsign))?;
+        Some(self.caller_queue.remove(idx))
+    }
+
+    /// Prune given-up callers, then pick the next one to auto-work: FIFO
+    /// (first queued) normally, or strongest SNR first when
+    /// `strongest_first` -- ties favor the earlier-queued entry, matching
+    /// `CallerQueueOrdering.pickNextIndex`. Not wired to any automatic
+    /// call site yet (see this feature's plan doc) -- built now since the
+    /// UI's own chip ordering needs the identical comparator.
+    pub fn dequeue_next(&mut self, strongest_first: bool, now_ms: i64, cycle_ms: i64) -> Option<QueuedCaller> {
+        self.prune_given_up_callers(now_ms, cycle_ms);
+        if self.caller_queue.is_empty() {
+            return None;
+        }
+        let idx = if strongest_first {
+            self.caller_queue
+                .iter()
+                .enumerate()
+                .max_by_key(|(i, q)| (q.snr, std::cmp::Reverse(*i)))
+                .map(|(i, _)| i)?
+        } else {
+            0
+        };
+        Some(self.caller_queue.remove(idx))
+    }
+
+    pub fn clear_caller_queue(&mut self) {
+        self.caller_queue.clear();
     }
 
     /// Shared by total silence and a non-advancing reply (see `advanced`
@@ -1864,5 +1998,170 @@ mod tests {
         // original QSO was abandoned the moment a new CQ was started.
         assert!(e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]).is_none());
         assert!(!e.status().active);
+    }
+
+    // --- Caller queue (pileup-while-busy) -----------------------------
+
+    const CYCLE_MS: i64 = 15_000;
+
+    #[test]
+    fn a_third_station_calling_mid_qso_is_queued() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 3)], 1_000, CYCLE_MS);
+        assert_eq!(e.status().caller_queue.len(), 1);
+        assert_eq!(e.status().caller_queue[0].callsign, "IT9ABC");
+        assert_eq!(e.status().caller_queue[0].snr, 3);
+    }
+
+    #[test]
+    fn the_current_partner_and_bare_73s_are_never_queued() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(
+            &[
+                msg("K0XYZ", "K1ABC", "-12", "", -8), // our own partner
+                msg("K0XYZ", "IT9ABC", "73", "", 3),  // a bare courtesy 73
+            ],
+            1_000,
+            CYCLE_MS,
+        );
+        assert!(e.status().caller_queue.is_empty());
+    }
+
+    #[test]
+    fn offer_callers_does_nothing_when_idle_or_untargeted() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 3)], 1_000, CYCLE_MS);
+        assert!(e.status().caller_queue.is_empty());
+    }
+
+    #[test]
+    fn calling_again_refreshes_snr_without_duplicating_the_entry() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 3)], 1_000, CYCLE_MS);
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 9)], 2_000, CYCLE_MS);
+        assert_eq!(e.status().caller_queue.len(), 1);
+        assert_eq!(e.status().caller_queue[0].snr, 9);
+    }
+
+    #[test]
+    fn a_caller_who_goes_quiet_for_a_full_cycle_is_pruned() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 3)], 0, CYCLE_MS);
+        assert_eq!(e.status().caller_queue.len(), 1);
+        // Exactly one full cycle (2 slots) of silence -- boundary inclusive,
+        // matching Android's idleBoundary_isInclusive -- still present.
+        e.offer_callers(&[], 2 * CYCLE_MS, CYCLE_MS);
+        assert_eq!(e.status().caller_queue.len(), 1);
+        // One slot further -- now stale, pruned.
+        e.offer_callers(&[], 2 * CYCLE_MS + 1, CYCLE_MS);
+        assert!(e.status().caller_queue.is_empty());
+    }
+
+    #[test]
+    fn caller_queue_caps_at_ten() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        let decodes: Vec<_> = (0..12)
+            .map(|i| msg("K0XYZ", &format!("IT9A{i:02}"), "JN45", "JN45", i))
+            .collect();
+        e.offer_callers(&decodes, 1_000, CYCLE_MS);
+        assert_eq!(e.status().caller_queue.len(), MAX_CALLER_QUEUE);
+    }
+
+    #[test]
+    fn dequeue_specific_ignores_staleness_the_operator_explicitly_tapped() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 3)], 0, CYCLE_MS);
+        // Long past the prune window -- dequeue_specific must still honor
+        // the operator's own explicit tap.
+        let caller = e.dequeue_specific("IT9ABC");
+        assert_eq!(caller.unwrap().callsign, "IT9ABC");
+        assert!(e.status().caller_queue.is_empty());
+        assert!(e.dequeue_specific("IT9ABC").is_none(), "already removed");
+    }
+
+    #[test]
+    fn dequeue_next_fifo_by_default() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "FIRST", "JN45", "JN45", -5)], 0, CYCLE_MS);
+        e.offer_callers(&[msg("K0XYZ", "SECOND", "JN45", "JN45", 10)], 100, CYCLE_MS);
+        let next = e.dequeue_next(false, 200, CYCLE_MS).unwrap();
+        assert_eq!(next.callsign, "FIRST", "FIFO: earliest-queued wins even with a weaker signal");
+    }
+
+    #[test]
+    fn dequeue_next_strongest_first_breaks_ties_by_earliest_queued() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "FIRST", "JN45", "JN45", -5)], 0, CYCLE_MS);
+        e.offer_callers(&[msg("K0XYZ", "SECOND", "JN45", "JN45", 10)], 100, CYCLE_MS);
+        let next = e.dequeue_next(true, 200, CYCLE_MS).unwrap();
+        assert_eq!(next.callsign, "SECOND", "strongest SNR wins when enabled");
+
+        // Tie case: equal SNR favors the earlier-queued entry.
+        let mut e2 = QsoEngine::new("K0XYZ", "EN37");
+        e2.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e2.offer_callers(&[msg("K0XYZ", "FIRST", "JN45", "JN45", 5)], 0, CYCLE_MS);
+        e2.offer_callers(&[msg("K0XYZ", "SECOND", "JN45", "JN45", 5)], 100, CYCLE_MS);
+        let next2 = e2.dequeue_next(true, 200, CYCLE_MS).unwrap();
+        assert_eq!(next2.callsign, "FIRST", "equal SNR: earliest-queued wins the tie");
+    }
+
+    #[test]
+    fn stop_and_start_cq_clear_the_caller_queue_but_answer_does_not() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 3)], 0, CYCLE_MS);
+        assert_eq!(e.status().caller_queue.len(), 1);
+
+        // Switching target via answer() (e.g. tapping a DIFFERENT decode,
+        // not this queued caller) must leave the queue intact for later.
+        e.answer(&msg("CQ", "W1AW", "FN31", "FN31", -2));
+        assert_eq!(e.status().caller_queue.len(), 1, "answer() must not clear other queued callers");
+
+        e.stop();
+        assert!(e.status().caller_queue.is_empty(), "stop() clears the queue");
+
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.offer_callers(&[msg("K0XYZ", "IT9ABC", "JN45", "JN45", 3)], 0, CYCLE_MS);
+        e.start_cq();
+        assert!(e.status().caller_queue.is_empty(), "start_cq() clears the queue");
+    }
+
+    #[test]
+    fn exact_reported_bug_a_third_station_calls_during_the_courtesy_73_tail() {
+        // Reproduces the live bug report: operator answered K1ABC's CQ,
+        // reached the courtesy-73 retry stage (already logged -- see
+        // notify_transmitted's own doc comment), and a different station
+        // (modeled here as an Italian prefix) called directly. Before this
+        // feature existed, that third station was invisible to the engine
+        // entirely during Bye73 (process_rx's own early return). Mirrors
+        // Android's CallerQueueLivenessTest.completion_worksTheCallerStillCalling.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "-12", "", -8)]);
+        e.process_rx(&[msg("K0XYZ", "K1ABC", "RR73", "RR73", -8)]);
+        e.notify_transmitted(); // logs K1ABC, enters Bye73 repeat territory
+        assert_eq!(e.status().stage, TxStage::Bye73);
+        assert!(e.status().target.as_deref() == Some("K1ABC"));
+
+        // IT9XYZ calls directly while we're repeating the courtesy 73.
+        e.offer_callers(&[msg("K0XYZ", "IT9XYZ", "JN54", "JN54", 7)], 5_000, CYCLE_MS);
+        assert_eq!(e.status().caller_queue.len(), 1);
+        assert_eq!(e.status().caller_queue[0].callsign, "IT9XYZ");
+
+        // Operator taps the queued caller: dequeue, then answer -- K1ABC
+        // stays cleanly logged (already_logged, untouched), IT9XYZ becomes
+        // the new target.
+        let caller = e.dequeue_specific("IT9XYZ").unwrap();
+        e.answer(&msg(&e.my_call.clone(), &caller.callsign, &caller.extra, &caller.grid, caller.snr));
+        assert_eq!(e.status().target.as_deref(), Some("IT9XYZ"));
+        assert_eq!(e.status().stage, TxStage::Grid);
     }
 }

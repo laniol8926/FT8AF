@@ -54,6 +54,8 @@ export function SettingsScreen(props: {
   onHuntMinSnr: (v: number | null) => void;
   holdTxFreq: boolean;
   onHoldTxFreq: (v: boolean) => void;
+  pileupStrongestFirst: boolean;
+  onPileupStrongestFirst: (v: boolean) => void;
   inputGain: number;
   onInputGain: (v: number) => void;
   txGain: number;
@@ -104,6 +106,7 @@ export function SettingsScreen(props: {
     huntEnabled, onHuntEnabled,
     huntPriority, onHuntPriority, huntAvoidPileups, onHuntAvoidPileups, huntMinSnr, onHuntMinSnr,
     holdTxFreq, onHoldTxFreq,
+    pileupStrongestFirst, onPileupStrongestFirst,
     inputGain, onInputGain, txGain, onTxGain, displayHz, onDisplayHz,
     onUpdateGridTable, gridSeedBusy, onAudioBandConfigChanged,
     highlightConfig, onHighlightConfig, workedMode, onWorkedMode, workedScope, onWorkedScope,
@@ -286,6 +289,8 @@ export function SettingsScreen(props: {
           onHuntMinSnr={onHuntMinSnr}
           holdTxFreq={holdTxFreq}
           onHoldTxFreq={onHoldTxFreq}
+          pileupStrongestFirst={pileupStrongestFirst}
+          onPileupStrongestFirst={onPileupStrongestFirst}
         />
       </SettingsDetailScaffold>
     );

@@ -498,6 +498,9 @@ pub enum EngineCommand {
     DisconnectRig,
     StartCq,
     Answer(AnswerArgs),
+    /// Operator tapped a caller-queue chip -- see `qso.rs`'s `QueuedCaller`
+    /// doc comment and `handle`'s own `AnswerQueuedCaller` arm.
+    AnswerQueuedCaller { callsign: String },
     /// Operator manually selects which QSO message to transmit next.
     SetStage(crate::qso::TxStage),
     /// Operator's preferred TX slot parity for the *next* CQ/QSO start (0 =
@@ -1793,6 +1796,14 @@ impl Engine {
             "[retx] handle_decoded stage={:?} slot={slot_id} parity={} tx_parity={:?} own_slot={is_own_tx_slot} n_decoded={} active={}",
             self.qso.status().stage, slot_id.rem_euclid(2), self.tx_parity, decoded.len(), self.qso.active,
         );
+        // Caller-queue (pileup-while-busy): a SEPARATE pass over this same
+        // decoded batch from process_rx below, called unconditionally
+        // every cycle regardless of stage/own-slot -- see
+        // QsoEngine::offer_callers's own doc comment for why this can't be
+        // folded into process_rx (which early-returns at Bye73 before ever
+        // looking at `decoded` for a third party, the exact live bug this
+        // closes).
+        self.qso.offer_callers(&decoded, slot_start_ms, self.mode.cycle_ms());
         let qso_outcome = if is_own_tx_slot { None } else { self.qso.process_rx(&decoded) };
 
         match qso_outcome {
@@ -2830,6 +2841,63 @@ impl Engine {
         }
     }
 
+    /// Shared tail of `EngineCommand::Answer` and `AnswerQueuedCaller`:
+    /// apply the requested TX offset, derive reply parity, update the
+    /// parity preference/restore bookkeeping, and hand the target to
+    /// `qso.answer()`. `msg_utc_ms` is the DX's own decoded-slot timestamp
+    /// (see `AnswerArgs::msg_utc_ms`'s doc comment for why this matters
+    /// more than it looks like it should) -- `None` falls back to the
+    /// current slot.
+    fn answer_message(&mut self, msg: DecodedMessage, delta_freq: u32, msg_utc_ms: Option<i64>) {
+        // Honor the audio tone the companion/caller asked us to answer on
+        // (WSJT-X's `df`) for *this session* when it carries a plausible
+        // one, so we key up on the requested offset rather than the
+        // current TX tone — matching the Android/iOS ports. This is an
+        // in-memory-only change: it must never rewrite the operator's
+        // persisted `base_freq` (only SetBaseFreq / the UI do that, and
+        // the saved offset survives a restart). The desktop UI's own QSO
+        // Sheet "Call" button sends df=0 (offset unchanged) when "Hold TX
+        // freq" is on (the default, matching every build before that
+        // setting existed), or the target's own decoded frequency when
+        // off.
+        self.apply_reply_df(delta_freq);
+        // Reply opposite the DX. Prefer deriving this from his OWN
+        // decoded slot (see `AnswerArgs::msg_utc_ms`'s doc comment --
+        // this is the live bug fix for "every transmission after the
+        // first was in the wrong slot" / "he is transmitting in an
+        // odd slot but so am i") -- only fall back to "whatever slot
+        // we're in right now" when no timestamp was supplied.
+        let reply_parity = match msg_utc_ms {
+            Some(his_ms) => {
+                let his_parity = his_ms.div_euclid(self.mode.cycle_ms()).rem_euclid(2);
+                1 - his_parity
+            }
+            None => self.cur_parity(),
+        };
+        self.tx_parity = Some(reply_parity);
+        // Also update the *preference* (not just this run's lock), so a
+        // CQ started mid-excursion (e.g. manually abandoning this target
+        // to answer a different one) keeps using whichever slot that
+        // required -- reverted back to the pre-excursion value once this
+        // excursion actually ends (QSO completed or a watchdog gives up),
+        // see `preferred_tx_parity_restore`'s own doc comment. Don't
+        // recapture the restore point if one's already pending: the
+        // ORIGINAL value has to survive however many stations this
+        // excursion spans, not just the most recent one.
+        if self.preferred_tx_parity_restore.is_none() {
+            self.preferred_tx_parity_restore = Some(self.preferred_tx_parity);
+        }
+        self.preferred_tx_parity = Some(reply_parity);
+        self.has_transmitted_this_run = false;
+        self.qso.answer(&msg);
+        // Fork: look the partner up on QRZ now, so its state is
+        // cached by the time the QSO is logged. Mirrors
+        // `FT8TransmitSignal.java`'s one real call site.
+        self.qrz_xml.prefetch(&self.db, &msg.call_from);
+        self.maybe_transmit();
+        self.publish_tx_state();
+    }
+
     fn handle(&mut self, cmd: EngineCommand) {
         match cmd {
             EngineCommand::StartDecode => self.start_decode(),
@@ -3090,58 +3158,47 @@ impl Engine {
                 self.publish_tx_state();
             }
             EngineCommand::Answer(args) => {
-                // Honor the audio tone the companion asked us to answer on (WSJT-X's
-                // `df`) for *this session* when it carries a plausible one, so we key
-                // up on the requested offset rather than the current TX tone —
-                // matching the Android/iOS ports. This is an in-memory-only change:
-                // the `df` arrives on an untrusted UDP socket, so it must never
-                // rewrite the operator's persisted `base_freq` (only SetBaseFreq / the
-                // UI do that, and the saved offset survives a restart). The desktop
-                // UI's own QSO Sheet "Call" button sends df=0 (offset unchanged) when
-                // "Hold TX freq" is on (the default, matching every build before that
-                // setting existed), or the target's own decoded frequency when off.
-                self.apply_reply_df(args.delta_freq);
                 let msg = DecodedMessage {
                     call_from: args.call_from,
                     grid: args.grid,
                     snr: args.snr,
                     ..Default::default()
                 };
-                // Reply opposite the DX. Prefer deriving this from his OWN
-                // decoded slot (see `AnswerArgs::msg_utc_ms`'s doc comment --
-                // this is the live bug fix for "every transmission after the
-                // first was in the wrong slot" / "he is transmitting in an
-                // odd slot but so am i") -- only fall back to "whatever slot
-                // we're in right now" when no timestamp was supplied.
-                let reply_parity = match args.msg_utc_ms {
-                    Some(his_ms) => {
-                        let his_parity = his_ms.div_euclid(self.mode.cycle_ms()).rem_euclid(2);
-                        1 - his_parity
-                    }
-                    None => self.cur_parity(),
-                };
-                self.tx_parity = Some(reply_parity);
-                // Also update the *preference* (not just this run's lock), so a
-                // CQ started mid-excursion (e.g. manually abandoning this target
-                // to answer a different one) keeps using whichever slot that
-                // required -- reverted back to the pre-excursion value once this
-                // excursion actually ends (QSO completed or a watchdog gives up),
-                // see `preferred_tx_parity_restore`'s own doc comment. Don't
-                // recapture the restore point if one's already pending: the
-                // ORIGINAL value has to survive however many stations this
-                // excursion spans, not just the most recent one.
-                if self.preferred_tx_parity_restore.is_none() {
-                    self.preferred_tx_parity_restore = Some(self.preferred_tx_parity);
+                self.answer_message(msg, args.delta_freq, args.msg_utc_ms);
+            }
+            EngineCommand::AnswerQueuedCaller { callsign } => {
+                // Caller-queue (pileup-while-busy): the operator tapped a
+                // chip for a station that called us while busy with a
+                // DIFFERENT target -- see `qso.rs`'s `QueuedCaller` doc
+                // comment. Dequeuing (rather than a plain lookup) means a
+                // re-tap or a stale chip the UI hasn't refreshed yet can't
+                // double-answer the same caller.
+                //
+                // Deliberately reuses `qso.answer()`'s existing, unconditional
+                // "abandon whatever was in progress, no logging of the
+                // abandoned target" behavior -- this is the SAME thing a
+                // manual Answer on a different station already does today
+                // (see `qso.rs`'s `manually_answering_someone_else_mid_retry_
+                // does_not_relog_the_first_contact` test). This is narrower
+                // than Android's `forceLogAndMoveOn`, which can force-log a
+                // QSO that reached only a signal report (no RR73 yet) --
+                // porting that needs new record-building logic in `qso.rs`
+                // this pass deliberately doesn't add (see this feature's
+                // plan doc's "Scope decision"). The one case that matters
+                // for the reported bug -- tapping while the old QSO is
+                // already logged (Rr73/Bye73) -- already loses nothing,
+                // since `notify_transmitted` logged it the moment our own
+                // closing message was confirmed sent.
+                if let Some(caller) = self.qso.dequeue_specific(&callsign) {
+                    let msg = DecodedMessage {
+                        call_from: caller.callsign,
+                        grid: caller.grid,
+                        snr: caller.snr,
+                        freq_hz: caller.freq_hz,
+                        ..Default::default()
+                    };
+                    self.answer_message(msg, 0, Some(caller.last_heard_ms));
                 }
-                self.preferred_tx_parity = Some(reply_parity);
-                self.has_transmitted_this_run = false;
-                self.qso.answer(&msg);
-                // Fork: look the partner up on QRZ now, so its state is
-                // cached by the time the QSO is logged. Mirrors
-                // `FT8TransmitSignal.java`'s one real call site.
-                self.qrz_xml.prefetch(&self.db, &msg.call_from);
-                self.maybe_transmit();
-                self.publish_tx_state();
             }
             EngineCommand::SetStage(stage) => {
                 self.tx_parity = None;
@@ -3499,6 +3556,90 @@ mod tests {
         let expected_reply_parity = 1 - his_parity;
         assert_eq!(engine.tx_parity, Some(expected_reply_parity));
         assert_eq!(engine.preferred_tx_parity, Some(expected_reply_parity));
+    }
+
+    #[test]
+    fn handle_decoded_queues_a_third_station_calling_while_busy() {
+        // The reported live bug: a third station calling while mid-QSO with
+        // someone else must be visible, including on the exact slot where
+        // process_rx itself would early-return (Bye73) -- see qso.rs's
+        // offer_callers doc comment.
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "EM12".into(), snr: -5, ..Default::default()
+        });
+        engine.tx_parity = Some(1);
+        engine.has_transmitted_this_run = true;
+        engine.handle_decoded(
+            vec![
+                DecodedMessage {
+                    call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+                    extra: "-12".into(), snr: -8, ..Default::default()
+                },
+                DecodedMessage {
+                    call_to: "K0XYZ".into(), call_from: "IT9XYZ".into(),
+                    grid: "JN54".into(), snr: 7, ..Default::default()
+                },
+            ],
+            0,
+        );
+        let queue = engine.qso.status().caller_queue;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].callsign, "IT9XYZ");
+    }
+
+    #[test]
+    fn answer_queued_caller_switches_target_without_touching_the_old_qsos_log() {
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.qso.answer(&DecodedMessage {
+            call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+            grid: "EM12".into(), snr: -5, ..Default::default()
+        });
+        engine.tx_parity = Some(1);
+        engine.has_transmitted_this_run = true;
+        // K1ABC reaches RR73 (still not logged -- that needs
+        // notify_transmitted, same as the sibling QSO-completion tests
+        // above) while IT9XYZ calls directly.
+        engine.handle_decoded(
+            vec![
+                DecodedMessage {
+                    call_to: "K0XYZ".into(), call_from: "K1ABC".into(),
+                    extra: "-12".into(), snr: -8, ..Default::default()
+                },
+                DecodedMessage {
+                    call_to: "K0XYZ".into(), call_from: "IT9XYZ".into(),
+                    grid: "JN54".into(), snr: 7, ..Default::default()
+                },
+            ],
+            0,
+        );
+        assert_eq!(engine.qso.status().caller_queue.len(), 1);
+
+        engine.handle(EngineCommand::AnswerQueuedCaller { callsign: "IT9XYZ".into() });
+
+        assert_eq!(engine.qso.status().target.as_deref(), Some("IT9XYZ"));
+        assert_eq!(engine.qso.status().stage, TxStage::Grid);
+        assert!(engine.qso.status().caller_queue.is_empty(), "IT9XYZ was dequeued");
+        // K1ABC's exchange was abandoned (never reached notify_transmitted),
+        // so nothing was logged for it either -- matches plain answer()'s
+        // existing behavior for abandoning an unlogged QSO, deliberately
+        // not Android's force-log-a-partial-exchange behavior (see this
+        // feature's plan doc's "Scope decision").
+        assert_eq!(engine.db.list_qsos(10, 0).len(), 0);
+        // Same parity bookkeeping as a normal Answer -- reusing the shared
+        // answer_message helper, not a parallel implementation.
+        assert!(engine.preferred_tx_parity_restore.is_some());
+    }
+
+    #[test]
+    fn answer_queued_caller_is_a_no_op_for_an_unknown_or_already_dequeued_callsign() {
+        let mut engine = test_engine();
+        let target_before = engine.qso.status().target.clone();
+        engine.handle(EngineCommand::AnswerQueuedCaller { callsign: "GHOST".into() });
+        assert_eq!(engine.qso.status().target, target_before, "nothing to dequeue -- must not touch the QSO");
     }
 
     #[test]
