@@ -965,6 +965,51 @@ for the Hamlib version workaround needed there.
   exercises the QSO-completion path, not just a specific test someone
   remembers to patch.
 
+- **New: Caller Queue (pileup-while-busy), 2026-11-23** -- real live bug
+  report: operator was mid-courtesy-close on a QSO (repeating RR73) when a
+  different station (Italy) called him directly; clicking that new
+  station's decode row did nothing. Root-caused (not a bug exactly, a real
+  gap): once our own closing message is confirmed sent, the active-QSO
+  panel deliberately locks to a read-only transcript for the rest of the
+  courtesy-73 retries -- an earlier version reopened the decode list
+  instantly on RR73 sent, but live testing showed a "phantom RR73" flicker,
+  so the operator asked for the current locked behavior. Nothing inside
+  that locked panel could reach a brand-new caller, though.
+  - Ported Android's real fix: a **Caller Queue**. While busy with any QSO
+    (calling CQ or answering one), every OTHER station that sends a message
+    directed at the operator is queued (capped at 10, pruned after one full
+    cycle of silence), shown as tappable chips inside the active-QSO panel,
+    and tapping one switches to that target without ever reopening the
+    decode list. `qso.rs`'s new `QueuedCaller`/`offer_callers` is a
+    **separate pass** over each decoded slot from `process_rx` -- which
+    early-returns at `Bye73` before ever looking for a third party, exactly
+    why the bug happened -- so it runs on every cycle regardless of stage.
+    `dequeue_next` supports FIFO or strongest-first (Settings -> Transmission
+    -> "Work strongest caller first", Android's own `pileupStrongestFirst`
+    key, now real instead of a disabled stub); `dequeue_specific` (the
+    manual tap) always honors the operator's choice even if the chip is
+    stale. The queue survives switching targets via a normal `answer()` (so
+    other queued callers aren't lost), only cleared on `stop()`/`start_cq()`.
+  - **Deliberately narrower than Android's `forceLogAndMoveOn`**, which can
+    force-log a QSO that only reached a signal report (no RR73 yet):
+    tapping a queued caller here reuses plain `answer()`'s existing
+    "abandon, don't log the old one" behavior (already proven safe by an
+    existing test covering a manual mid-retry target switch). This fully
+    covers the reported bug -- the old QSO is already logged by the time
+    `Bye73` is reached -- without adding the new record-building logic
+    Android's more aggressive behavior needs; a disclosed, deliberate scope
+    cut for this pass, not an oversight.
+  - Auto-working the queue on natural QSO completion/give-up (Android:
+    `dequeueNextCaller`) is **not** wired in this pass either -- only the
+    manual tap. `dequeue_next` is still built (the chip display order needs
+    the identical comparator either way), so this is a small follow-on, not
+    a rearchitecture, whenever wanted.
+  - 11 new `qso.rs` tests (including the exact bug-reproduction scenario:
+    drive a QSO to `Bye73`, feed a third-party directed decode, confirm it
+    queues and a tap cleanly switches targets), 3 new `engine.rs` tests, 7
+    new `callerQueue.ts` tests (display ordering/SNR labels, mirroring
+    Android's own `CallerQueueDisplayTest.kt`).
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now
