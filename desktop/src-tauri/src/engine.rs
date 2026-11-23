@@ -21,7 +21,6 @@ use crate::dsp::encode;
 use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
 use crate::dxcc;
 use crate::eqsl;
-use crate::hamqth;
 use crate::hrdlog;
 use crate::logged_state;
 use crate::mode::Mode;
@@ -1421,15 +1420,26 @@ impl Engine {
                 wrl::upload_pending(&db_for_upload);
             });
         }
-        // Same startup catch-up, for HamQTH, Club Log and HRDLog.net.
-        let hamqth_password = engine.db.get_config(hamqth::CONFIG_PASSWORD).unwrap_or_default();
-        if engine.db.get_config(hamqth::CONFIG_ENABLE).as_deref() == Some("1") && !hamqth_password.is_empty() {
-            let db_for_upload = engine.db.clone();
-            let callsign = engine.db.get_config("my_call").unwrap_or_default();
-            std::thread::spawn(move || {
-                hamqth::upload_pending(&db_for_upload, &callsign, &hamqth_password);
-            });
-        }
+        // HamQTH's own catch-up/auto-upload hooks were REMOVED here and at
+        // the per-QSO log_completed_qso call site (see that function's own
+        // comment) -- real risk, found live 2026-11-23: the user read
+        // hamqth.com's own "Upload log" page, which says an ADIF upload
+        // "replaces all QSOs of this callsign on HamQTH, so always upload
+        // your complete log." That page describes hamqth.com's bulk
+        // FILE-upload feature specifically, not the `/api/v2/log/qso`
+        // JSON endpoint this module actually calls (whose real `409 "The
+        // QSO is in the log already"` response, confirmed live against
+        // the user's account, behaves like per-QSO tracking, not a blind
+        // whole-log replace) -- so it's not confirmed this app's own
+        // upload path has the same destructive behavior. But the risk if
+        // it does (every single logged QSO wiping out everything except
+        // itself) is severe enough, and unconfirmed enough, that the user
+        // chose to disable this app's HamQTH upload entirely rather than
+        // risk it -- they upload manually via hamqth.com's own whole-log
+        // ADIF file feature instead. `hamqth.rs`'s `upload_pending`/
+        // `upload_one_logged` now refuse to do anything (see their own
+        // doc comments) as a second layer, in case any other call site is
+        // ever added without reading this comment first.
         let clublog_token = engine.db.get_config(clublog::CONFIG_TOKEN).unwrap_or_default();
         if engine.db.get_config(clublog::CONFIG_ENABLE).as_deref() == Some("1") && !clublog_token.trim().is_empty() {
             let db_for_upload = engine.db.clone();
@@ -1928,17 +1938,9 @@ impl Engine {
                         wrl::upload_one_logged(&db, &api_key, &record_for_upload);
                     });
                 }
-                // Same auto-upload-on-log hook, for HamQTH, Club Log and
-                // HRDLog.net -- see `hamqth.rs`/`clublog.rs`/`hrdlog.rs`'s
-                // own top doc comments.
-                if self.db.get_config(hamqth::CONFIG_ENABLE).as_deref() == Some("1") {
-                    let db = self.db.clone();
-                    let password = self.db.get_config(hamqth::CONFIG_PASSWORD).unwrap_or_default();
-                    let record_for_upload = record.clone();
-                    std::thread::spawn(move || {
-                        hamqth::upload_one_logged(&db, &record_for_upload.station_callsign, &password, &record_for_upload);
-                    });
-                }
+                // HamQTH's own auto-upload-on-log hook was REMOVED here --
+                // see `Engine::new`'s own comment (startup catch-up call
+                // site) for why. Club Log and HRDLog.net are unaffected.
                 if self.db.get_config(clublog::CONFIG_ENABLE).as_deref() == Some("1") {
                     let db = self.db.clone();
                     let token = self.db.get_config(clublog::CONFIG_TOKEN).unwrap_or_default();

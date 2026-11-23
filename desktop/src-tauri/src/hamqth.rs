@@ -99,10 +99,11 @@ struct CachedToken {
 }
 
 /// Process-lifetime token cache, keyed implicitly by whatever callsign/
-/// password are currently configured -- a credential change naturally
-/// invalidates it on the next 401 (see [`ensure_token`]'s retry-once path),
-/// same tradeoff as re-logging in on every password change being
-/// unnecessary complexity for a single-operator desktop app.
+/// password are currently configured. Only `check_connection` uses this
+/// now (see [`upload_pending`]'s own doc comment for why uploading is
+/// disabled) -- it calls `invalidate_token` itself before every check, so
+/// a credential change always gets a fresh login rather than a stale
+/// cached token.
 static TOKEN: Mutex<Option<CachedToken>> = Mutex::new(None);
 
 fn ensure_token(callsign: &str, password: &str) -> Result<String, String> {
@@ -170,57 +171,6 @@ fn qso_json(r: &QsoRecord) -> serde_json::Value {
     o
 }
 
-enum UploadOutcome {
-    Ok,
-    /// HamQTH already has this QSO (409) -- treated like success.
-    AlreadyThere,
-    Failed(String),
-    /// The token was rejected even after a fresh login retry, or the
-    /// credentials themselves are wrong -- every further upload in a batch
-    /// would fail the same way.
-    FailedStopBatch(String),
-}
-
-fn upload_contact(callsign: &str, password: &str, r: &QsoRecord) -> UploadOutcome {
-    let token = match ensure_token(callsign, password) {
-        Ok(t) => t,
-        Err(e) => return UploadOutcome::FailedStopBatch(e),
-    };
-    let body = serde_json::json!({ "qso": qso_json(r) }).to_string();
-    let send = |tok: &str| {
-        agent()
-            .post(&format!("{BASE_URL}/log/qso"))
-            .set("Authorization", &format!("Bearer {tok}"))
-            .set("Content-Type", "application/json")
-            .send_string(&body)
-    };
-    match send(&token) {
-        Ok(_) => UploadOutcome::Ok,
-        Err(ureq::Error::Status(409, _)) => UploadOutcome::AlreadyThere,
-        Err(ureq::Error::Status(401, _)) => {
-            // Token expired/rejected: one retry with a fresh login, since a
-            // cached-but-now-stale token shouldn't fail the whole batch.
-            invalidate_token();
-            let token = match ensure_token(callsign, password) {
-                Ok(t) => t,
-                Err(e) => return UploadOutcome::FailedStopBatch(e),
-            };
-            match send(&token) {
-                Ok(_) => UploadOutcome::Ok,
-                Err(ureq::Error::Status(409, _)) => UploadOutcome::AlreadyThere,
-                Err(ureq::Error::Status(code, response)) => {
-                    UploadOutcome::FailedStopBatch(describe_failure(code, &response.into_string().unwrap_or_default()))
-                }
-                Err(ureq::Error::Transport(t)) => UploadOutcome::FailedStopBatch(format!("{}", t.kind())),
-            }
-        }
-        Err(ureq::Error::Status(code, response)) => {
-            UploadOutcome::Failed(describe_failure(code, &response.into_string().unwrap_or_default()))
-        }
-        Err(ureq::Error::Transport(t)) => UploadOutcome::Failed(format!("{}", t.kind())),
-    }
-}
-
 #[derive(Debug, Default, Serialize)]
 pub struct HamQthUploadResult {
     pub uploaded: usize,
@@ -229,62 +179,33 @@ pub struct HamQthUploadResult {
     pub error: Option<String>,
 }
 
-fn upload_and_mark_one(db: &Db, callsign: &str, password: &str, q: &QsoRecord) -> Result<bool, (String, bool)> {
-    match upload_contact(callsign, password, q) {
-        UploadOutcome::Ok => {
-            if let Some(id) = q.id {
-                let _ = db.mark_synced(id, "hamqth");
-            }
-            Ok(false)
-        }
-        UploadOutcome::AlreadyThere => {
-            if let Some(id) = q.id {
-                let _ = db.mark_synced(id, "hamqth");
-            }
-            Ok(true)
-        }
-        UploadOutcome::Failed(e) => Err((e, false)),
-        UploadOutcome::FailedStopBatch(e) => Err((e, true)),
+/// **Disabled, deliberately, 2026-11-23 -- see `engine.rs`'s `Engine::new`
+/// doc comment for the full real-risk explanation.** The user read
+/// hamqth.com's own "Upload log" page, which says an ADIF upload "replaces
+/// all QSOs of this callsign on HamQTH, so always upload your complete
+/// log" -- that page describes hamqth.com's bulk FILE-upload feature, not
+/// this module's `/api/v2/log/qso` JSON endpoint, so it isn't confirmed
+/// this endpoint shares that whole-log-replace behavior (a real `409 "The
+/// QSO is in the log already"` reply, confirmed live, looks like per-QSO
+/// tracking instead). But the risk if it IS the same underlying
+/// mechanism -- every single incrementally-uploaded QSO wiping out
+/// everything else -- was judged too severe to keep running
+/// automatically, so the user chose to upload manually via hamqth.com's
+/// own whole-log ADIF feature instead. This returns immediately without
+/// making any request. [`check_connection`] is untouched -- it only logs
+/// in, never touches the log, so it stays safe and useful for verifying
+/// credentials are still valid.
+pub fn upload_pending(_db: &Db, _callsign: &str, _password: &str) -> HamQthUploadResult {
+    HamQthUploadResult {
+        error: Some(
+            "HamQTH auto-upload is disabled -- HamQTH's own site says an ADIF upload replaces your whole log, so upload manually via hamqth.com instead.".to_string(),
+        ),
+        ..Default::default()
     }
 }
 
-/// Uploads every QSO not yet marked synced to HamQTH (`synced_hamqth = 0`).
-/// Stops early once the login/token itself is rejected (every remaining
-/// row would fail the same way); a single QSO's own rejection just moves
-/// on to the next row.
-pub fn upload_pending(db: &Db, callsign: &str, password: &str) -> HamQthUploadResult {
-    if callsign.trim().is_empty() || password.is_empty() {
-        return HamQthUploadResult { error: Some("Enter your HamQTH callsign and password first.".to_string()), ..Default::default() };
-    }
-    let pending = db.qsos_pending_hamqth_upload();
-    let mut result = HamQthUploadResult::default();
-    for q in &pending {
-        match upload_and_mark_one(db, callsign, password, q) {
-            Ok(true) => result.already_present += 1,
-            Ok(false) => result.uploaded += 1,
-            Err((e, stop)) => {
-                if result.error.is_none() || stop {
-                    result.error = Some(e);
-                }
-                result.failed += 1;
-                if stop {
-                    break;
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Auto-upload hook for a QSO that was just logged -- same per-row logic as
-/// [`upload_pending`], for exactly one record. Callers (engine.rs) run this
-/// on a spawned thread, never the engine's own run-loop thread.
-pub fn upload_one_logged(db: &Db, callsign: &str, password: &str, q: &QsoRecord) {
-    if callsign.trim().is_empty() || password.is_empty() {
-        return;
-    }
-    let _ = upload_and_mark_one(db, callsign, password, q);
-}
+/// Disabled -- see [`upload_pending`]'s own doc comment.
+pub fn upload_one_logged(_db: &Db, _callsign: &str, _password: &str, _q: &QsoRecord) {}
 
 #[cfg(test)]
 mod tests {
@@ -352,19 +273,55 @@ mod tests {
     }
 
     #[test]
-    fn upload_pending_is_a_no_op_without_credentials() {
+    fn upload_pending_is_disabled_regardless_of_credentials() {
+        // Live safety disable, 2026-11-23 -- see upload_pending's own doc
+        // comment. Must never attempt a real upload no matter what
+        // credentials or pending state is passed.
         let db = Db::open_in_memory().unwrap();
         let result = upload_pending(&db, "", "");
         assert_eq!(result.uploaded, 0);
         assert!(result.error.is_some());
+
+        let result = upload_pending(&db, "K1ABC", "a-real-looking-password");
+        assert_eq!(result.uploaded, 0);
+        assert!(result.error.unwrap().to_lowercase().contains("disabled"));
     }
 
     #[test]
-    fn upload_pending_is_a_no_op_when_nothing_is_pending() {
+    fn upload_one_logged_is_disabled_and_never_panics() {
         let db = Db::open_in_memory().unwrap();
-        let result = upload_pending(&db, "K1ABC", "fake-password-not-used-because-nothing-pending");
-        assert_eq!(result.uploaded, 0);
-        assert_eq!(result.failed, 0);
-        assert!(result.error.is_none());
+        upload_one_logged(&db, "K1ABC", "a-real-looking-password", &rec());
+    }
+
+    #[test]
+    #[ignore]
+    fn scratch_live_single_qso_upload() {
+        // Not run in CI -- a real, one-off live upload of ONE real QSO to
+        // see the ACTUAL raw /log/qso response. Test Connection only
+        // ever exercises /login, never a real upload.
+        let callsign = std::env::var("HAMQTH_CALLSIGN").unwrap();
+        let password = std::env::var("HAMQTH_PASSWORD").unwrap();
+        let mut r = rec();
+        r.station_callsign = callsign.clone();
+        r.call = std::env::var("HAMQTH_DX_CALL").unwrap();
+        r.qso_date = std::env::var("HAMQTH_QSO_DATE").unwrap();
+        r.time_on = std::env::var("HAMQTH_TIME_ON").unwrap();
+        r.band = std::env::var("HAMQTH_BAND").unwrap();
+        r.mode = std::env::var("HAMQTH_MODE").unwrap();
+        r.freq = std::env::var("HAMQTH_FREQ").unwrap_or_default();
+        r.gridsquare = std::env::var("HAMQTH_GRID").unwrap_or_default();
+        let body = serde_json::json!({ "qso": qso_json(&r) }).to_string();
+        eprintln!("request body: {body}");
+        let token = ensure_token(&callsign, &password).unwrap();
+        let resp = agent()
+            .post(&format!("{BASE_URL}/log/qso"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", "application/json")
+            .send_string(&body);
+        match resp {
+            Ok(r) => eprintln!("status={} body={}", r.status(), r.into_string().unwrap_or_default()),
+            Err(ureq::Error::Status(code, r)) => eprintln!("status={} body={}", code, r.into_string().unwrap_or_default()),
+            Err(ureq::Error::Transport(t)) => eprintln!("transport error: {}", t.kind()),
+        }
     }
 }

@@ -117,7 +117,6 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   const [wrlEnabled, setWrlEnabled] = useState(false);
   const [wrlApiKeySet, setWrlApiKeySet] = useState(false);
   const [hamqthOpen, setHamqthOpen] = useState(false);
-  const [hamqthEnabled, setHamqthEnabled] = useState(false);
   const [hamqthPasswordSet, setHamqthPasswordSet] = useState(false);
   const [clublogOpen, setClublogOpen] = useState(false);
   const [clublogEnabled, setClublogEnabled] = useState(false);
@@ -167,14 +166,9 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
   }
 
   function refreshHamqth() {
-    api.getConfig("enableHamQTH").then((v) => setHamqthEnabled(v === "1"));
     api.getConfig("hamqthPassword").then((v) => setHamqthPasswordSet(!!v));
   }
   useEffect(refreshHamqth, [hamqthOpen]);
-  function saveHamqthEnabled(next: boolean) {
-    setHamqthEnabled(next);
-    api.setConfig("enableHamQTH", next ? "1" : "0");
-  }
 
   function refreshClublog() {
     api.getConfig("enableClublog").then((v) => setClublogEnabled(v === "1"));
@@ -315,10 +309,8 @@ export function LoggingSettings({ callsign }: { callsign: string }) {
         />
         <SettingsRow
           label="HamQTH"
-          description="Auto-upload QSOs to your HamQTH logbook"
+          description="Auto-upload disabled -- hamqth.com's own ADIF upload replaces your whole log, so upload manually there instead. Test Connection still works here."
           value={hamqthPasswordSet ? "Configured" : "Not configured"}
-          toggle={hamqthEnabled}
-          onToggleChange={saveHamqthEnabled}
           onClick={() => setHamqthOpen(true)}
         />
         <SettingsRow
@@ -1266,21 +1258,31 @@ function logbookLabel(books: StationProfile[], selectedId: string): string {
  * the operator's callsign, already known from Settings -> Station, so
  * it's shown read-only here rather than asked for again). Test Connection
  * logs in fresh via HamQTH's v2 API; see `hamqth.rs`'s top doc comment.
+ *
+ * Upload is deliberately disabled -- live finding, 2026-11-23: the user
+ * read hamqth.com's own "Upload log" page, which says an ADIF upload
+ * "replaces all QSOs of this callsign on HamQTH, so always upload your
+ * complete log." That page describes hamqth.com's own bulk FILE-upload
+ * feature, not the `/api/v2/log/qso` JSON endpoint this app used (whose
+ * real `409 "already in log"` reply, confirmed live, looks like per-QSO
+ * tracking, not a blind whole-log replace) -- but the risk if it IS the
+ * same underlying mechanism was judged too severe to keep running
+ * automatically, so this app no longer uploads to HamQTH at all; the
+ * operator uploads manually via hamqth.com's own feature instead. See
+ * `hamqth.rs`'s `upload_pending` doc comment for the backend side of the
+ * same decision.
  */
 function HamqthDialog({ callsign, onClose }: { callsign: string; onClose: () => void }) {
   const [initialPassword, setInitialPassword] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
-  const [pendingCount, setPendingCount] = useState<number | null>(null);
-  const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     api.getConfig("hamqthPassword").then((v) => {
       setInitialPassword(v ?? "");
       setPassword(v ?? "");
     });
-    api.hamqthPendingUploadCount().then(setPendingCount);
   }, []);
 
   function dismiss() {
@@ -1302,22 +1304,6 @@ function HamqthDialog({ callsign, onClose }: { callsign: string; onClose: () => 
     onClose();
   }
 
-  async function upload() {
-    setBusy(true);
-    setUploadStatus(null);
-    const result = await api.hamqthUploadPending();
-    setBusy(false);
-    api.hamqthPendingUploadCount().then(setPendingCount);
-    if (result.error) {
-      setUploadStatus({
-        text: `${result.uploaded} uploaded, ${result.already_present} already there, ${result.failed} failed -- ${result.error}`,
-        ok: result.uploaded + result.already_present > 0,
-      });
-    } else {
-      setUploadStatus({ text: `${result.uploaded} uploaded, ${result.already_present} already there`, ok: true });
-    }
-  }
-
   return (
     <div className="modal-overlay" onClick={dismiss}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1327,6 +1313,13 @@ function HamqthDialog({ callsign, onClose }: { callsign: string; onClose: () => 
         </div>
         <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
           Your hamqth.com website login ({callsign || "your callsign"}) + password.
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 10, color: "var(--tx)" }}>
+          Auto-upload is disabled: hamqth.com's own ADIF upload replaces your
+          whole log each time, so this app no longer uploads here at all --
+          upload manually via hamqth.com's "Upload log" page instead. Test
+          Connection below is still safe (it only logs in, never touches
+          your log).
         </div>
         <div className="field">
           <label>Password</label>
@@ -1346,20 +1339,6 @@ function HamqthDialog({ callsign, onClose }: { callsign: string; onClose: () => 
             <span style={{ fontSize: 13, fontWeight: 600, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
               {testResult.text}
             </span>
-          )}
-        </div>
-
-        <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-            {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
-          </div>
-          <button disabled={busy || !pendingCount} onClick={upload}>
-            {busy ? "Uploading…" : "Upload now"}
-          </button>
-          {uploadStatus && (
-            <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
-              {uploadStatus.text}
-            </div>
           )}
         </div>
 
