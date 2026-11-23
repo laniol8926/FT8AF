@@ -291,7 +291,14 @@ fn extract_adif_url(body: &str) -> Option<String> {
 
 fn looks_like_no_new_confirmations(body: &str) -> bool {
     let b = body.to_lowercase();
-    b.contains("no new") || b.contains("0 new") || b.contains("nothing new")
+    // "you have no log entries" is eQSL's own confirmed real wording
+    // (live-tested 2026-11-23 with a narrow RcvdSince window) -- the
+    // other three phrases were guesses from secondhand reports and have
+    // never actually been seen from the real server.
+    b.contains("you have no log entries")
+        || b.contains("no new")
+        || b.contains("0 new")
+        || b.contains("nothing new")
 }
 
 /// Downloads eQSL's inbox and applies it to the local log. `full_refresh`
@@ -410,6 +417,16 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_no_new_confirmations_matches_the_real_server_wording() {
+        // Confirmed live 2026-11-23 against the real eQSL.cc server with a
+        // narrow RcvdSince window: this is the ACTUAL wording, not a guess
+        // like the three phrases above (never confirmed against a real
+        // response). Without this, a real "nothing new" result was
+        // misclassified as a download error.
+        assert!(looks_like_no_new_confirmations("<H3>You have no log entries</H3>"));
+    }
+
+    #[test]
     fn check_connection_requires_credentials() {
         assert!(!check_connection("", "").ok);
         assert!(!check_connection("K1ABC", "").ok);
@@ -439,5 +456,49 @@ mod tests {
         assert!(r.error.is_some());
         let r = download_confirmations(&db, "K1ABC", "pw", "", false);
         assert!(r.error.unwrap().contains("Nickname"));
+    }
+
+    #[test]
+    #[ignore]
+    fn scratch_dump_raw_inbox_html() {
+        // Temporary diagnostic: dump the real, un-clipped first-step HTML
+        // so extract_adif_url/looks_like_no_new_confirmations can be fixed
+        // against eQSL's actual response shape.
+        let username = std::env::var("EQSL_USERNAME").unwrap();
+        let password = std::env::var("EQSL_PASSWORD").unwrap();
+        let nickname = std::env::var("EQSL_NICKNAME").unwrap();
+        let since = std::env::var("EQSL_SINCE").unwrap_or_else(|_| FULL_HISTORY_SINCE.to_string());
+        let url = format!(
+            "{DOWNLOAD_URL}?UserName={}&Password={}&QTHNickname={}&ConfirmedQSLOnly=1&RcvdSince={}",
+            urlencode(username.trim()),
+            urlencode(&password),
+            urlencode(nickname.trim()),
+            urlencode(&since),
+        );
+        let r = get(&url).unwrap();
+        let out_path = std::env::var("EQSL_DUMP_PATH").unwrap();
+        std::fs::write(&out_path, format!("status={}\n{}", r.status, r.body)).unwrap();
+        eprintln!("dumped to {out_path}, status={}, len={}", r.status, r.body.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn scratch_live_download_confirmations() {
+        // Not run in CI -- a real, one-off live test against the user's
+        // own eQSL.cc account and REAL production database (path via
+        // env var), run the same way the "Download new" button in
+        // Settings would: never inserts a new QSO, only updates matched
+        // ones (see apply_eqsl_inbox's own doc comment).
+        let db_path = std::env::var("EQSL_DB_PATH").unwrap();
+        let username = std::env::var("EQSL_USERNAME").unwrap();
+        let password = std::env::var("EQSL_PASSWORD").unwrap();
+        let nickname = std::env::var("EQSL_NICKNAME").unwrap();
+        let db = Db::open(&db_path).unwrap();
+        let full_refresh = std::env::var("EQSL_FULL_REFRESH").as_deref() == Ok("1");
+        let result = download_confirmations(&db, &username, &password, &nickname, full_refresh);
+        eprintln!(
+            "newly_confirmed={} unmatched={} error={:?}",
+            result.newly_confirmed, result.unmatched, result.error
+        );
     }
 }
