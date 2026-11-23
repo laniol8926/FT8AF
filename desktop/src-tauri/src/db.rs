@@ -3682,6 +3682,61 @@ mod tests {
     }
 
     #[test]
+    fn import_adif_only_flips_qrz_qsl_for_entries_qrz_itself_marks_confirmed() {
+        // A real QRZ.com logbook export is a mix: some entries carry
+        // APP_QRZLOG_STATUS=C (the other station confirmed via QRZ), most
+        // don't (no QRZ confirmation yet) -- re-importing that file onto an
+        // already-logged QSO must only turn qrz_qsl on for the ones QRZ
+        // itself marked confirmed, never for the whole batch. Covers the
+        // realistic case: both QSOs already exist locally (logged live by
+        // this app, qrz_qsl initially false for both), then a QRZ export
+        // updates only one of them.
+        let db = Db::open_in_memory().unwrap();
+        db.import_adif(
+            "<call:5>K1ABC <mode:3>FT8 <qso_date:8>20260604 <time_on:6>123045 <eor>\
+             <call:5>W9XYZ <mode:3>FT8 <qso_date:8>20260604 <time_on:6>130000 <eor>",
+        );
+        for q in db.list_qsos(10, 0) {
+            assert!(!q.qrz_qsl, "neither QSO should start confirmed");
+        }
+
+        // Re-import a QRZ.com export: K1ABC is confirmed (status C), W9XYZ
+        // isn't in QRZ's logbook at all yet (status U, matching real QRZ
+        // export wording, not just "absent").
+        db.import_adif(
+            "<call:5>K1ABC <mode:3>FT8 <qso_date:8>20260604 <time_on:6>123045 \
+                <APP_QRZLOG_STATUS:1>C <eor>\
+             <call:5>W9XYZ <mode:3>FT8 <qso_date:8>20260604 <time_on:6>130000 \
+                <APP_QRZLOG_STATUS:1>U <eor>",
+        );
+
+        let rows = db.list_qsos(10, 0);
+        let k1abc = rows.iter().find(|q| q.call == "K1ABC").unwrap();
+        let w9xyz = rows.iter().find(|q| q.call == "W9XYZ").unwrap();
+        assert!(k1abc.qrz_qsl, "K1ABC was marked confirmed by QRZ");
+        assert!(!w9xyz.qrz_qsl, "W9XYZ was NOT marked confirmed by QRZ (status U, not C)");
+    }
+
+    #[test]
+    fn import_adif_tracks_qrz_and_lotw_confirmation_independently() {
+        // QRZ.com's own logbook also shows a QSO as confirmed when LoTW
+        // confirmed it (QRZ pulls in LoTW matches, not just direct QRZ-to-
+        // QRZ confirmations) -- so a real QRZ.com export record can carry
+        // BOTH its own APP_QRZLOG_STATUS=C and the standard LOTW_QSL_RCVD=Y
+        // tag together. Both must be set from the one import, independently
+        // -- qrz_qsl and lotw_rcvd are never the same fact just because
+        // they can arrive on the same record.
+        let db = Db::open_in_memory().unwrap();
+        db.import_adif(
+            "<call:5>K1ABC <mode:3>FT8 <qso_date:8>20260604 <time_on:6>123045 \
+                <APP_QRZLOG_STATUS:1>C <LOTW_QSL_RCVD:1>Y <eor>",
+        );
+        let row = &db.list_qsos(10, 0)[0];
+        assert!(row.qrz_qsl, "QRZ's own status field must still set qrz_qsl");
+        assert!(row.lotw_rcvd, "the separate standard LOTW_QSL_RCVD tag must still set lotw_rcvd");
+    }
+
+    #[test]
     fn merge_matched_qso_only_fills_blanks_and_only_turns_flags_on() {
         let existing = QsoRecord {
             call: "K1ABC".into(),
