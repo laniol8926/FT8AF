@@ -1009,6 +1009,20 @@ for the Hamlib version workaround needed there.
     queues and a tap cleanly switches targets), 3 new `engine.rs` tests, 7
     new `callerQueue.ts` tests (display ordering/SNR labels, mirroring
     Android's own `CallerQueueDisplayTest.kt`).
+  - **Real bug found live right after shipping, fixed same evening**:
+    tapping a queued caller sent "HISCALL MYCALL MYGRID" (a fresh
+    Grid-stage reply) instead of "HISCALL MYCALL <report>" -- wrong,
+    because the caller-queue tap was reusing `qso.answer()`, which is only
+    correct for breaking into someone ELSE's CQ bulletin (nothing known
+    about them yet). A caller-queue entry is the opposite case: he already
+    sent US a directed message, so we already have everything needed to
+    reply with a signal report immediately -- exactly what `process_rx`'s
+    own `TxStage::Cq` branch already does the instant a bare CQ picks up
+    its first responder. New `qso.rs::answer_caller()` classifies the
+    caller's actual captured message content (grid-shaped -> Report stage,
+    report-shaped -> RReport stage, else falls back to `answer()`'s safe
+    Grid-stage baseline) instead of always restarting cold. 3 more
+    `qso.rs` tests for the three branches.
 
 ## Smaller fixes
 
