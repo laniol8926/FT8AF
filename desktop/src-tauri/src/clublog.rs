@@ -31,6 +31,20 @@
 //! confirming the token works, without writing anything. This is inferred
 //! from the documented request-validation order, not itself documented as
 //! a connectivity check, so it's worth confirming live.
+//!
+//! **Live-found real issue, 2026-11-23 (account/token config, not a code
+//! bug): a "Test mode" token uploads nothing.** The user reported real
+//! QSOs this app had marked synced never actually appeared on their real
+//! Club Log account. Live-tested a real single `/qso` upload (something
+//! Test Connection's empty-batch probe never exercises) and found the
+//! cause: Club Log's own Tokens page has a "Test mode" checkbox ("for
+//! developers") -- a token created with it on returns a completely
+//! normal-looking `"status":"created"` on every upload, but
+//! `"test_mode":true` plus `"message":"Test mode: parameters ok, nothing
+//! stored."` reveals nothing was actually written. [`item_outcome`] now
+//! checks for `test_mode` before anything else, so this can never again
+//! be silently counted as a successful upload -- the operator needs a
+//! fresh, non-test-mode token from Club Log's Tokens page.
 
 use serde::Serialize;
 
@@ -203,9 +217,24 @@ enum ItemOutcome {
     Ok,
     AlreadyThere,
     Rejected(String),
+    /// Live-found real issue, not a code bug: a token created with Club
+    /// Log's own "Test mode" checkbox (under Tokens, "for developers")
+    /// gets a normal-looking `"status":"created"` reply on every upload,
+    /// but Club Log never actually stores anything --
+    /// `"test_mode":true` plus a message like "Test mode: parameters ok,
+    /// nothing stored." is the only tell. Treating this as a plain `Ok`
+    /// (as this module used to) means every upload looks successful and
+    /// gets marked synced, while the operator's real Club Log account
+    /// never receives a single QSO -- confirmed live: the user's real
+    /// account showed none of the QSOs this app had already marked
+    /// uploaded. Must never be treated as success.
+    TestMode,
 }
 
 fn item_outcome(entry: &serde_json::Value) -> ItemOutcome {
+    if entry.get("test_mode").and_then(|v| v.as_bool()) == Some(true) {
+        return ItemOutcome::TestMode;
+    }
     match entry.get("status").and_then(|s| s.as_str()) {
         Some("created") | Some("updated") => ItemOutcome::Ok,
         Some("duplicate") => ItemOutcome::AlreadyThere,
@@ -309,6 +338,16 @@ pub fn upload_pending(db: &Db, token: &str) -> ClublogUploadResult {
                 }
                 Some(ItemOutcome::Rejected(msg)) => {
                     result.error.get_or_insert(msg);
+                    result.failed += 1;
+                }
+                Some(ItemOutcome::TestMode) => {
+                    // See ItemOutcome::TestMode's own doc comment -- never
+                    // mark synced, so this keeps retrying (and the
+                    // operator keeps seeing this message) until they
+                    // switch to a non-test-mode token.
+                    result.error.get_or_insert_with(|| {
+                        "This Club Log token is in Test Mode -- uploads are validated but never actually stored. Create a new token with Test Mode OFF.".to_string()
+                    });
                     result.failed += 1;
                 }
                 None => {
@@ -428,6 +467,24 @@ mod tests {
     }
 
     #[test]
+    fn item_outcome_never_treats_a_test_mode_token_reply_as_success() {
+        // Real live bug: a Club Log token created with "Test mode" on
+        // returns a completely normal-looking "created" status on every
+        // upload, but nothing is ever actually stored -- confirmed with
+        // the user's real token ({"status":"created","qsoid":null,
+        // "test_mode":true,"message":"Test mode: parameters ok, nothing
+        // stored."}). This must NEVER match Ok/AlreadyThere regardless of
+        // what "status" says.
+        let reply = serde_json::json!({
+            "status": "created",
+            "qsoid": null,
+            "test_mode": true,
+            "message": "Test mode: parameters ok, nothing stored."
+        });
+        assert!(matches!(item_outcome(&reply), ItemOutcome::TestMode));
+    }
+
+    #[test]
     fn describe_failure_prefers_the_message_field() {
         assert_eq!(describe_failure(422, r#"{"message":"malformed datetime"}"#), "HTTP 422: malformed datetime");
         assert_eq!(describe_failure(500, ""), "HTTP 500");
@@ -464,5 +521,29 @@ mod tests {
         let token = std::env::var("CLUBLOG_TOKEN").unwrap();
         let check = check_connection(&token);
         eprintln!("ok={} detail={:?}", check.ok, check.detail);
+    }
+
+    #[test]
+    #[ignore]
+    fn scratch_live_single_qso_upload() {
+        // Not run in CI -- a real, one-off live upload of ONE real QSO
+        // (fields via env vars, no secrets hardcoded) to see the ACTUAL
+        // raw /qso response shape. Test Connection only ever validated an
+        // empty batch; the real single-QSO response has never actually
+        // been observed live.
+        let token = std::env::var("CLUBLOG_TOKEN").unwrap();
+        let mut r = rec();
+        r.station_callsign = std::env::var("CLUBLOG_MY_CALL").unwrap();
+        r.call = std::env::var("CLUBLOG_DX_CALL").unwrap();
+        r.qso_date = std::env::var("CLUBLOG_QSO_DATE").unwrap();
+        r.time_on = std::env::var("CLUBLOG_TIME_ON").unwrap();
+        r.band = std::env::var("CLUBLOG_BAND").unwrap();
+        r.mode = std::env::var("CLUBLOG_MODE").unwrap();
+        r.freq = std::env::var("CLUBLOG_FREQ").unwrap_or_default();
+        r.gridsquare = std::env::var("CLUBLOG_GRID").unwrap_or_default();
+        let json = qso_json(&r).unwrap();
+        eprintln!("request body: {json}");
+        let resp = post(&token, "/qso", &json.to_string()).unwrap();
+        eprintln!("status={} body={}", resp.status, resp.body);
     }
 }
