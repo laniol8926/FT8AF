@@ -454,4 +454,15 @@ mod tests {
         assert_eq!(result.failed, 0);
         assert!(result.error.is_none());
     }
+
+    #[test]
+    #[ignore]
+    fn scratch_live_check_connection() {
+        // Not run in CI (needs a real token via env var) -- manual
+        // diagnostic hook for this module's own live Club Log account,
+        // matching hrdlog.rs's own scratch_live_check_connection.
+        let token = std::env::var("CLUBLOG_TOKEN").unwrap();
+        let check = check_connection(&token);
+        eprintln!("ok={} detail={:?}", check.ok, check.detail);
+    }
 }
