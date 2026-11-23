@@ -793,6 +793,23 @@ for the Hamlib version workaround needed there.
     uploads; `POST /api/v2/log/qso` uploads one QSO as ADIF-shaped JSON.
     A 409 (QSO already exists) counts as success; a 401 triggers one
     fresh-login retry before giving up on the whole batch.
+  - **Upload disabled entirely, 2026-11-23 -- real risk, not a confirmed
+    bug**: the user read hamqth.com's own "Upload log" page, which says an
+    ADIF upload "replaces all QSOs of this callsign on HamQTH, so always
+    upload your complete log." That page describes hamqth.com's own bulk
+    FILE-upload feature specifically -- a real live single-QSO test
+    against `/api/v2/log/qso` got back `409 "The QSO is in the log
+    already"`, which behaves like per-QSO tracking, not a blind
+    whole-log replace, so it's NOT confirmed this app's actual upload
+    path shares that destructive behavior. But the severity if it does
+    (every incrementally-uploaded QSO silently wiping out the operator's
+    whole real HamQTH log except itself) was judged too high to keep
+    running automatically. Both auto-upload call sites (`engine.rs`'s
+    startup catch-up and per-QSO on-log hook) were removed, and
+    `hamqth.rs`'s `upload_pending`/`upload_one_logged` now refuse to do
+    anything as a second safety layer. `check_connection` (login-only,
+    never touches the log) is untouched and still useful. The operator
+    uploads to HamQTH manually via hamqth.com's own feature now.
   - **Club Log** (`clublog.rs`) -- **not the same service as Cloudlog**
     above, easy to confuse by name. Uses Club Log's modern per-user token
     API (`clublog.org` -> Edit Your Settings -> API tab -> Tokens),
