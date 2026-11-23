@@ -401,6 +401,56 @@ impl QsoEngine {
         ));
     }
 
+    /// Answer a station that called US (a directed message naming our own
+    /// callsign -- a caller-queue chip, or any future "he's calling me,
+    /// not the other way around" entry point), as opposed to [`answer`]
+    /// (operator breaking into someone ELSE's CQ bulletin, where we have
+    /// nothing from them yet and must send our own grid first). Real bug,
+    /// found live: tapping a queued caller who had already sent us a
+    /// grid-shaped message was sending "HISCALL MYCALL MYGRID" (`answer`'s
+    /// always-Grid-stage reply) instead of "HISCALL MYCALL <report>" --
+    /// wrong, since his message already told us what we need to send him
+    /// a signal report immediately, same as `process_rx`'s own
+    /// `TxStage::Cq` branch does the instant a bare CQ picks up its first
+    /// responder (`self.target.is_none()` there). This reuses that exact
+    /// same content-based jump (duplicated, not shared via a refactor of
+    /// `process_rx`'s central dispatch, to keep this a narrow, low-risk
+    /// fix) so a caller-queue tap resumes the conversation exactly where
+    /// it actually is, not where a brand-new exchange would start.
+    pub fn answer_caller(&mut self, msg: &DecodedMessage) {
+        self.reset_qso();
+        self.dormant = None; // a deliberate new target abandons any repeat-answer window
+        self.active = true;
+        self.target = Some(msg.call_from.to_uppercase());
+        self.started_ms = util::now_unix_ms();
+        let dx = self.target.clone().unwrap();
+        match classify(msg) {
+            Content::Grid(g) => {
+                self.grid_rcvd = Some(g);
+                self.report_sent = Some(clamp_report(msg.snr));
+                self.send_report(&dx);
+            }
+            Content::Report(n) => {
+                self.grid_rcvd = if msg.grid.is_empty() { None } else { Some(msg.grid.clone()) };
+                self.report_rcvd = Some(n);
+                self.report_sent = Some(clamp_report(msg.snr));
+                self.send_r_report(&dx);
+            }
+            // Anything else (RReport/Rr73/Rrr/Bye73/Other -- an unusual
+            // shape for a fresh caller-queue entry, see offer_callers'
+            // own doc comment on what qualifies) -- fall back to the same
+            // safe baseline `answer()` uses: send our own grid first
+            // rather than guess a protocol jump this content doesn't
+            // actually support.
+            _ => {
+                self.grid_rcvd = if msg.grid.is_empty() { None } else { Some(msg.grid.clone()) };
+                self.report_sent = Some(clamp_report(msg.snr));
+                self.stage = TxStage::Grid;
+                self.tx_message = Some(format!("{dx} {} {}", self.my_call, self.my_grid));
+            }
+        }
+    }
+
     /// Operator manually picks which standard message to send next (the
     /// WSJT-X Tx1–Tx5 buttons). Requires an active target — it rebuilds
     /// `tx_message` for `stage` from the current QSO context, and the
@@ -2107,6 +2157,41 @@ mod tests {
     }
 
     #[test]
+    fn answer_caller_with_a_grid_shaped_message_replies_with_a_report() {
+        // Live bug: this used to send our own grid (answer()'s behavior),
+        // wrong here since his message already gave us his grid.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer_caller(&msg("K0XYZ", "IT9XYZ", "JN54", "JN54", 7));
+        assert_eq!(e.status().target.as_deref(), Some("IT9XYZ"));
+        assert_eq!(e.status().stage, TxStage::Report);
+        assert_eq!(e.tx_message(), Some("IT9XYZ K0XYZ +07"));
+    }
+
+    #[test]
+    fn answer_caller_with_a_report_shaped_message_replies_with_an_r_report() {
+        // His stored message was itself already a signal report to us
+        // (further along than a fresh grid-response) -- reply with R+report,
+        // not restart at Grid.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer_caller(&msg("K0XYZ", "IT9XYZ", "-12", "", 7));
+        assert_eq!(e.status().target.as_deref(), Some("IT9XYZ"));
+        assert_eq!(e.status().stage, TxStage::RReport);
+        assert_eq!(e.tx_message(), Some("IT9XYZ K0XYZ R+07"));
+    }
+
+    #[test]
+    fn answer_caller_falls_back_to_a_grid_reply_for_an_unrecognized_content_shape() {
+        // A bare directed message with neither a grid nor a parseable
+        // report (e.g. his own RR73/73 from an unrelated, stale exchange)
+        // -- the safe baseline, same as plain answer()'s always-Grid reply.
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.answer_caller(&msg("K0XYZ", "IT9XYZ", "RR73", "RR73", 7));
+        assert_eq!(e.status().target.as_deref(), Some("IT9XYZ"));
+        assert_eq!(e.status().stage, TxStage::Grid);
+        assert_eq!(e.tx_message(), Some("IT9XYZ K0XYZ EN37"));
+    }
+
+    #[test]
     fn exact_reported_bug_a_third_station_calls_during_the_courtesy_73_tail() {
         // Reproduces the live bug report: operator answered K1ABC's CQ,
         // reached the courtesy-73 retry stage (already logged -- see
@@ -2128,12 +2213,16 @@ mod tests {
         assert_eq!(e.status().caller_queue.len(), 1);
         assert_eq!(e.status().caller_queue[0].callsign, "IT9XYZ");
 
-        // Operator taps the queued caller: dequeue, then answer -- K1ABC
-        // stays cleanly logged (already_logged, untouched), IT9XYZ becomes
-        // the new target.
+        // Operator taps the queued caller: dequeue, then answer_caller --
+        // K1ABC stays cleanly logged (already_logged, untouched), IT9XYZ
+        // becomes the new target with a REPORT reply (not another grid
+        // exchange -- his own captured message already gave us his grid,
+        // see answer_caller's own doc comment for the live bug this part
+        // fixes).
         let caller = e.dequeue_specific("IT9XYZ").unwrap();
-        e.answer(&msg(&e.my_call.clone(), &caller.callsign, &caller.extra, &caller.grid, caller.snr));
+        e.answer_caller(&msg(&e.my_call.clone(), &caller.callsign, &caller.extra, &caller.grid, caller.snr));
         assert_eq!(e.status().target.as_deref(), Some("IT9XYZ"));
-        assert_eq!(e.status().stage, TxStage::Grid);
+        assert_eq!(e.status().stage, TxStage::Report);
+        assert_eq!(e.tx_message(), Some("IT9XYZ K0XYZ +07"));
     }
 }

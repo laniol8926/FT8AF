@@ -2824,11 +2824,17 @@ impl Engine {
     /// Shared tail of `EngineCommand::Answer` and `AnswerQueuedCaller`:
     /// apply the requested TX offset, derive reply parity, update the
     /// parity preference/restore bookkeeping, and hand the target to
-    /// `qso.answer()`. `msg_utc_ms` is the DX's own decoded-slot timestamp
-    /// (see `AnswerArgs::msg_utc_ms`'s doc comment for why this matters
-    /// more than it looks like it should) -- `None` falls back to the
-    /// current slot.
-    fn answer_message(&mut self, msg: DecodedMessage, delta_freq: u32, msg_utc_ms: Option<i64>) {
+    /// `qso.answer()` or `qso.answer_caller()`. `msg_utc_ms` is the DX's
+    /// own decoded-slot timestamp (see `AnswerArgs::msg_utc_ms`'s doc
+    /// comment for why this matters more than it looks like it should) --
+    /// `None` falls back to the current slot. `from_caller_queue` selects
+    /// which `qso.rs` entry point applies: `answer()` is for breaking into
+    /// someone ELSE's CQ bulletin (we have nothing from them yet, so we
+    /// send our own grid first); `answer_caller()` is for a station that
+    /// already called US (a caller-queue chip), which already told us
+    /// what we need to reply with a signal report immediately -- see
+    /// `answer_caller`'s own doc comment for the live bug this fixes.
+    fn answer_message(&mut self, msg: DecodedMessage, delta_freq: u32, msg_utc_ms: Option<i64>, from_caller_queue: bool) {
         // Honor the audio tone the companion/caller asked us to answer on
         // (WSJT-X's `df`) for *this session* when it carries a plausible
         // one, so we key up on the requested offset rather than the
@@ -2869,7 +2875,11 @@ impl Engine {
         }
         self.preferred_tx_parity = Some(reply_parity);
         self.has_transmitted_this_run = false;
-        self.qso.answer(&msg);
+        if from_caller_queue {
+            self.qso.answer_caller(&msg);
+        } else {
+            self.qso.answer(&msg);
+        }
         // Fork: look the partner up on QRZ now, so its state is
         // cached by the time the QSO is logged. Mirrors
         // `FT8TransmitSignal.java`'s one real call site.
@@ -3144,7 +3154,7 @@ impl Engine {
                     snr: args.snr,
                     ..Default::default()
                 };
-                self.answer_message(msg, args.delta_freq, args.msg_utc_ms);
+                self.answer_message(msg, args.delta_freq, args.msg_utc_ms, false);
             }
             EngineCommand::AnswerQueuedCaller { callsign } => {
                 // Caller-queue (pileup-while-busy): the operator tapped a
@@ -3154,30 +3164,42 @@ impl Engine {
                 // re-tap or a stale chip the UI hasn't refreshed yet can't
                 // double-answer the same caller.
                 //
-                // Deliberately reuses `qso.answer()`'s existing, unconditional
-                // "abandon whatever was in progress, no logging of the
-                // abandoned target" behavior -- this is the SAME thing a
-                // manual Answer on a different station already does today
-                // (see `qso.rs`'s `manually_answering_someone_else_mid_retry_
-                // does_not_relog_the_first_contact` test). This is narrower
-                // than Android's `forceLogAndMoveOn`, which can force-log a
-                // QSO that reached only a signal report (no RR73 yet) --
-                // porting that needs new record-building logic in `qso.rs`
-                // this pass deliberately doesn't add (see this feature's
-                // plan doc's "Scope decision"). The one case that matters
-                // for the reported bug -- tapping while the old QSO is
-                // already logged (Rr73/Bye73) -- already loses nothing,
-                // since `notify_transmitted` logged it the moment our own
-                // closing message was confirmed sent.
+                // Uses `qso.answer_caller()`, not plain `answer()` -- live
+                // bug, found live: this used to send "HISCALL MYCALL
+                // MYGRID" (answer()'s always-Grid-stage reply, correct only
+                // for breaking into someone ELSE's CQ bulletin) instead of
+                // "HISCALL MYCALL <report>", even though this caller
+                // already told us everything needed to reply with a report
+                // immediately -- see `answer_caller`'s own doc comment.
+                // `extra` must be passed through (not dropped) so
+                // `classify()` inside `answer_caller` can tell a grid-
+                // shaped message from a report from an RR73, etc.
+                //
+                // Reusing `answer_caller()`'s "abandon the old target,
+                // don't log it" behavior for the OLD QSO -- the SAME thing
+                // a manual Answer on a different station already does
+                // today (see `qso.rs`'s `manually_answering_someone_else_
+                // mid_retry_does_not_relog_the_first_contact` test). This
+                // is narrower than Android's `forceLogAndMoveOn`, which
+                // can force-log a QSO that reached only a signal report
+                // (no RR73 yet) -- porting that needs new record-building
+                // logic in `qso.rs` this pass deliberately doesn't add
+                // (see this feature's plan doc's "Scope decision"). The
+                // one case that matters for the original reported bug --
+                // tapping while the old QSO is already logged (Rr73/
+                // Bye73) -- already loses nothing, since `notify_transmitted`
+                // logged it the moment our own closing message was
+                // confirmed sent.
                 if let Some(caller) = self.qso.dequeue_specific(&callsign) {
                     let msg = DecodedMessage {
                         call_from: caller.callsign,
                         grid: caller.grid,
                         snr: caller.snr,
                         freq_hz: caller.freq_hz,
+                        extra: caller.extra,
                         ..Default::default()
                     };
-                    self.answer_message(msg, 0, Some(caller.last_heard_ms));
+                    self.answer_message(msg, 0, Some(caller.last_heard_ms), true);
                 }
             }
             EngineCommand::SetStage(stage) => {
@@ -3601,7 +3623,11 @@ mod tests {
         engine.handle(EngineCommand::AnswerQueuedCaller { callsign: "IT9XYZ".into() });
 
         assert_eq!(engine.qso.status().target.as_deref(), Some("IT9XYZ"));
-        assert_eq!(engine.qso.status().stage, TxStage::Grid);
+        // Report stage, not Grid -- IT9XYZ's own captured message already
+        // gave us his grid, so the reply is a signal report immediately
+        // (answer_caller's whole point), not another grid exchange.
+        assert_eq!(engine.qso.status().stage, TxStage::Report);
+        assert_eq!(engine.qso.status().tx_message.as_deref(), Some("IT9XYZ K0XYZ +07"));
         assert!(engine.qso.status().caller_queue.is_empty(), "IT9XYZ was dequeued");
         // K1ABC's exchange was abandoned (never reached notify_transmitted),
         // so nothing was logged for it either -- matches plain answer()'s
