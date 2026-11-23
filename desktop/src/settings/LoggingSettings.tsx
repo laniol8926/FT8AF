@@ -1602,12 +1602,39 @@ function HrdlogDialog({ callsign, onClose }: { callsign: string; onClose: () => 
  * here except HRDLog.net). Download never inserts a new QSO -- only
  * updates a matched existing one.
  */
+/** Which long-running eQSL action (if any) is currently in flight -- used
+ *  instead of a single shared `busy` boolean so each button shows its
+ *  OWN progress label rather than every button flipping to "Working…"
+ *  no matter which one the operator actually clicked, and so a slow
+ *  download (a real two-step fetch against eQSL's server, easily 10s+)
+ *  shows a live elapsed-seconds counter instead of looking like the app
+ *  has frozen -- reported live: "it doesn't look like the application
+ *  is just sitting there doing nothing". */
+type EqslAction = "test" | "upload" | "downloadNew" | "downloadAll" | null;
+
+function useElapsedSeconds(active: boolean): number {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setElapsed(0);
+      return;
+    }
+    const start = Date.now();
+    setElapsed(0);
+    const id = window.setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return elapsed;
+}
+
 function EqslDialog({ onClose }: { onClose: () => void }) {
   const [initial, setInitial] = useState<{ username: string; password: string; nickname: string } | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [nickname, setNickname] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [action, setAction] = useState<EqslAction>(null);
+  const busy = action !== null;
+  const elapsed = useElapsedSeconds(busy);
   const [testResult, setTestResult] = useState<{ text: string; ok: boolean } | null>(null);
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [uploadStatus, setUploadStatus] = useState<{ text: string; ok: boolean } | null>(null);
@@ -1644,11 +1671,11 @@ function EqslDialog({ onClose }: { onClose: () => void }) {
 
   async function test() {
     await saveFields();
-    setBusy(true);
+    setAction("test");
     setTestResult(null);
     const check = await api.eqslTestConnection(username.trim(), password);
     setTestResult({ text: check.detail || (check.ok ? "No response body" : "Fail"), ok: check.ok });
-    setBusy(false);
+    setAction(null);
   }
 
   async function save() {
@@ -1657,10 +1684,10 @@ function EqslDialog({ onClose }: { onClose: () => void }) {
   }
 
   async function upload() {
-    setBusy(true);
+    setAction("upload");
     setUploadStatus(null);
     const result = await api.eqslUploadPending();
-    setBusy(false);
+    setAction(null);
     api.eqslPendingUploadCount().then(setPendingCount);
     if (result.error) {
       setUploadStatus({
@@ -1674,10 +1701,10 @@ function EqslDialog({ onClose }: { onClose: () => void }) {
 
   async function download(fullRefresh: boolean) {
     await saveFields();
-    setBusy(true);
+    setAction(fullRefresh ? "downloadAll" : "downloadNew");
     setDownloadStatus(null);
     const result = await api.eqslDownloadConfirmations(fullRefresh);
-    setBusy(false);
+    setAction(null);
     setDownloadStatus(
       result.error
         ? { text: result.error, ok: false }
@@ -1714,7 +1741,9 @@ function EqslDialog({ onClose }: { onClose: () => void }) {
           <input value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="Matches your eQSL profile" autoComplete="off" />
         </div>
         <div className="row" style={{ gap: 8, marginTop: 10, alignItems: "center" }}>
-          <button disabled={busy} onClick={test}>{busy ? "Working…" : "Test Connection"}</button>
+          <button disabled={busy} onClick={test}>
+            {action === "test" ? `Working… (${elapsed}s)` : "Test Connection"}
+          </button>
         </div>
         {testResult && (
           <div className="muted" style={{ fontSize: 12, color: testResult.ok ? "var(--ok)" : "var(--tx)" }}>
@@ -1726,7 +1755,9 @@ function EqslDialog({ onClose }: { onClose: () => void }) {
           <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
             {pendingCount == null ? "Checking…" : `${pendingCount} QSOs not yet uploaded.`}
           </div>
-          <button disabled={busy || !pendingCount} onClick={upload}>{busy ? "Uploading…" : "Upload now"}</button>
+          <button disabled={busy || !pendingCount} onClick={upload}>
+            {action === "upload" ? `Uploading… (${elapsed}s)` : "Upload now"}
+          </button>
           {uploadStatus && (
             <div className="muted" style={{ marginTop: 8, fontSize: 12, color: uploadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
               {uploadStatus.text}
@@ -1737,10 +1768,17 @@ function EqslDialog({ onClose }: { onClose: () => void }) {
         <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
           <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
             Download newly confirmed QSLs and merge them into this log (never inserts a new QSO).
+            eQSL's own download is a real two-step fetch (generate, then retrieve the file) so
+            this can take a while, especially "Download all" -- the elapsed-seconds counter below
+            is there so this doesn't look like the app has frozen.
           </div>
           <div className="row" style={{ gap: 8 }}>
-            <button disabled={busy} onClick={() => download(false)}>{busy ? "Working…" : "Download new"}</button>
-            <button disabled={busy} onClick={() => download(true)}>Download all</button>
+            <button disabled={busy} onClick={() => download(false)}>
+              {action === "downloadNew" ? `Downloading… (${elapsed}s)` : "Download new"}
+            </button>
+            <button disabled={busy} onClick={() => download(true)}>
+              {action === "downloadAll" ? `Downloading… (${elapsed}s)` : "Download all"}
+            </button>
           </div>
           {downloadStatus && (
             <div className="muted" style={{ marginTop: 8, fontSize: 12, color: downloadStatus.ok ? "var(--ok)" : "var(--tx)" }}>
