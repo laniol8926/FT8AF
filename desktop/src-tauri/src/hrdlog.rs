@@ -21,6 +21,21 @@
 //! detection isn't implemented -- any rejection (a real error, or a
 //! duplicate HRDLog already has) is treated as a plain failure and left
 //! unsynced for the next attempt, rather than guessing which one it was.
+//!
+//! **Live-confirmed 2026-11-22: this module needs its own TLS stack.**
+//! The user's real Callsign/Code pair got a real "Connection Failed"
+//! (`ureq::ErrorKind::ConnectionFailed`) on every attempt, while `curl`
+//! and `openssl s_client` against the exact same endpoint from the exact
+//! same machine succeeded every time with a normal response. Isolated to
+//! this project's rustls-based TLS client specifically (confirmed by
+//! swapping in `native-tls`/OpenSSL for one request and getting the same
+//! success curl gets) -- robot.hrdlog.net (or something in front of it)
+//! resets the TLS handshake for a rustls `ClientHello` even with an
+//! explicit ALPN list added to try to close the gap, but accepts
+//! OpenSSL's. So [`agent`] here builds its own `native-tls`-backed ureq
+//! agent instead of this project's usual rustls default -- see
+//! `Cargo.toml`'s `native-tls` dependency comment for why it's the
+//! `vendored` (statically linked) build, not a system-library one.
 
 use serde::Serialize;
 
@@ -37,7 +52,17 @@ const HTTP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20
 const MAX_DETAIL_LEN: usize = 300;
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout_connect(HTTP_CONNECT_TIMEOUT).timeout_read(HTTP_READ_TIMEOUT).build()
+    // See this module's top doc comment: robot.hrdlog.net resets a rustls
+    // handshake but accepts OpenSSL's, so this module alone uses
+    // native-tls instead of the rest of the project's rustls default.
+    let connector = std::sync::Arc::new(
+        native_tls::TlsConnector::new().expect("building a native-tls connector"),
+    );
+    ureq::AgentBuilder::new()
+        .tls_connector(connector)
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
+        .timeout_read(HTTP_READ_TIMEOUT)
+        .build()
 }
 
 /// Keywords a rejection is likely to contain -- used only to decide
@@ -85,6 +110,37 @@ struct RawResponse {
     body: String,
 }
 
+/// Builds a diagnostic message from a `ureq::Transport` without ever
+/// touching its `url()` -- unlike `Transport`'s own `Display`, which
+/// prepends the request URL (safe here regardless, since this module's
+/// URL never carries credentials in a query string, but kept consistent
+/// with this project's `lotw.rs`-established rule anyway). Prefixed with
+/// "Network error:" so a TCP/TLS-level failure to reach the server (e.g.
+/// ureq's own `ErrorKind::ConnectionFailed`, whose bare kind()  Display
+/// text is literally "Connection Failed") is never mistaken for a real
+/// HRDLog.net response rejecting the request -- confirmed live
+/// 2026-11-22 that the real server accepts this project's exact
+/// Callsign/Code pair (it replied with a normal "missing QSO fields"
+/// error for a blank test ping, not an auth rejection, and "Unknown
+/// user" for a genuinely wrong Code), so a bare transport error here
+/// means the network hiccuped, not that credentials are wrong. Includes
+/// `message()`/`source()` (e.g. the underlying `std::io::Error`/TLS
+/// error text) so a *recurring* failure -- as opposed to the one-off
+/// blip first assumed -- carries enough detail to actually diagnose,
+/// rather than always showing the same uninformative "Connection
+/// Failed" regardless of the real underlying cause.
+fn describe_transport_error(t: &ureq::Transport) -> String {
+    use std::error::Error as _;
+    let mut s = format!("Network error: {}", t.kind());
+    if let Some(m) = t.message() {
+        s.push_str(&format!(" ({m})"));
+    }
+    if let Some(src) = t.source() {
+        s.push_str(&format!(": {src}"));
+    }
+    s
+}
+
 fn send(callsign: &str, code: &str, adif: &str) -> Result<RawResponse, String> {
     let result = agent().post(UPLOAD_URL).send_form(&[
         ("Callsign", callsign),
@@ -97,16 +153,7 @@ fn send(callsign: &str, code: &str, adif: &str) -> Result<RawResponse, String> {
         Err(ureq::Error::Status(status, response)) => {
             Ok(RawResponse { status, body: response.into_string().unwrap_or_default() })
         }
-        // Prefixed so a TCP/TLS-level failure to reach the server (e.g.
-        // ureq's own `ErrorKind::ConnectionFailed`, whose Display text is
-        // literally "Connection Failed") is never mistaken for a real
-        // HRDLog.net response rejecting the request -- confirmed live
-        // 2026-11-22 that the real server accepts this project's exact
-        // Callsign/Code pair (it replied with a normal "missing QSO
-        // fields" error for a blank test ping, not an auth rejection), so
-        // a bare transport error here means the network hiccuped, not
-        // that credentials are wrong.
-        Err(ureq::Error::Transport(t)) => Err(format!("Network error: {}", t.kind())),
+        Err(ureq::Error::Transport(t)) => Err(describe_transport_error(&t)),
     }
 }
 
@@ -245,6 +292,37 @@ mod tests {
     fn check_connection_requires_credentials() {
         assert!(!check_connection("", "").ok);
         assert!(!check_connection("K1ABC", "").ok);
+    }
+
+    #[test]
+    fn describe_transport_error_includes_more_than_the_bare_kind() {
+        // A real transport error -- nothing listens on this port, so the
+        // OS refuses the connection immediately -- used to confirm
+        // describe_transport_error surfaces the real underlying cause
+        // (e.g. "Connection refused") instead of only ureq's generic
+        // ErrorKind Display text ("Connection Failed"), which was the
+        // whole point of this function: a recurring real failure needs
+        // enough detail to diagnose, not just a repeat of the same vague
+        // label every time.
+        let err = ureq::post("http://127.0.0.1:1/").call().unwrap_err();
+        let transport = err.into_transport().expect("a connection refusal is a transport error");
+        let msg = describe_transport_error(&transport);
+        assert!(msg.starts_with("Network error:"), "{msg}");
+        assert!(msg.len() > "Network error: Connection Failed".len(), "{msg}");
+    }
+
+    #[test]
+    #[ignore]
+    fn scratch_live_check_connection() {
+        // Not run in CI (needs real credentials via env vars) -- kept as a
+        // manual diagnostic hook for this module's own live HRDLog.net
+        // account. Exercises the real `agent()` (native-tls, per this
+        // module's top doc comment), so a future TLS-level regression here
+        // would show up as a transport error again, not a silent pass.
+        let callsign = std::env::var("HRDLOG_CALLSIGN").unwrap();
+        let code = std::env::var("HRDLOG_CODE").unwrap();
+        let check = check_connection(&callsign, &code);
+        eprintln!("ok={} detail={:?}", check.ok, check.detail);
     }
 
     #[test]

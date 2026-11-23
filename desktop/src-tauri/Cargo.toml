@@ -36,8 +36,20 @@ serialport = "4"
 # HTTP client: FLrig XML-RPC (localhost, plain HTTP) and the FCC/Census
 # bulk-grid-import download (data.fcc.gov, HTTPS) -- `tls` pulls in rustls
 # (pure Rust, no system OpenSSL dependency, which matters on the ARM SBC
-# this app also targets) rather than native-tls.
-ureq = { version = "2", default-features = false, features = ["tls"] }
+# this app also targets) rather than native-tls, for every module except
+# hrdlog.rs (see below).
+ureq = { version = "2", default-features = false, features = ["tls", "native-tls"] }
+# hrdlog.rs ONLY: confirmed live 2026-11-22 that robot.hrdlog.net's server
+# (or something in front of it) resets the TLS handshake specifically for
+# rustls clients -- curl/OpenSSL succeed every time with the exact same
+# request, rustls fails every time, including with an explicit ALPN
+# protocol list added to try to close the gap. `vendored` statically
+# compiles+links OpenSSL into this binary at build time (needs a C
+# compiler + perl during `cargo build`, already present on this project's
+# dev machines) specifically so this doesn't reintroduce the runtime
+# system-OpenSSL dependency the rustls choice above was made to avoid --
+# no target machine needs libssl installed, including the ARM SBC.
+native-tls = { version = "0.2", features = ["vendored"] }
 # Manual redirect-hop resolution for cloudlog.rs's POST requests (ureq won't
 # auto-follow a 307/308 on a POST, and auto-follows 301/302/303 by dropping
 # the body -- see that module's top doc comment). Already resolved as a
