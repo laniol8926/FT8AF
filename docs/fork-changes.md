@@ -824,9 +824,31 @@ for the Hamlib version workaround needed there.
     response shape is unconfirmed, Test Connection deliberately doesn't
     try to classify pass/fail itself -- it shows HRDLog's raw response
     text (from a request with a blank ADIF field, so nothing is actually
-    logged) for the operator to judge. Needs live verification against a
-    real HRDLog.net account before it can be trusted; the endpoint, field
-    names or response handling may all need correcting once that happens.
+    logged) for the operator to judge.
+  - **Live-verified 2026-11-22/23, and a real TLS-stack bug found and
+    fixed**: the user's real Callsign/Code was correct from the start --
+    confirmed by live-testing with `curl`/`openssl s_client` against the
+    real endpoint, which got HRDLog's normal "missing QSO fields"
+    response every time. The app itself still failed every time with
+    `ureq`'s generic "Connection Failed", traced to this project's
+    rustls-based TLS client specifically: robot.hrdlog.net (or something
+    in front of it) resets the TLS handshake for a rustls `ClientHello`
+    (even with an explicit ALPN list added to try to close the gap), but
+    accepts OpenSSL's. Fixed by giving `hrdlog.rs` alone its own
+    `native-tls`-backed HTTP client -- every other integration in this
+    app keeps using the project's usual rustls default. Uses
+    `native-tls`'s `vendored` feature (OpenSSL compiled from source and
+    statically linked into the binary at build time) rather than the
+    system's `libssl`, specifically so this doesn't reintroduce the
+    runtime system-OpenSSL dependency the original rustls choice was
+    made to avoid (see `Cargo.toml`'s own comment) -- no target machine
+    needs `libssl` installed, including the ARM SBC this app also
+    targets. `describe_transport_error` (shared diagnostic helper) now
+    surfaces the real underlying cause (e.g. "Connection reset by peer
+    (os error 104)") instead of only ureq's generic label, which is what
+    made this look like a one-off network blip at first. Confirmed live
+    after the fix: Test Connection returns success against the real
+    account.
 - **New: eQSL upload + inbox download** (Settings -> Logging & Awards,
   `eqsl.rs`), the fourth and last of this batch, requested directly by the
   user. Unlike the others, eQSL has no real client anywhere in the Android
@@ -882,6 +904,34 @@ for the Hamlib version workaround needed there.
     duplicate-detection string against the real server, not just a
     plausible guess. Inbox download has not been live-tested yet and
     remains the one unconfirmed piece of this feature.
+  - **Progress feedback fixed 2026-11-23**, reported live: "need some
+    type of progress indicator when downloading confirmations from eQSL
+    so it doesn't look like the application is just sitting there doing
+    nothing" (eQSL's download is a genuine two-step fetch -- generate
+    server-side, then retrieve the file -- so it can legitimately take a
+    while, especially "Download all"). Found a real bug while fixing
+    this: the dialog had one shared `busy` boolean, so clicking "Download
+    all" flipped "Download new"'s own button label to "Working…" too,
+    while "Download all" itself never changed from its static label at
+    all. Replaced with a single `action` state naming which specific
+    operation is running, so each button (Test Connection/Upload now/
+    Download new/Download all) shows its own correct label plus a live
+    elapsed-seconds counter (e.g. "Downloading… (14s)").
+
+- **QRZ.com confirmation import, clarified and tested 2026-11-23**: two
+  real nuances the user raised about importing a QRZ.com logbook export,
+  both already handled correctly by the existing `qrz_qsl`/
+  `merge_matched_qso` logic -- now with regression tests confirming it
+  rather than just asserted in a doc comment:
+  - A real QRZ.com export is a mix of confirmed/unconfirmed entries
+    (`APP_QRZLOG_STATUS=C` vs. anything else, e.g. `U`) -- re-importing
+    it onto already-logged QSOs only flips `qrz_qsl` for the ones QRZ
+    itself marks confirmed, never the whole batch.
+  - QRZ.com's own logbook also shows a QSO as confirmed when LoTW
+    confirmed it, so a real export record can carry both
+    `APP_QRZLOG_STATUS=C` and the standard `LOTW_QSL_RCVD=Y` tag
+    together -- `qrz_qsl` and `lotw_rcvd` are set independently from the
+    two separate fields, never conflated as the same fact.
 
 ## Smaller fixes
 
