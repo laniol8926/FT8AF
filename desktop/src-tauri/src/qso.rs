@@ -323,14 +323,6 @@ impl QsoEngine {
     /// See `already_logged`'s own doc comment for how a later, separate
     /// confirming reply is kept from logging a duplicate.
     pub fn notify_transmitted(&mut self) -> Option<QsoOutcome> {
-        // TEMPORARY diagnostic (spontaneous second-73 report) -- remove
-        // once a real trace confirms or rules this out.
-        if matches!(self.stage, TxStage::Rr73 | TxStage::Bye73) {
-            eprintln!(
-                "[bye73] notify_transmitted stage={:?} target={:?} already_logged={} answering_dormant_repeat={}",
-                self.stage, self.target, self.already_logged, self.answering_dormant_repeat
-            );
-        }
         if self.stage == TxStage::Bye73 {
             self.bye73_sent = true;
         }
@@ -376,15 +368,8 @@ impl QsoEngine {
     /// by the time it runs, so it's a no-op there once this has already
     /// fired.
     pub fn finish_if_bye73_sent(&mut self) {
-        // TEMPORARY diagnostic (spontaneous second-73 report) -- remove
-        // once a real trace confirms or rules this out.
-        eprintln!(
-            "[bye73] finish_if_bye73_sent stage={:?} bye73_sent={} target={:?} auto_return_to_cq={}",
-            self.stage, self.bye73_sent, self.target, self.auto_return_to_cq
-        );
         if self.stage == TxStage::Bye73 && self.bye73_sent {
             self.finish_qso();
-            eprintln!("[bye73] finish_qso ran -> stage={:?} active={} target={:?}", self.stage, self.active, self.target);
         }
     }
 
@@ -835,15 +820,7 @@ impl QsoEngine {
             }
             TxStage::Cq => {
                 self.cq_no_reply_count = self.cq_no_reply_count.saturating_add(1);
-                // TEMPORARY diagnostic (CQ Watchdog "called CQ 4 times, limit
-                // 3" report) -- remove once a real trace confirms or rules
-                // out this code path.
-                eprintln!(
-                    "[cq-watchdog] no_progress count={}/{}",
-                    self.cq_no_reply_count, self.cq_no_reply_limit
-                );
                 if should_give_up_cq(self.cq_no_reply_limit, self.cq_no_reply_count) {
-                    eprintln!("[cq-watchdog] giving up");
                     // No target to fall back to -- this IS the CQ itself
                     // giving up, same as the operator pressing Stop.
                     self.stop();
@@ -863,11 +840,6 @@ impl QsoEngine {
     /// without logging a second `QsoRecord`. Capped at
     /// `MAX_REPEAT_ANSWERS`. Returns whether a repeat answer was armed.
     fn try_answer_dormant_repeat(&mut self, messages: &[DecodedMessage]) -> bool {
-        // TEMPORARY diagnostic (spontaneous second-73 report) -- remove
-        // once a real trace confirms or rules this out.
-        if self.dormant.is_some() {
-            eprintln!("[bye73] try_answer_dormant_repeat called, dormant={:?}", self.dormant);
-        }
         let Some(dormant) = self.dormant.clone() else { return false };
         if dormant.repeat_answers >= MAX_REPEAT_ANSWERS {
             return false;

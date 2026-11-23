@@ -1788,14 +1788,6 @@ impl Engine {
         // the actual, unambiguous signal -- see its own doc comment.
         let is_own_tx_slot = !self.has_transmitted_this_run
             || self.tx_parity == Some(slot_id.rem_euclid(2));
-        // TEMPORARY diagnostic (CQ Watchdog "called CQ 4 times, limit 3"
-        // report; widened for the 15s-apart double-transmission report,
-        // now confirmed on Answer too, not just bare CQ) -- remove once a
-        // real trace confirms or rules this out.
-        eprintln!(
-            "[retx] handle_decoded stage={:?} slot={slot_id} parity={} tx_parity={:?} own_slot={is_own_tx_slot} n_decoded={} active={}",
-            self.qso.status().stage, slot_id.rem_euclid(2), self.tx_parity, decoded.len(), self.qso.active,
-        );
         // Caller-queue (pileup-while-busy): a SEPARATE pass over this same
         // decoded batch from process_rx below, called unconditionally
         // every cycle regardless of stage/own-slot -- see
@@ -2037,14 +2029,6 @@ impl Engine {
             into_cycle_ms_now,
             self.effective_tx_latest_ms(),
         );
-        // TEMPORARY diagnostic (15s-apart double-transmission report, now
-        // confirmed on Answer too, not just bare CQ) -- remove once a real
-        // trace confirms or rules this out. Widened to every stage: the
-        // earlier Cq-only gate would have missed this entirely.
-        eprintln!(
-            "[retx] maybe_transmit ENTRY stage={:?} slot={slot_id} tx_parity={:?} txed_slot={} into_cycle_ms={into_cycle_ms_now} eligible={eligible} has_tx={} active={}",
-            self.qso.status().stage, self.tx_parity, self.txed_slot, self.has_transmitted_this_run, self.qso.active,
-        );
         if !eligible {
             return;
         }
@@ -2053,10 +2037,6 @@ impl Engine {
         self.tx_parity = Some(slot_id.rem_euclid(2));
         self.txed_slot = slot_id;
         if let Some(msg) = self.qso.tx_message().map(|s| s.to_string()) {
-            // TEMPORARY diagnostic (widened -- see maybe_transmit ENTRY's
-            // own comment) -- remove once a real trace confirms or rules
-            // this out.
-            eprintln!("[retx] maybe_transmit FIRING slot={slot_id} parity={} msg={msg:?}", slot_id.rem_euclid(2));
             if self.start_transmit(&msg) {
                 // The ONLY reliable "a real over has actually gone out this
                 // run" signal -- see `has_transmitted_this_run`'s own doc
