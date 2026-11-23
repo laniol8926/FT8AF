@@ -31,8 +31,31 @@ const HEADER: &str = "FT8AF ADIF Log<eoh>\n";
 
 /// `Download/FT8AF/ft8af_log.adi`, or `None` if the platform has no
 /// resolvable Downloads directory at all.
+///
+/// **Always `None` in a `#[cfg(test)]` build.** Real bug, found live
+/// 2026-11-23: `engine.rs`'s own test suite completes full simulated QSOs
+/// (placeholder calls like `K0XYZ`/`K1ABC`) through the exact same
+/// `log_completed_qso` path the real app uses, and `enableAdifExport`
+/// defaults to *on* when unset -- which a test's fresh in-memory `Db`
+/// always is. With no way to redirect `dirs::download_dir()` away from
+/// the real OS Downloads folder, every `cargo test` run on a developer's
+/// own machine was silently appending fake QSOs into that machine's
+/// real `~/Downloads/FT8AF/ft8af_log.adi` -- confirmed: this exact file
+/// on the machine this was found on. Blocking it here, unconditionally,
+/// protects every current and future test that exercises this path,
+/// rather than requiring each one to remember to set `enableAdifExport`
+/// to `"0"` in its own test `Db`. This module's own tests call
+/// `append_record` directly with an explicit temp path instead of going
+/// through this function, so they're unaffected.
 pub fn log_file_path() -> Option<PathBuf> {
-    dirs::download_dir().map(|d| d.join("FT8AF").join(FILE_NAME))
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        dirs::download_dir().map(|d| d.join("FT8AF").join(FILE_NAME))
+    }
 }
 
 /// Append one already-built ADIF record (ending in `<eor>`, no trailing
@@ -121,5 +144,24 @@ mod tests {
         // directory assumptions and append_record itself being what's
         // actually under test for the enabled path above.
         log_qso(false, "<call:5>K1ABC<eor>");
+    }
+
+    #[test]
+    fn log_file_path_is_none_in_a_test_build_even_though_a_real_downloads_dir_exists() {
+        // The real regression: engine.rs's own tests complete full
+        // simulated QSOs with enableAdifExport defaulting to on (a fresh
+        // test Db never sets it), which used to resolve straight to the
+        // real OS Downloads folder and append fake K0XYZ/K1ABC QSOs into
+        // a real developer's real ft8af_log.adi. This must stay None
+        // under #[cfg(test)] no matter what the real OS reports.
+        assert!(log_file_path().is_none());
+    }
+
+    #[test]
+    fn log_qso_enabled_is_a_no_op_in_a_test_build() {
+        // Same regression, exercised through the real public entry point
+        // engine.rs calls: enabled=true must still touch no real file,
+        // because log_file_path() is None under test.
+        log_qso(true, "<call:5>K1ABC<eor>");
     }
 }
