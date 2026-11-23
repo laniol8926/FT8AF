@@ -849,6 +849,28 @@ for the Hamlib version workaround needed there.
     made this look like a one-off network blip at first. Confirmed live
     after the fix: Test Connection returns success against the real
     account.
+  - **Real field-name bug found and fixed, 2026-11-23**: a real "Upload
+    now" against the user's actual pending QSOs returned "0 uploaded, 3
+    failed" with HRDLog's generic "Missing Call QSO_Date Time_On Band
+    Mode" rejection, even though all three records had every one of those
+    fields populated -- reproduced directly: a fully well-formed ADIF
+    record under this module's `"ADIF"` field name got the exact same
+    rejection every time, meaning the field never reached HRDLog's parser
+    at all. Confirmed the real field name against two independent real
+    source files reading `NewEntry.aspx` directly -- IW1QLH's own
+    `HRDLOG-net-library` (IW1QLH runs hrdlog.net itself) and the
+    `wsjtx-tools` project's `hrdlog-upload.py` -- both use `"ADIFData"`,
+    not `"ADIF"`. Also added real duplicate detection (`<insert>1`
+    stored / `<insert>0` already-present / `<error>...` rejected,
+    confirmed by the same two sources) now that the real response format
+    is known, matching Club Log's/eQSL's own
+    `Stored`/`AlreadyPresent`/`Failed` result shape. **Not live-tested
+    against the real server** -- the user's HRDLog.net account became
+    inaccessible account-wide partway through this investigation
+    (confirmed unrelated to this app's code: CQRLOG, a completely
+    separate program, started failing identically against the same
+    account at the same time), so live verification is pending that
+    clearing up on HRDLog's end.
 - **New: eQSL upload + inbox download** (Settings -> Logging & Awards,
   `eqsl.rs`), the fourth and last of this batch, requested directly by the
   user. Unlike the others, eQSL has no real client anywhere in the Android
