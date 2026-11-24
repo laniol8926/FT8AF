@@ -170,13 +170,32 @@ jobs:
           fi
 
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.label }})
     needs: [detect, version]
     if: ${{ needs.detect.outputs.run == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # `target` empty = the runner's native host triple (unchanged
+        # behavior for these three). The 4th entry cross-compiles on the
+        # SAME windows-latest runner down to 32-bit x86 for Windows 10 x86 --
+        # build.rs/build_support.rs already had the C-core (clang-cl target
+        # flag) and vendored-DLL (hamlib/x86) support for this wired in
+        # before any CI leg actually exercised it; this is what turns that
+        # groundwork into a real, published artifact.
+        include:
+          - os: ubuntu-latest
+            target: ''
+            label: ubuntu-latest
+          - os: macos-latest
+            target: ''
+            label: macos-latest
+          - os: windows-latest
+            target: ''
+            label: windows-latest
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            label: windows-latest (x86)
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -191,10 +210,21 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Only the i686 leg needs this -- the other three build for the
+      # runner's own default host target, already installed by the stable
+      # toolchain above.
+      - name: Add cross-compile target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
+      # `key` disambiguates the two windows-latest legs (x64 vs x86), which
+      # would otherwise share a cache key and corrupt each other's
+      # target/ directory between runs.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          key: ${{ matrix.target }}
 
       # Tauri v2 Linux system dependencies (webkit2gtk-4.1 + GTK + packaging),
       # plus the native libs our crates link against on Linux:
@@ -251,7 +281,7 @@ jobs:
       - name: Compile check (no bundle)
         if: ${{ needs.version.outputs.should_release != 'true' }}
         working-directory: desktop
-        run: npm run tauri build -- --no-bundle
+        run: npm run tauri build -- --no-bundle ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
       # The manifests stay at a placeholder version in git; a release build gets
       # the tag-derived version stamped into tauri.conf.json (bundle/installer
@@ -278,7 +308,7 @@ jobs:
           releaseName: ${{ needs.version.outputs.release_tag }}
           releaseBody: 'FT8AF desktop build ${{ needs.version.outputs.version_name }}.'
           prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}
-          args: --config '{"bundle":{"active":true}}'
+          args: --config '{"bundle":{"active":true}}' ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
   coverage:
     name: Rust coverage
