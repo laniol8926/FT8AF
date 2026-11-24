@@ -1078,6 +1078,180 @@ for the Hamlib version workaround needed there.
     Grid-stage baseline) instead of always restarting cold. 3 more
     `qso.rs` tests for the three branches.
 
+- **FT2 now transmits, not just decodes, 2026-11-24.** `Mode::can_transmit()`
+  (removed) refused FT2 TX on the premise "there is no `ft2_encode`
+  anywhere" -- false: FT2 reuses FT4's exact tone-generation algorithm
+  bit-for-bit (same LDPC, XOR scramble, Costas layout, 105-symbol
+  structure -- `constants.h`'s own `FTX_PROTOCOL_FT2` doc comment already
+  said so), and `dsp/encode.rs`'s `encode_tones_mode` already dispatched
+  FT2 to the shared `ft4_encode`, exactly matching Android's
+  `ModeProfile.encode()` (which has never gated FT2 TX at all). No
+  native/FFI change needed -- only the one artificial refusal in
+  `engine.rs::start_transmit`, plus the UI's matching "receive-only"
+  greying-out of Call CQ/More/Hunt for FT2 in `App.tsx`/`bandModePicker.tsx`.
+  Flagged in `mode.rs`: FT2's TX timing margin is genuinely tighter than
+  FT4/FT8's (~1.23s slack vs ~2.46s/~2.36s, since its whole cycle is only
+  3.75s) -- worth live-watching for a late-start/clipped-Costas symptom
+  specifically on this mode.
+
+- **CQ Answer Attempts / TX Watchdog / CQ Watchdog: no more "unlimited"
+  or "Same as TX Watchdog," 2026-11-24.** Two separate live Windows
+  reports converged into one real fix:
+  - Live bug: with CQ Answer Attempts left at "Same as TX Watchdog" (0,
+    deferring to a finite TX Watchdog), the give-up still fired after a
+    single real transmission -- despite every test confirming the
+    deferral math correct in isolation. The option was eliminated
+    outright rather than chased further: `qso::DEFAULT_CQ_ANSWER_LIMIT`
+    (3) now floors a literal 0 unconditionally, no "defer" semantics left
+    at all. A side effect, accepted as a deliberate improvement: a
+    fresh/unconfigured install's Grid-stage CQ-answer retries now cap at
+    the default even when TX Watchdog is ALSO left unlimited (nobody
+    asked for literally unlimited retries chasing a CQ caller who never
+    replies even once).
+  - Separately, the operator's own policy call: "we do not want this app
+    to become a BOT... I've seen stations calling CQ for hours at
+    night... the rule is there must be a control operator present." TX
+    Watchdog and CQ Watchdog both previously allowed 0 = literally
+    unlimited (CQ Watchdog's own doc comment even said "for
+    unattended/robot operation") -- removed the same way, with real
+    floors (`DEFAULT_TX_WATCHDOG_LIMIT` = 5, `DEFAULT_CQ_WATCHDOG_LIMIT` =
+    40) generous enough for a long stretch of normal operation, never
+    indefinite. Max 73 Sends is deliberately untouched -- it already has
+    a hard failsafe (`RR73_GIVEUP_CYCLES_FAILSAFE`) even at "Auto".
+  - `engine.rs` migrates any legacy-persisted 0 for any of these three
+    settings to its real default and writes it back, so Settings shows
+    an explicit number immediately rather than a stale "0"/"Unlimited"/
+    "Same as TX Watchdog" the UI no longer has a label for.
+  - **The actual root cause of the live "gives up after 1-2 tries"
+    report, found via a temporary file-based diagnostic log** (eprintln!
+    produced nothing at all -- release Windows builds compile with
+    `windows_subsystem = "windows"`, which detaches stdout/stderr even
+    from an attached console, so the log writes to
+    `%TEMP%\ft8af_watchdog_diag.log` instead): the give-up was never a
+    counting bug. `target_working_someone_else` -- a separate mechanism
+    that gives up *immediately*, bypassing the counted watchdog entirely,
+    the instant the target's next decode looks like he's replying to a
+    different station -- was firing correctly on REAL decodes (confirmed
+    live: legitimate RR73/grid-report/signal-report messages to other
+    callsigns, not garbled false positives, e.g. a popular/busy CQ-caller
+    in a pileup answering a different simultaneous caller instead of us).
+    The operator decided this should no longer be automatic: "take that
+    out... I will decide whether to cancel calling him or continue...
+    the watchdog is still in place." Removed the function and its call
+    site entirely -- the target appearing to work someone else is now
+    just a normal silent miss, counted toward the configured cap like
+    anything else, never an instant override of it.
+  - **Left over, not yet cleaned up**: the diagnostic logging itself
+    (`qso::log_watchdog_diag`, the Grid/Report/RReport miss logging, and
+    `engine.rs`'s per-`start_transmit`-attempt logging) is still in the
+    code, explicitly marked temporary. Harmless (append-only to a temp
+    file, best-effort), but should be removed once this is confirmed
+    fully resolved across more real operating sessions.
+
+- **Decode worker thread hardened against a native-decoder panic,
+  2026-11-24.** Found while chasing the above (a real gap, not confirmed
+  as THE root cause): `spawn_decoder_thread` had no panic guard around
+  the native FT8/FT4/FT2 decode call. A panic there would kill the
+  worker thread silently and permanently (decoding dead for the rest of
+  the session, since the channel send it never reaches means every
+  future `slot_tx.send` just fails), and -- more subtly -- that slot's
+  already-queued `pending_decode_slots` entry would never get consumed,
+  misattributing every later decode result to a stale slot id (the same
+  desync class already documented on this project's own
+  `pending_decode_slots` fix, just a different trigger). Wrapped the
+  per-slot decode in `catch_unwind` so a panic degrades to "nothing
+  decoded this slot," same as genuine silence.
+
+- **Windows 10 x86 (32-bit) build leg added, 2026-11-24.**
+  `build.rs`/`build_support.rs` already had full `i686-pc-windows-msvc`
+  cross-compile support wired in from an earlier session (the clang-cl
+  `--target` flag for the C DSP core, a `hamlib/x86` vendored-DLL slot)
+  but no CI leg had ever exercised it, and `hamlib/x86` shipped only a
+  README placeholder with no actual DLLs. Vendored the matching win32
+  Hamlib 4.7.1 release's 4 DLLs (checksum-verified against Hamlib's own
+  SHA256SUM), and restructured `desktop.yml`'s build matrix to an
+  explicit `include` list so `windows-latest` can appear twice -- once
+  native (x64, unchanged), once cross-compiling to i686. Worked on the
+  first real CI attempt.
+
+- **Native Debian Bookworm arm64 `.deb` build added, 2026-11-24.** The
+  existing Linux leg (`ubuntu-latest`) produces an amd64 `.deb` built
+  against Ubuntu 24.04's library versions -- a different distro AND
+  architecture than this project's actual ARM SBC targets
+  (Armbian/Debian Bookworm; confirmed directly on one real device that
+  `libwebkit2gtk-4.1-dev`/`libayatana-appindicator3-dev` are both in
+  Bookworm's own main+security repos, no backports needed). New
+  `build-debian-arm64` job runs on a native `ubuntu-24.04-arm` hosted
+  runner (no QEMU/cross-compilation) inside a `debian:bookworm` container,
+  so every linked library is genuinely Bookworm's own package version.
+  Scoped to just the `deb` bundle target (no `rpmbuild`/AppImage tooling
+  in the minimal container). Deliberately non-gating for now (same
+  pattern as the existing best-effort `coverage` job) since this is the
+  first run of this exact runner+container+Tauri combination -- worked
+  on the first attempt; confirmed on a real device that the package's
+  declared `Depends:` (`libwebkit2gtk-4.1-0`, `libgtk-3-0`) are already
+  satisfied at matching versions. A 32-bit `armhf` build (for e.g. a
+  Raspberry Pi Zero 2 W) was explicitly deferred -- no native 32-bit ARM
+  hosted runner exists, so it would need slow QEMU emulation, and
+  separately, a 512MB-RAM Pi Zero 2 W running a full WebKitGTK app is its
+  own open question regardless of whether it builds.
+
+- **RPM version-string bundling bug fixed, plus a new on-demand manual
+  build trigger, 2026-11-23/24.** The prerelease `app_version` formula
+  (`"<next-patch>-<run_number>"`) contains a literal hyphen, which RPM's
+  version-string validator rejects (`deb` tolerates it fine, which is why
+  this went unnoticed) -- switched the separator to `+`. Also added a
+  `workflow_dispatch` trigger to `desktop.yml` (a `desktop-manual.N`
+  throwaway prerelease tag, any branch, never colliding with the real
+  `desktop-v*`/`desktop-dev.N` schemes) so a bundled build including a
+  Windows installer can be produced on demand from a feature branch
+  without touching `main` -- used throughout this session's live-testing
+  loop on real Windows hardware.
+
+- **ADIF import now derives COUNTRY/STATE when the source left them
+  blank, 2026-11-23.** Live-logged QSOs already backfilled blank COUNTRY
+  (DXCC prefix lookup) and STATE (grid-square lookup) via
+  `engine.rs::log_completed_qso`; import only ever copied the ADIF tags
+  verbatim. A source log with no `COUNTRY` tag left a non-US contact's
+  Logbook "Place" column blank (confirmed live: `VE3ILI` -> should be
+  Canada, `KG4OJT` -> should be Guantanamo Bay, a distinct DXCC entity
+  from the mainland US) even though the callsign alone is enough to
+  derive it. Wired the same derivation into `db.rs::import_one_record_
+  locked`, filling only genuinely blank fields -- an explicitly-logged
+  value in the source ADIF is never overridden.
+
+- **Logbook top bar gets real icons, Map's receiver-count card removed,
+  2026-11-24.** Added `lucide-react` (desktop's first icon dependency)
+  and swapped the Logbook top bar's Upload/Download/Share Unicode arrow
+  glyphs for real icons, matching Android's `LogbookScreen.kt` TopBar
+  (Compose's own Material Icons Extended are baked into that library at
+  compile time, not portable files, so there was nothing to literally
+  copy). Separately, removed the Map's "N receivers / Furthest: <call> /
+  Strongest: <call>" glass-card overlay by direct request, deleting the
+  now-fully-orphaned `signalReach.ts` module.
+
+- **Decoder research, 2026-11-24 -- next session's starting point.**
+  Investigated whether Nexus (`github.com/kd9taw/Nexus`, another Rust ham
+  radio app) has a decoder worth borrowing. Finding: its FT8 decoder is a
+  thin Rust FFI wrapper around WSJT-X/JTDX's own vendored **Fortran**
+  sources (`libtempo/vendor/wsjtx/lib/ft8var/`), not a pure-Rust
+  reimplementation and not a C library like this project's own `ft8_lib`
+  -- nothing algorithmic worth porting; FT8AF's existing decoder (mature
+  C, LDPC+OSD, already measured +2.6%/+5.3% sensitivity gains from an
+  earlier session's OSD port) covers the same ground through a simpler,
+  more portable toolchain. The real gap is **modes**: Nexus supports
+  Q65/FST4/FST4W/MSK144/JT65/WSPR (all full TX+RX per its own README)
+  plus a JS8Call-compatible mode (`crates/js8/`, TX status unconfirmed)
+  that FT8AF lacks entirely. Getting any of the WSJT-X-family modes would
+  require the same heavy Fortran+CMake vendoring Nexus took -- there's no
+  clean C-library shortcut the way `ft8_lib` is for FT8/FT4/FT2. The
+  operator's stated priority list is specifically **FT8, FT4, FT2, and
+  JS8** (not the full WSJT-X mode roster) -- FT8/FT4/FT2 now have full
+  TX+RX parity (see above); JS8 is the open item to scope next, starting
+  with whether Nexus's `crates/js8/` is itself a standalone, portable
+  implementation (unlike the Fortran-backed WSJT-X modes) or still
+  Fortran/C-dependent underneath.
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now
