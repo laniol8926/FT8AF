@@ -1547,7 +1547,44 @@ impl Db {
     ) {
         match crate::adif::adif_record_to_qso(&rec.fields) {
             None => summary.skipped += 1,
-            Some(qso) => {
+            Some(mut qso) => {
+                // Fill COUNTRY (DXCC prefix lookup) and STATE (grid-square
+                // lookup) when the imported record itself didn't carry one --
+                // the same derivation `engine.rs`'s `log_completed_qso` does
+                // for a live-logged QSO (see its doc comment), ported here
+                // because import previously only ever copied STATE/COUNTRY
+                // tags verbatim: a source ADIF with no STATE tag (common --
+                // not every logger fills it in) stayed permanently blank, and
+                // a non-US contact with no COUNTRY tag showed blank in the
+                // Logbook's "Place" column (`logbook.ts`'s `logbookPlace`)
+                // even though the callsign alone is enough to derive it.
+                // No QRZ-cache lookup here (unlike the live path) -- import
+                // has no live QRZ client handy, so `pick_logged_state` falls
+                // straight through to the grid-only fallback when passed
+                // `None` for `qrz_state`/`qrz_grid`, which is the realistic
+                // minimum for a bulk import.
+                if qso.country.is_empty() {
+                    if let Some(m) = crate::dxcc::lookup(&qso.call) {
+                        if !m.country_name.is_empty() {
+                            qso.country = m.country_name;
+                        }
+                    }
+                }
+                if qso.state.is_empty() {
+                    let us_or_unknown = qso.country.is_empty()
+                        || qso.country.to_uppercase().starts_with("UNITED STATES");
+                    if us_or_unknown {
+                        if let Some(picked) = crate::logged_state::pick_logged_state(
+                            crate::us_states::state_for_grid(&qso.gridsquare).as_deref(),
+                            None,
+                            None,
+                            Some(qso.gridsquare.as_str()),
+                            crate::logged_state::is_portable_call(&qso.call),
+                        ) {
+                            qso.state = picked;
+                        }
+                    }
+                }
                 // Backfill the callsign/grid cache for the Map screen --
                 // never overwrites a live-heard grid (see
                 // `upsert_callsign_qth_if_absent_locked`'s doc comment),
@@ -3670,6 +3707,50 @@ mod tests {
             <STATE:2>CA <eor>";
         db.import_adif(adif);
         assert_eq!(db.list_qsos(10, 0)[0].state, "TX");
+    }
+
+    #[test]
+    fn import_adif_derives_country_for_a_non_us_call_with_no_country_tag() {
+        // Real-world report: a source ADIF with no COUNTRY tag left the
+        // Logbook's "Place" column blank for a non-US contact even though
+        // the callsign alone is enough to derive it (`dxcc::lookup`).
+        let db = Db::open_in_memory().unwrap();
+        let adif = "<call:6>VE3ILI <mode:3>FT8 <qso_date:8>20260604 <time_on:6>123045 <eor>";
+        db.import_adif(adif);
+        assert_eq!(db.list_qsos(10, 0)[0].country, "Canada");
+    }
+
+    #[test]
+    fn import_adif_derives_the_specific_dxcc_entity_not_just_mainland_us() {
+        // KG4 is Guantanamo Bay, a distinct DXCC entity from the mainland
+        // "K" -- confirms the derivation uses the real longest-prefix match,
+        // not a naive "starts with K" guess.
+        let db = Db::open_in_memory().unwrap();
+        let adif = "<call:6>KG4OJT <mode:3>FT8 <qso_date:8>20260604 <time_on:6>123045 <eor>";
+        db.import_adif(adif);
+        assert_eq!(db.list_qsos(10, 0)[0].country, "Guantanamo Bay");
+    }
+
+    #[test]
+    fn import_adif_derives_state_from_grid_for_a_us_call_with_no_state_tag() {
+        let db = Db::open_in_memory().unwrap();
+        let adif = "<call:5>W1ABC <mode:3>FT8 <qso_date:8>20260604 <time_on:6>123045 \
+            <gridsquare:4>FN42 <eor>";
+        db.import_adif(adif);
+        let row = &db.list_qsos(10, 0)[0];
+        assert_eq!(row.country, "United States");
+        assert_eq!(row.state.len(), 2, "expected a derived USPS state code, got {:?}", row.state);
+    }
+
+    #[test]
+    fn import_adif_does_not_override_an_explicitly_logged_country_or_state() {
+        let db = Db::open_in_memory().unwrap();
+        let adif = "<call:6>VE3ILI <mode:3>FT8 <qso_date:8>20260604 <time_on:6>123045 \
+            <COUNTRY:6>Canada <STATE:2>ON <eor>";
+        db.import_adif(adif);
+        let row = &db.list_qsos(10, 0)[0];
+        assert_eq!(row.country, "Canada");
+        assert_eq!(row.state, "ON");
     }
 
     #[test]
