@@ -1051,27 +1051,33 @@ pub fn should_give_up_target(no_reply_limit: u32, no_reply_count: u32) -> bool {
     no_reply_limit > 0 && no_reply_count >= no_reply_limit
 }
 
+/// `CQ Answer Attempts`' floor when nothing valid is configured --
+/// previously 0 meant "Same as TX Watchdog" (defer entirely to
+/// `no_reply_limit`), but that deferred path kept giving up after a single
+/// real attempt on a live Windows run despite every test here (including a
+/// full `Engine::handle_decoded` simulation of the exact scenario)
+/// confirming the math was correct in isolation -- the operator's own
+/// explicit fix, each time, was to set this to a real number instead of
+/// leaving it deferred. Rather than keep chasing an elusive, seemingly
+/// Windows-only defer-path bug, the option itself is removed: this is now
+/// only a defensive floor for a stray 0 that slips through some other path
+/// (the UI enforces a minimum of 1 on save; `Engine::new` migrates a
+/// legacy-persisted 0 to this same value and writes it back).
+pub const DEFAULT_CQ_ANSWER_LIMIT: u32 = 3;
+
 /// The real cap on `TxStage::Grid` retries (answering a CQ that's never
-/// replied even once), combining `cq_answer_limit` and `no_reply_limit`
-/// per the operator's own stated rule -- see `QsoEngine::cq_answer_limit`'s
-/// doc comment for the live requirement this implements:
-/// - `cq_answer_limit == 0` (unconfigured): defers entirely to
-///   `no_reply_limit` -- today's exact behavior, unchanged.
-/// - `no_reply_limit == 0` (TX Watchdog unlimited) with a real
-///   `cq_answer_limit`: the CQ-answer cap is the only real limit here --
-///   this is the actual safety net the operator asked for ("avoid [a case
-///   like] the TX Watchdog being set to unlimited so I keep calling him
-///   forever").
-/// - Both finite: never allowed to exceed `no_reply_limit` (a CQ-answer
-///   cap higher than the general mid-QSO cap wouldn't make sense).
+/// replied even once): never allowed to exceed `no_reply_limit` ("TX
+/// Watchdog") when that's finite (a CQ-answer cap higher than the general
+/// mid-QSO cap wouldn't make sense), and never actually unlimited --
+/// `DEFAULT_CQ_ANSWER_LIMIT` substitutes for a literal 0 defensively (see
+/// its own doc comment for why 0 no longer means "defer to TX Watchdog").
 pub fn effective_cq_answer_limit(cq_answer_limit: u32, no_reply_limit: u32) -> u32 {
-    if cq_answer_limit == 0 {
-        return no_reply_limit;
-    }
+    let limit = if cq_answer_limit == 0 { DEFAULT_CQ_ANSWER_LIMIT } else { cq_answer_limit };
     if no_reply_limit == 0 {
-        return cq_answer_limit;
+        limit
+    } else {
+        limit.min(no_reply_limit)
     }
-    cq_answer_limit.min(no_reply_limit)
 }
 
 /// CQ Watchdog cap -- see `QsoEngine::cq_no_reply_limit`'s doc comment for
@@ -1510,10 +1516,12 @@ mod tests {
 
     #[test]
     fn effective_cq_answer_limit_pure_cases() {
-        // Unconfigured (0) -- defers entirely to no_reply_limit, today's
-        // exact behavior for anyone who hasn't touched this setting.
-        assert_eq!(effective_cq_answer_limit(0, 0), 0);
-        assert_eq!(effective_cq_answer_limit(0, 5), 5);
+        // A literal 0 (the removed "Same as TX Watchdog" option) no longer
+        // defers -- it's defensively treated as DEFAULT_CQ_ANSWER_LIMIT,
+        // itself still clamped down to a finite TX Watchdog.
+        assert_eq!(effective_cq_answer_limit(0, 0), DEFAULT_CQ_ANSWER_LIMIT);
+        assert_eq!(effective_cq_answer_limit(0, 2), 2);
+        assert_eq!(effective_cq_answer_limit(0, 5), DEFAULT_CQ_ANSWER_LIMIT);
 
         // TX Watchdog unlimited (0) -- the CQ-answer cap is the only real
         // limit here. This is the actual safety net the operator asked
@@ -1791,14 +1799,35 @@ mod tests {
     }
 
     #[test]
-    fn tx_watchdog_disabled_never_gives_up() {
+    fn tx_watchdog_disabled_but_cq_answer_limit_still_caps_grid_stage_retries() {
+        // Grid stage (answering a CQ that's never replied) now always has a
+        // real cap -- a fresh/unconfigured engine's cq_answer_limit (still
+        // 0, its struct default) is floored to DEFAULT_CQ_ANSWER_LIMIT by
+        // effective_cq_answer_limit, even with TX Watchdog left unlimited.
+        // This used to be "never gives up" (the removed "Same as TX
+        // Watchdog" (0) option deferred entirely to no_reply_limit, which
+        // defers to nothing when that's also 0) -- deliberately changed:
+        // nobody ever asked for *unlimited* retries chasing a CQ caller who
+        // never replies even once, and the old behavior left a fresh
+        // install with that exact trap.
         let mut e = QsoEngine::new("K0XYZ", "EN37");
         e.no_reply_limit = 0;
         e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
-        for _ in 0..50 {
-            e.process_rx(&[]);
+        for _ in 0..(DEFAULT_CQ_ANSWER_LIMIT as usize - 1) {
+            assert!(e.process_rx(&[]).is_none(), "must not give up before the default cap");
         }
         assert_eq!(e.status().stage, TxStage::Grid);
+        assert!(matches!(e.process_rx(&[]), Some(QsoOutcome::GaveUpTarget)));
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
+    fn tx_watchdog_and_cq_answer_limit_both_explicitly_unlimited_is_not_possible() {
+        // Confirms there is no remaining way to make Grid-stage retries
+        // truly unlimited: even the maximum nonsense input (0 for both)
+        // still gives up at the default cap, never runs forever.
+        assert_eq!(effective_cq_answer_limit(0, 0), DEFAULT_CQ_ANSWER_LIMIT);
+        assert!(should_give_up_target(effective_cq_answer_limit(0, 0), DEFAULT_CQ_ANSWER_LIMIT));
     }
 
     #[test]

@@ -572,8 +572,9 @@ pub enum EngineCommand {
     /// unlimited, the deliberate default (unattended/"robot" CQ operation).
     SetCqWatchdog(u32),
     /// Settings -> Transmission's "CQ Answer Attempts" -- genuinely new, no
-    /// Android equivalent (see `QsoEngine::cq_answer_limit`'s doc comment).
-    /// 0 = unconfigured, defers to "TX Watchdog".
+    /// Android equivalent (see `qso::DEFAULT_CQ_ANSWER_LIMIT`'s doc comment).
+    /// The UI enforces a minimum of 1; 0 is floored to the default here too
+    /// (defense in depth, not the primary enforcement point).
     SetCqAnswerLimit(u32),
     /// Settings -> Auto-Sequence's "Auto-CQ after QSO" -- see `Engine::new`'s
     /// doc comment on why desktop's *default* differs from Android's own.
@@ -1228,7 +1229,16 @@ impl Engine {
         qso.no_reply_limit = db.get_config("noReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
         qso.max_73_sends = db.get_config("max73Sends").and_then(|s| s.parse().ok()).unwrap_or(0);
         qso.cq_no_reply_limit = db.get_config("cqNoReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
-        qso.cq_answer_limit = db.get_config("cqAnswerLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        // The "Same as TX Watchdog" (0) option has been removed (see
+        // qso::DEFAULT_CQ_ANSWER_LIMIT's doc comment) -- migrate a
+        // legacy-persisted 0/missing value to the real default once, and
+        // persist it back so Settings shows the explicit number immediately
+        // rather than a stale "0" the UI no longer has a label for.
+        let stored_cq_limit: u32 = db.get_config("cqAnswerLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        qso.cq_answer_limit = if stored_cq_limit > 0 { stored_cq_limit } else { crate::qso::DEFAULT_CQ_ANSWER_LIMIT };
+        if stored_cq_limit == 0 {
+            let _ = db.set_config("cqAnswerLimit", &qso.cq_answer_limit.to_string());
+        }
         // Settings -> Auto-Sequence's "Auto-CQ after QSO" (Android's
         // `autoCQAfterQSO`, default **false**). Desktop's own default here
         // is deliberately kept at **true** when the key is unset -- this
@@ -3060,6 +3070,10 @@ impl Engine {
                 let _ = self.db.set_config("cqNoReplyLimit", &limit.to_string());
             }
             EngineCommand::SetCqAnswerLimit(limit) => {
+                // The "Same as TX Watchdog" (0) option is gone -- floor a
+                // stray 0 here too (defense in depth; the UI is the primary
+                // enforcement point) so it can never mean "unlimited."
+                let limit = if limit == 0 { crate::qso::DEFAULT_CQ_ANSWER_LIMIT } else { limit };
                 self.qso.cq_answer_limit = limit;
                 let _ = self.db.set_config("cqAnswerLimit", &limit.to_string());
             }
@@ -3748,20 +3762,19 @@ mod tests {
     }
 
     #[test]
-    fn cq_answer_limit_deferred_to_tx_watchdog_also_takes_three_real_transmissions() {
-        // Same scenario as `cq_answer_limit_equal_to_tx_watchdog_takes_
-        // three_real_transmissions_via_handle_decoded`, but with
-        // `cq_answer_limit` left at its "Same as TX Watchdog" sentinel (0)
-        // instead of an explicit 3 -- the user's own real fix was to
-        // change CQ Answer Attempts from "Same as TX Watchdog" to an
-        // explicit 3, which then worked. If this test ALSO passes, the
-        // deferral math itself (`effective_cq_answer_limit(0, 3) == 3`,
-        // already covered by a pure-function test) is not the bug, and
-        // the real cause is something this harness still isn't capturing
-        // (e.g. real config load order, or Hunt-specific answer wiring).
+    fn cq_answer_limit_stray_zero_still_takes_three_real_transmissions() {
+        // The "Same as TX Watchdog" (0) option that used to defer
+        // cq_answer_limit entirely to no_reply_limit has been removed
+        // outright (see DEFAULT_CQ_ANSWER_LIMIT's doc comment) -- it kept
+        // giving up after one real attempt on a live Windows run despite
+        // every test here, including this exact scenario, confirming the
+        // math was correct in isolation. This test now covers the
+        // defensive floor instead: a stray 0 (e.g. an un-migrated legacy
+        // config row) must still behave safely -- DEFAULT_CQ_ANSWER_LIMIT
+        // (3) clamped by no_reply_limit (3) -- not as "unlimited."
         let mut engine = test_engine();
         engine.qso.no_reply_limit = 3;
-        engine.qso.cq_answer_limit = 0; // "Same as TX Watchdog"
+        engine.qso.cq_answer_limit = 0; // stray/un-migrated legacy value
 
         let cycle_ms = engine.mode.cycle_ms();
         let his_slot = (engine.cur_slot() + 10) / 2 * 2;
