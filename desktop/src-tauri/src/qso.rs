@@ -587,7 +587,25 @@ impl QsoEngine {
                 // count -- see `target_working_someone_else`'s own doc
                 // comment.
                 if let Some(target) = self.target.clone() {
-                    if target_working_someone_else(messages, &target, &self.my_call) {
+                    if let Some(m) = messages.iter().find(|m| {
+                        m.call_from.eq_ignore_ascii_case(&target)
+                            && !crate::callsign::is_cq_callsign(&m.call_to)
+                            && !crate::callsign::is_my_callsign(&m.call_to, &self.my_call)
+                    }) {
+                        // TEMPORARY diagnostic (see log_watchdog_diag's own
+                        // doc comment) -- a give-up with no preceding
+                        // "Grid miss" log line can only mean it went
+                        // through THIS immediate path, not the counted
+                        // one. Logs the exact decode that triggered it so
+                        // the next occurrence shows whether it's a real
+                        // exchange with someone else or a garbled/
+                        // misheard decode producing a false positive
+                        // (this function's own doc comment already flags
+                        // that risk).
+                        log_watchdog_diag(&format!(
+                            "{} target_working_someone_else target={} raw=\"{}\" call_from={} call_to={} snr={} score={}",
+                            util::now_unix_ms(), target, m.raw_text, m.call_from, m.call_to, m.snr, m.score
+                        ));
                         self.give_up_target();
                         return Some(QsoOutcome::GaveUpTarget);
                     }
