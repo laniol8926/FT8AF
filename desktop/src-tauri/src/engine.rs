@@ -1129,9 +1129,30 @@ fn spawn_decoder_thread(protocol: std::os::raw::c_int, deep: bool) -> (Sender<Ve
             let mut decoder = Decoder::new(SAMPLE_RATE, protocol);
             decoder.set_deep(deep);
             while let Ok(slot) = slot_rx.recv() {
-                decoder.feed_slot(&slot);
-                let n = decoder.find_sync();
-                let msgs = if n > 0 { decoder.decode_all() } else { Vec::new() };
+                // A panic anywhere in here must not silently drop this
+                // slot's result: `self.pending_decode_slots` (engine.rs)
+                // already queued this slot's id the instant it was sent,
+                // assuming exactly one `dec_tx.send` comes back for it --
+                // if this thread died instead (the old, unguarded
+                // behavior), every later decode would misattribute to
+                // this now-stale slot id, which can flip an "our own TX
+                // slot" into "a silent miss from him" (the same
+                // `pending_decode_slots` desync class documented on
+                // `pending_decode_slots_preserves_dispatch_order_across_
+                // a_backlog`'s test, just a different trigger) --
+                // suspected contributor to a live report of the TX
+                // Watchdog/CQ Answer Attempts give-up firing after far
+                // fewer real transmissions than configured, Windows-only.
+                // Also, without this, decoding dies for the rest of the
+                // session the first time it happens (`slot_rx` drops,
+                // every future `slot_tx.send` fails silently) -- a real
+                // robustness gap on its own regardless of that report.
+                let msgs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decoder.feed_slot(&slot);
+                    let n = decoder.find_sync();
+                    if n > 0 { decoder.decode_all() } else { Vec::new() }
+                }))
+                .unwrap_or_default();
                 let _ = dec_tx.send(msgs);
             }
         })
