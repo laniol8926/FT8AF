@@ -851,18 +851,10 @@ impl QsoEngine {
                 self.no_reply_count = self.no_reply_count.saturating_add(1);
                 let limit = effective_cq_answer_limit(self.cq_answer_limit, self.no_reply_limit);
                 let gave_up = should_give_up_target(limit, self.no_reply_count);
-                // TEMPORARY diagnostic (not meant to stay) -- tracking a
-                // live Windows-only report that this give-up fires after
-                // far fewer real misses than configured, possibly tied to
-                // alt-tabbing away and back. Prints the real wall-clock
-                // time and exact counter/limit at the moment of every
-                // miss, so the next occurrence gives hard evidence (a
-                // sudden count jump vs. real elapsed time, or genuinely
-                // 3 seconds apart misses) instead of another guess.
-                eprintln!(
-                    "[watchdog-diag] {} Grid miss #{} (limit {}) gave_up={}",
+                log_watchdog_diag(&format!(
+                    "{} Grid miss #{} (limit {}) gave_up={}",
                     util::now_unix_ms(), self.no_reply_count, limit, gave_up
-                );
+                ));
                 if gave_up {
                     self.give_up_target();
                     return true;
@@ -875,10 +867,10 @@ impl QsoEngine {
                 self.no_reply_count = self.no_reply_count.saturating_add(1);
                 let limit = effective_no_reply_limit(self.no_reply_limit);
                 let gave_up = should_give_up_target(limit, self.no_reply_count);
-                eprintln!(
-                    "[watchdog-diag] {} {:?} miss #{} (limit {}) gave_up={}",
+                log_watchdog_diag(&format!(
+                    "{} {:?} miss #{} (limit {}) gave_up={}",
                     util::now_unix_ms(), self.stage, self.no_reply_count, limit, gave_up
-                );
+                ));
                 if gave_up {
                     self.give_up_target();
                     return true;
@@ -1059,6 +1051,28 @@ impl QsoEngine {
         } else {
             self.stop();
         }
+    }
+}
+
+/// TEMPORARY diagnostic helper (see `on_no_progress`'s Grid/Report/RReport
+/// branches) -- tracking a live report that the TX/CQ-answer watchdog
+/// gives up after far fewer real misses than configured, intermittently
+/// (seen as 1, 2, or correctly 3). `eprintln!` was tried first and
+/// produced nothing: release Windows builds compile with
+/// `windows_subsystem = "windows"` (main.rs), which detaches stdout/
+/// stderr entirely, even launched from an existing console -- confirmed
+/// live, the operator saw no output at all running from cmd.exe. A plain
+/// file is the only reliable way to get this out on Windows without
+/// rebuilding as a full console app. Appends; best-effort (a failed write
+/// here must never affect real give-up behavior) -- `%TEMP%\ft8af_
+/// watchdog_diag.log` on Windows (`std::env::temp_dir()` generally).
+/// Remove this whole function and its two call sites once the real cause
+/// is found.
+fn log_watchdog_diag(line: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("ft8af_watchdog_diag.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
     }
 }
 
