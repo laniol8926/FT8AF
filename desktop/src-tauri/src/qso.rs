@@ -581,37 +581,18 @@ impl QsoEngine {
         let msg = match mine {
             Some(m) => m.clone(),
             None => {
-                // He's actively exchanging with someone else -- a real
-                // signal he's moved on, not just silence. Give up right
-                // away rather than waiting out the full TX Watchdog cycle
-                // count -- see `target_working_someone_else`'s own doc
-                // comment.
-                if let Some(target) = self.target.clone() {
-                    if let Some(m) = messages.iter().find(|m| {
-                        m.call_from.eq_ignore_ascii_case(&target)
-                            && !crate::callsign::is_cq_callsign(&m.call_to)
-                            && !crate::callsign::is_my_callsign(&m.call_to, &self.my_call)
-                    }) {
-                        // TEMPORARY diagnostic (see log_watchdog_diag's own
-                        // doc comment) -- a give-up with no preceding
-                        // "Grid miss" log line can only mean it went
-                        // through THIS immediate path, not the counted
-                        // one. Logs the exact decode that triggered it so
-                        // the next occurrence shows whether it's a real
-                        // exchange with someone else or a garbled/
-                        // misheard decode producing a false positive
-                        // (this function's own doc comment already flags
-                        // that risk).
-                        log_watchdog_diag(&format!(
-                            "{} target_working_someone_else target={} raw=\"{}\" call_from={} call_to={} snr={} score={}",
-                            util::now_unix_ms(), target, m.raw_text, m.call_from, m.call_to, m.snr, m.score
-                        ));
-                        self.give_up_target();
-                        return Some(QsoOutcome::GaveUpTarget);
-                    }
-                }
-                // No reply at all this slot -- same as a non-advancing
-                // reply, see `advanced` below.
+                // Removed: this used to give up immediately the instant the
+                // target appeared to answer a different station, bypassing
+                // the configured TX Watchdog/CQ Answer Attempts count
+                // entirely. Live evidence (desktop-manual.145's diagnostic
+                // log) confirmed this fires on REAL decodes, not garbled
+                // false positives -- a busy/pileup'd station legitimately
+                // answering someone else -- but the operator explicitly
+                // asked for manual control instead: "take that out... I
+                // will decide whether to cancel calling him or continue."
+                // Falls straight through to the normal silence-counted
+                // give-up below for every "nothing addressed to us" case
+                // now, same as true silence.
                 return if self.on_no_progress() {
                     Some(QsoOutcome::GaveUpTarget)
                 } else {
@@ -1181,29 +1162,6 @@ pub fn has_reached_max_73_sends(max_73_sends: u32, final_ack_sends: u32) -> bool
 /// replying forever. Matches Android's own `RR73_GIVEUP_CYCLES` constant.
 pub const RR73_GIVEUP_CYCLES_FAILSAFE: u32 = 3;
 
-/// Whether this slot's decodes show `target` actively exchanging with a
-/// DIFFERENT station -- a real signal, not just silence, that he's moved
-/// on and further calls are futile. Real UX requirement, stated live:
-/// "I'm answering station xyz's CQ but he answers someone else not my
-/// station. Stop calling him because he's in QSO with someone else...
-/// if his next transmission is not 'CQ his_call his_grid' or 'my_call
-/// his_call my_signal_report' I stop trying to call him." Detected
-/// directly from message content, not a reply-count/timeout -- any
-/// message FROM the target that is neither a CQ (he just hasn't heard
-/// anyone yet) nor addressed to us (continuing our own exchange) means
-/// he's talking to someone else specifically. A single such decode is
-/// enough to trigger this (matching the operator's own stated rule
-/// exactly) -- a busted/misheard callsign could in principle cause a
-/// false positive, same risk any single FT8 decode carries elsewhere in
-/// this engine.
-pub fn target_working_someone_else(messages: &[DecodedMessage], target: &str, my_call: &str) -> bool {
-    messages.iter().any(|m| {
-        m.call_from.eq_ignore_ascii_case(target)
-            && !crate::callsign::is_cq_callsign(&m.call_to)
-            && !crate::callsign::is_my_callsign(&m.call_to, my_call)
-    })
-}
-
 /// FT8 reports are clamped to roughly [-30, +30].
 fn clamp_report(snr: i32) -> i32 {
     snr.clamp(-30, 30)
@@ -1617,46 +1575,6 @@ mod tests {
     }
 
     #[test]
-    fn target_working_someone_else_pure_cases() {
-        // Real UX requirement, stated live: detect he's moved on to a
-        // different station directly from message content, not a
-        // reply-count/timeout.
-        let my_call = "K0XYZ";
-        let target = "K1ABC";
-
-        // His report to a DIFFERENT station -- he's working someone else.
-        assert!(target_working_someone_else(
-            &[msg("W1AW", "K1ABC", "-05", "", -5)],
-            target,
-            my_call,
-        ));
-
-        // His own repeated CQ -- he hasn't heard anyone yet, not "someone else".
-        assert!(!target_working_someone_else(
-            &[msg("CQ", "K1ABC", "FN42", "FN42", -5)],
-            target,
-            my_call,
-        ));
-
-        // A message addressed to US -- continuing our own exchange.
-        assert!(!target_working_someone_else(
-            &[msg("K0XYZ", "K1ABC", "-05", "", -5)],
-            target,
-            my_call,
-        ));
-
-        // Traffic from someone other than the target entirely -- irrelevant.
-        assert!(!target_working_someone_else(
-            &[msg("W1AW", "N2JFD", "-05", "", -5)],
-            target,
-            my_call,
-        ));
-
-        // Empty slot -- nothing to detect.
-        assert!(!target_working_someone_else(&[], target, my_call));
-    }
-
-    #[test]
     fn has_reached_max_73_sends_pure_cases() {
         assert!(!has_reached_max_73_sends(0, 1000)); // Auto/off never caps here
         assert!(!has_reached_max_73_sends(3, 2));
@@ -1862,30 +1780,33 @@ mod tests {
     }
 
     #[test]
-    fn gives_up_immediately_when_the_target_works_someone_else() {
-        // Real UX requirement, stated live: "I'm answering station xyz's
-        // CQ but he answers someone else not my station. Stop calling him
-        // because he's in QSO with someone else." No reply limit needed --
-        // this must fire on the very first decode showing it, not wait out
-        // a multi-cycle watchdog.
+    fn seeing_the_target_work_someone_else_no_longer_gives_up_immediately() {
+        // Was "gives_up_immediately_when_the_target_works_someone_else" --
+        // removed outright. Live evidence (desktop-manual.145's
+        // diagnostic log) confirmed this fired on REAL decodes, not
+        // garbled false positives -- a busy/pileup'd station legitimately
+        // answering a different caller -- but the operator explicitly
+        // asked for manual control instead: "take that out... I will
+        // decide whether to cancel calling him or continue." A message
+        // showing him working someone else is now just a normal silent
+        // miss, same as true silence -- counted toward the configured
+        // CQ Answer Attempts cap like anything else, never an instant
+        // override of it.
         let mut e = QsoEngine::new("K0XYZ", "EN37");
-        e.no_reply_limit = 0; // unlimited -- proves this isn't the watchdog firing
+        e.cq_answer_limit = 3;
         e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
         assert_eq!(e.status().stage, TxStage::Grid);
 
-        // He's sending a report to a different station entirely.
+        // He's sending a report to a different station entirely -- no
+        // longer an instant give-up, just one miss toward the real cap.
         let outcome = e.process_rx(&[msg("W1AW", "K1ABC", "-05", "", -5)]);
-        assert!(matches!(outcome, Some(QsoOutcome::GaveUpTarget)));
-        assert_eq!(e.status().stage, TxStage::Cq);
-        assert_eq!(e.tx_message(), Some("CQ K0XYZ EN37"));
+        assert!(outcome.is_none(), "must not give up on the very first such decode anymore");
+        assert_eq!(e.status().stage, TxStage::Grid, "still the operator's call whether to keep trying");
     }
 
     #[test]
-    fn a_repeated_cq_from_the_target_does_not_trigger_the_working_someone_else_give_up() {
-        // The dormant/no-progress path, not this one -- he hasn't heard
-        // anyone yet, which is a real difference from working someone else.
+    fn a_repeated_cq_from_the_target_is_also_just_a_normal_miss() {
         let mut e = QsoEngine::new("K0XYZ", "EN37");
-        e.no_reply_limit = 0;
         e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
         assert_eq!(e.status().stage, TxStage::Grid);
 
