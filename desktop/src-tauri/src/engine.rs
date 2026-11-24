@@ -2090,7 +2090,22 @@ impl Engine {
         self.tx_parity = Some(slot_id.rem_euclid(2));
         self.txed_slot = slot_id;
         if let Some(msg) = self.qso.tx_message().map(|s| s.to_string()) {
-            if self.start_transmit(&msg) {
+            let sent = self.start_transmit(&msg);
+            // TEMPORARY diagnostic (see qso.rs's log_watchdog_diag and its
+            // own doc comment) -- the watchdog counters tick correctly on
+            // real elapsed time, but a live report shows only the FIRST of
+            // several expected retries actually reaching the radio. This
+            // logs every real attempt `maybe_transmit` makes to find out
+            // whether later retries are never attempted (eligible stays
+            // false) or attempted but refused here (start_transmit
+            // returns false) -- distinguishing a scheduling-eligibility
+            // bug from a rig/CAT-layer one. Remove alongside qso.rs's
+            // diagnostic once the real cause is found.
+            crate::qso::log_watchdog_diag(&format!(
+                "{} start_transmit stage={:?} slot={} sent={}",
+                crate::util::now_unix_ms(), self.qso.status().stage, slot_id, sent
+            ));
+            if sent {
                 // The ONLY reliable "a real over has actually gone out this
                 // run" signal -- see `has_transmitted_this_run`'s own doc
                 // comment for why `tx_parity.is_none()` wasn't enough.

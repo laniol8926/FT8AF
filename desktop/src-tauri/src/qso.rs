@@ -1068,7 +1068,7 @@ impl QsoEngine {
 /// watchdog_diag.log` on Windows (`std::env::temp_dir()` generally).
 /// Remove this whole function and its two call sites once the real cause
 /// is found.
-fn log_watchdog_diag(line: &str) {
+pub(crate) fn log_watchdog_diag(line: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("ft8af_watchdog_diag.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
