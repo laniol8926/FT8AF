@@ -310,6 +310,97 @@ jobs:
           prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}
           args: --config '{"bundle":{"active":true}}' ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
+  build-debian-arm64:
+    name: Build (debian-bookworm-arm64)
+    # A genuine native Debian 12 (Bookworm) arm64 .deb -- the existing `build`
+    # job's ubuntu-latest leg produces an amd64 .deb built against Ubuntu
+    # 24.04's library versions, which is a different distro/arch than this
+    # project's actual ARM SBC targets (Armbian/Debian Bookworm, confirmed
+    # directly on one: `libwebkit2gtk-4.1-dev`/`libayatana-appindicator3-dev`
+    # are both in Bookworm's own main+security repos, no backports needed).
+    # Runs INSIDE a `debian:bookworm` container (not just an Ubuntu runner)
+    # so every linked library is Bookworm's own package version, on a native
+    # `ubuntu-24.04-arm` hosted runner -- no QEMU/cross-compilation.
+    #
+    # Scoped to just the deb bundle (targets override below): the container
+    # has no rpmbuild (irrelevant here -- rpm already comes from the Ubuntu
+    # leg) and AppImage's own tooling adds real complexity for marginal value
+    # on a target that's always installed via its native package manager.
+    #
+    # NON-GATING for now (left out of desktop-gate's needs, same as
+    # `coverage` below) -- this is the first time this exact runner+
+    # container+Tauri combination has been exercised in CI; promote it to a
+    # required leg once it's proven reliable across a few real runs.
+    needs: [detect, version]
+    if: ${{ needs.detect.outputs.run == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    container: debian:bookworm
+    steps:
+      # Installed before checkout: a fresh container image has neither.
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl wget \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libudev-dev \
+            libasound2-dev \
+            patchelf \
+            file \
+            build-essential \
+            pkg-config
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          key: debian-bookworm-arm64
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Test frontend logic
+        working-directory: desktop
+        run: npm test
+
+      - name: Compile check (no bundle)
+        if: ${{ needs.version.outputs.should_release != 'true' }}
+        working-directory: desktop
+        run: npm run tauri build -- --no-bundle
+
+      - name: Stamp release version
+        if: ${{ needs.version.outputs.should_release == 'true' }}
+        working-directory: desktop
+        run: node ci/stamp-version.mjs "${{ needs.version.outputs.app_version }}"
+
+      - name: Build & publish release bundles
+        if: ${{ needs.version.outputs.should_release == 'true' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tagName: ${{ needs.version.outputs.release_tag }}
+          releaseName: ${{ needs.version.outputs.release_tag }}
+          releaseBody: 'FT8AF desktop build ${{ needs.version.outputs.version_name }}.'
+          prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}
+          args: --config '{"bundle":{"active":true,"targets":["deb"]}}'
+
   coverage:
     name: Rust coverage
     # Best-effort, NON-GATING desktop coverage: runs the src-tauri crate's unit
