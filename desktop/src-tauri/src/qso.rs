@@ -1743,6 +1743,22 @@ mod tests {
     }
 
     #[test]
+    fn cq_answer_limit_equal_to_tx_watchdog_takes_three_silent_slots() {
+        let mut e = QsoEngine::new("K0XYZ", "EN37");
+        e.no_reply_limit = 3;
+        e.cq_answer_limit = 3;
+        e.answer(&msg("CQ", "K1ABC", "FN42", "FN42", -5));
+        assert_eq!(e.status().stage, TxStage::Grid);
+
+        assert!(e.process_rx(&[]).is_none(), "1st silent slot -- must not give up yet");
+        assert_eq!(e.status().stage, TxStage::Grid);
+        assert!(e.process_rx(&[]).is_none(), "2nd silent slot -- must not give up yet");
+        assert_eq!(e.status().stage, TxStage::Grid);
+        assert!(matches!(e.process_rx(&[]), Some(QsoOutcome::GaveUpTarget)), "3rd silent slot -- now give up");
+        assert_eq!(e.status().stage, TxStage::Cq);
+    }
+
+    #[test]
     fn gives_up_immediately_when_the_target_works_someone_else() {
         // Real UX requirement, stated live: "I'm answering station xyz's
         // CQ but he answers someone else not my station. Stop calling him

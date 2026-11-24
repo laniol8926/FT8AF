@@ -3702,6 +3702,83 @@ mod tests {
     }
 
     #[test]
+    fn cq_answer_limit_equal_to_tx_watchdog_takes_three_real_transmissions_via_handle_decoded() {
+        // Live bug report: "when CQ Answer Attempts is set to equal TX
+        // Watchdog the number of attempts is one even when the tx watchdog
+        // is set to 3" -- drives the SAME scenario as qso.rs's own
+        // `cq_answer_limit_equal_to_tx_watchdog_takes_three_silent_slots`,
+        // but through the real `Engine::handle_decoded` entry point (with
+        // its `is_own_tx_slot` skip-our-own-TX-slot gating), not by calling
+        // `QsoEngine::process_rx` directly -- that pure-engine test alone
+        // passed, so if this one fails too, the bug is in this gating
+        // layer, not `qso.rs`'s give-up counting itself.
+        let mut engine = test_engine();
+        engine.qso.no_reply_limit = 3;
+        engine.qso.cq_answer_limit = 3;
+
+        let cycle_ms = engine.mode.cycle_ms();
+        let his_slot = (engine.cur_slot() + 10) / 2 * 2; // force even -> reply Odd
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            delta_freq: 0,
+            msg_utc_ms: Some(his_slot * cycle_ms),
+        }));
+        engine.has_transmitted_this_run = true;
+        assert_eq!(engine.qso.status().stage, TxStage::Grid);
+
+        engine.handle_decoded(vec![], 0); // ours -- must not count
+        engine.handle_decoded(vec![], 1); // theirs, silent -- 1st real miss
+        assert_eq!(engine.qso.status().stage, TxStage::Grid, "1 miss -- not given up yet");
+        engine.handle_decoded(vec![], 2); // ours -- must not count
+        engine.handle_decoded(vec![], 3); // theirs, silent -- 2nd real miss
+        assert_eq!(engine.qso.status().stage, TxStage::Grid, "2 misses -- still not given up");
+        engine.handle_decoded(vec![], 4); // ours -- must not count
+        engine.handle_decoded(vec![], 5); // theirs, silent -- 3rd real miss -> give up
+        assert_eq!(engine.qso.status().stage, TxStage::Cq, "3 misses -- now give up");
+    }
+
+    #[test]
+    fn cq_answer_limit_deferred_to_tx_watchdog_also_takes_three_real_transmissions() {
+        // Same scenario as `cq_answer_limit_equal_to_tx_watchdog_takes_
+        // three_real_transmissions_via_handle_decoded`, but with
+        // `cq_answer_limit` left at its "Same as TX Watchdog" sentinel (0)
+        // instead of an explicit 3 -- the user's own real fix was to
+        // change CQ Answer Attempts from "Same as TX Watchdog" to an
+        // explicit 3, which then worked. If this test ALSO passes, the
+        // deferral math itself (`effective_cq_answer_limit(0, 3) == 3`,
+        // already covered by a pure-function test) is not the bug, and
+        // the real cause is something this harness still isn't capturing
+        // (e.g. real config load order, or Hunt-specific answer wiring).
+        let mut engine = test_engine();
+        engine.qso.no_reply_limit = 3;
+        engine.qso.cq_answer_limit = 0; // "Same as TX Watchdog"
+
+        let cycle_ms = engine.mode.cycle_ms();
+        let his_slot = (engine.cur_slot() + 10) / 2 * 2;
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            delta_freq: 0,
+            msg_utc_ms: Some(his_slot * cycle_ms),
+        }));
+        engine.has_transmitted_this_run = true;
+        assert_eq!(engine.qso.status().stage, TxStage::Grid);
+
+        engine.handle_decoded(vec![], 0);
+        engine.handle_decoded(vec![], 1);
+        assert_eq!(engine.qso.status().stage, TxStage::Grid, "1 miss -- not given up yet");
+        engine.handle_decoded(vec![], 2);
+        engine.handle_decoded(vec![], 3);
+        assert_eq!(engine.qso.status().stage, TxStage::Grid, "2 misses -- still not given up");
+        engine.handle_decoded(vec![], 4);
+        engine.handle_decoded(vec![], 5);
+        assert_eq!(engine.qso.status().stage, TxStage::Cq, "3 misses -- now give up");
+    }
+
+    #[test]
     fn qso_completion_restores_the_pre_answer_tx_period_preference() {
         let mut engine = test_engine();
         engine.qso.my_call = "K0XYZ".into();
