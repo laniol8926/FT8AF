@@ -130,7 +130,6 @@ import {
   type PskFilter,
   type PskMode,
 } from "./pskFilter";
-import { summarizeSignalReach } from "./signalReach";
 import { forEachRingVertex, parseGeoJsonRings, parseStateLabels, stateBorderAlpha } from "./worldOutlines";
 import worldLandGeoJson from "./map-data/world_land.json";
 import worldCountriesGeoJson from "./map-data/world_countries.json";
@@ -2510,16 +2509,6 @@ function MapScreen({
     return () => cancelAnimationFrame(raf);
   }, [hasAnimatedLines]);
 
-  const opPos = useMemo(() => gridToLatLon(myGrid), [myGrid]);
-  // Always from the "heard me" list specifically, even in "Both" display
-  // mode -- "signal reach" means how far *my* signal reached, so mixing
-  // in "who I heard" spots would be wrong regardless of what's drawn on
-  // the map.
-  const signalReach = useMemo(
-    () => summarizeSignalReach(pskSpotsHeardMe, opPos?.lat ?? null, opPos?.lon ?? null),
-    [pskSpotsHeardMe, opPos],
-  );
-
   // Tracker-on's CQ labels (rendered below), matching GridMarkerInfoWindow's
   // real fork customization -- confirmed directly in GridOsmMapView.java's
   // `showNewInfoWindows()`: on the Map tab panel (`isCompactInfo`), *every*
@@ -2638,10 +2627,6 @@ function MapScreen({
         {pskOverlayEnabled && filterSheetOpen && (
           <PskFilterSheet filter={pskFilter} onChange={setPskFilter} />
         )}
-        {pskOverlayEnabled &&
-          !filterSheetOpen &&
-          pskFilter.direction !== "WHO_I_HEARD" &&
-          signalReach && <SignalReachCard reach={signalReach} />}
         {cqLabels.map(({ marker, x, y }) => (
           <TrackerCqLabel
             key={marker.callsign}
@@ -2764,27 +2749,6 @@ function PskFilterSheet({ filter, onChange }: { filter: PskFilter; onChange: (f:
           ))}
         </div>
       </div>
-    </div>
-  );
-}
-
-function SignalReachCard({ reach }: { reach: ReturnType<typeof summarizeSignalReach> }) {
-  if (!reach) return null;
-  return (
-    <div className="glass-card map-signal-reach">
-      <div>
-        {reach.receivers} receiver{reach.receivers === 1 ? "" : "s"}
-      </div>
-      {reach.furthestCall && (
-        <div className="muted">
-          Furthest: {reach.furthestCall} ({formatDistanceMi(reach.furthestKm)})
-        </div>
-      )}
-      {reach.strongestCall && (
-        <div className="muted">
-          Strongest: {reach.strongestCall} ({reach.strongestSnr} dB)
-        </div>
-      )}
     </div>
   );
 }
