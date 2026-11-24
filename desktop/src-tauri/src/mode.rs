@@ -2,9 +2,25 @@
 //! the per-mode timing/symbol/synthesis parameters live here so the engine
 //! stays mode-agnostic rather than hard-coding FT8's 15 s/79-tone assumptions.
 //!
-//! FT2 is decode-only, matching Android and the product site (ft8af.app:
-//! "decodes in milliseconds — now across three modes", no TX claim) --
-//! there is no `ft2_encode` anywhere in the shared C core or any platform.
+//! FT2 transmits as well as receives, same as FT4/FT8. It reuses FT4's exact
+//! tone-generation algorithm (same LDPC, XOR scramble, Costas pattern layout,
+//! 105-symbol structure -- see `constants.h`'s `FTX_PROTOCOL_FT2` doc comment
+//! in the vendored C core) at double the baud, so `dsp/encode.rs`'s
+//! `encode_tones_mode` already produces correct FT2 tones via the shared
+//! `ft4_encode` dispatch with no FT2-specific native code needed -- matching
+//! `ModeProfile.encode()`'s identical `ft4Encode` dispatch for FT2 on
+//! Android, which has never gated FT2 TX at all. Desktop's own TX gate was
+//! removed once this was confirmed (previously: an overly cautious port
+//! decision, not a real technical gap -- see this file's git history).
+//!
+//! FT2's TX timing margin is real tighter than FT4/FT8's, though: a 3.75 s
+//! cycle holding a 2.52 s audio burst leaves only ~1.23 s of slack (vs
+//! FT4's ~2.46 s, FT8's ~2.36 s) for the PTT-delay + late-start-tolerance
+//! budget `tx_latest_ms` computes -- about half the cushion against a slow
+//! CAT command or audio-device hiccup delaying TX start. Live-test FT2 TX
+//! specifically for a late-start/clipped-Costas symptom before trusting it
+//! unattended, per this project's standing caution on TX-timing changes.
+//!
 //! Decode works because desktop's FFI layer (dsp/ffi.rs, dsp/decoder.rs)
 //! links the shared `ft8_lib` monitor/decoder directly rather than going
 //! through Android's JNI wrappers, and `common/monitor.c` already derives
@@ -101,19 +117,13 @@ impl Mode {
     }
 
     /// Whether the native decoder/encoder should use the FT8 protocol
-    /// (false == FT4/FT2) -- matches `ModeProfile.isFt8`. FT2 has no encoder
-    /// at all (see the module doc comment), so this is decode-path-only for
-    /// FT2: it is never passed to an encode call for that mode.
+    /// (false == FT4/FT2) -- matches `ModeProfile.isFt8`. Used both for
+    /// decode (selects the FFI protocol constant) and for encode
+    /// (`dsp/encode.rs`'s `encode_tones_mode` dispatches FT4 and FT2 alike
+    /// to the shared `ft4_encode`, since their tone-generation algorithm is
+    /// identical -- see this module's own doc comment).
     pub fn is_ft8(self) -> bool {
         matches!(self, Mode::Ft8)
-    }
-
-    /// Whether this mode can transmit -- FT8 and FT4 both have a native
-    /// encoder (`GenerateFT8.ft8Encode`/`ft4Encode`, bound in dsp/encode.rs);
-    /// FT2 has none anywhere (see the module doc comment), so TX must be
-    /// refused for it regardless of radio-safety state.
-    pub fn can_transmit(self) -> bool {
-        !matches!(self, Mode::Ft2)
     }
 
     /// The native `ftx_protocol_t` value for this mode (constants.h enum
@@ -241,13 +251,6 @@ mod tests {
         // this configurable rather than a fixed constant.
         assert_eq!(Mode::Ft8.tx_latest_ms(0), 2_360);
         assert_eq!(Mode::Ft8.tx_latest_ms(190), 2_170);
-    }
-
-    #[test]
-    fn only_ft2_cannot_transmit() {
-        assert!(Mode::Ft8.can_transmit());
-        assert!(Mode::Ft4.can_transmit());
-        assert!(!Mode::Ft2.can_transmit());
     }
 
     #[test]

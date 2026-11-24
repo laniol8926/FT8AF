@@ -74,17 +74,11 @@ export function BandModePicker(props: {
 // The "Band & mode" bottom sheet, matching Android's BandModeSheet.kt: a
 // 3-way mode toggle (FT8/FT4/FT2, each with its cycle time) over a band
 // list, each row showing name + dial frequency with a checkmark on the
-// current selection. All three tiles are selectable -- FT2 decode works the
-// same way FT4's does (desktop's FFI links the shared ft8_lib monitor/
-// decoder directly rather than going through Android's JNI wrappers, so it
-// only needed the third `ftx_protocol_t` constant plumbed through, see
-// mode.rs). FT2 has no encoder anywhere (confirmed against ft8af.app, which
-// only ever claims decode for it: "decodes in milliseconds — now across
-// three modes") -- engine.rs's start_transmit refuses to key up in FT2
-// regardless of what the UI allows, and TopBar/TxBar grey out Call CQ/Tune
-// while operatingMode is "ft2" to make that receive-only state visible
-// rather than silently failing on click. Android's band rows also carry a
-// short descriptive subtitle ("Local, evenings", "Daytime, worldwide") that
+// current selection. All three modes transmit as well as receive -- FT2
+// reuses FT4's exact tone-generation algorithm at double the baud (see
+// mode.rs's doc comment), matching Android's own ModeProfile.encode(),
+// which has never gated FT2 TX. Android's band rows also carry a short
+// descriptive subtitle ("Local, evenings", "Daytime, worldwide") that
 // desktop's BandInfo has no data for -- omitted rather than inventing text
 // that might not match Android's actual wording.
 export function BandModeSheet(props: {
@@ -108,7 +102,6 @@ export function BandModeSheet(props: {
             <button
               key={m}
               className={"mode-tile" + (mode === m ? " active" : "")}
-              title={m === "ft2" ? "FT2: receive-only, matching ft8af.app (no FT2 TX anywhere)" : undefined}
               onClick={() => onMode(m as OperatingMode)}
             >
               <span className="mode-tile-name">{m.toUpperCase()}</span>

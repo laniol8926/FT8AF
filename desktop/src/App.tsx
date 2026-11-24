@@ -2935,12 +2935,6 @@ function TopBar(props: {
   // (desktop has no manual slot-parity override), matching WSJT-X/Android's
   // "Odd"/"Even" slot readout.
   const slotParity = cycle ? (cycle.sequential % 2 === 0 ? "Even" : "Odd") : null;
-  // FT2 has no encoder anywhere (see BandModeSheet's doc comment) --
-  // engine.rs's start_transmit refuses to key up regardless, but greying out
-  // every TX entry point here makes the receive-only state visible instead
-  // of letting the operator click Call CQ/More/Hunt and get a silent no-op
-  // (or, for Call CQ specifically, an error toast with no obvious cause).
-  const receiveOnly = operatingMode === "ft2";
 
   return (
     <>
@@ -2958,15 +2952,14 @@ function TopBar(props: {
         <button
           className={"pill pill-cq" + (cqActive ? " pill-cq-stop" : "")}
           onClick={cqActive ? onStop : onCq}
-          disabled={tuning || receiveOnly}
-          title={receiveOnly ? "FT2 is receive-only -- switch mode to transmit" : cqActive ? "Stop calling CQ" : "Call CQ"}
+          disabled={tuning}
+          title={cqActive ? "Stop calling CQ" : "Call CQ"}
         >
           {cqActive ? "STOP" : <span className="pill-label-2line">Call<br />CQ</span>}
         </button>
         <button
           className="pill pill-dark"
-          disabled={receiveOnly}
-          title={receiveOnly ? "FT2 is receive-only -- switch mode to transmit" : "More: CQ DX/NA/EU/... variants or a free-text message"}
+          title="More: CQ DX/NA/EU/... variants or a free-text message"
           onClick={() => setCqOptionsOpen(true)}
         >
           More
@@ -2975,8 +2968,7 @@ function TopBar(props: {
         <button
           className={"pill pill-dark" + (huntEnabled ? " pill-hunt-active" : "")}
           onClick={onToggleHunt}
-          disabled={receiveOnly}
-          title={receiveOnly ? "FT2 is receive-only -- switch mode to transmit" : "Hunt: auto-answer the best eligible CQ each cycle (priority/options in Settings)"}
+          title="Hunt: auto-answer the best eligible CQ each cycle (priority/options in Settings)"
         >
           Hunt
         </button>

@@ -2223,19 +2223,6 @@ impl Engine {
     /// device / playback error). The caller uses this to tell the sequencer the
     /// message really went out.
     fn start_transmit(&mut self, message: &str) -> bool {
-        // FT2 has no encoder anywhere (see Mode's doc comment) -- refuse before
-        // touching PTT or the rig, rather than letting generate_signal silently
-        // produce an unverified waveform. Covers both the audio path below and
-        // start_transmit_cat_tones (QMX CAT-tone path), which this falls through
-        // to. TUNE (a steady unmodulated carrier, no message encoding) is exempt
-        // -- it's mode-independent and Android's own FT2 screen leaves it enabled.
-        if !self.mode.can_transmit() {
-            self.emit(EngineEvent::Error(format!(
-                "{} is receive-only -- switch mode to transmit",
-                self.mode.display_name()
-            )));
-            return false;
-        }
         // Never key a second transmission over a live one, or over an active tune.
         if self.tx_playback.is_some() || self.tx_cat.is_some() || self.tx_tune.is_some() {
             return false;

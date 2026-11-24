@@ -253,6 +253,34 @@ mod tests {
     }
 
     #[test]
+    fn ft2_transmits_with_ft4s_exact_tone_sequence_at_double_the_baud() {
+        // FT2 TX used to be refused outright (Mode::can_transmit(), removed)
+        // on the premise that no encoder existed for it anywhere. It reuses
+        // FT4's exact tone-generation algorithm (same LDPC, XOR scramble,
+        // Costas layout -- see constants.h's FTX_PROTOCOL_FT2 doc comment),
+        // which `encode_tones_mode`'s `is_ft8()`-gated dispatch already
+        // produced correctly for FT2 even before that refusal was lifted --
+        // confirms the tones genuinely match FT4's, not just that encoding
+        // no longer errors.
+        let payload = pack77("CQ K1ABC FN42").unwrap();
+        let ft4_tones = encode_tones_mode(&payload, Mode::Ft4);
+        let ft2_tones = encode_tones_mode(&payload, Mode::Ft2);
+        assert_eq!(ft2_tones, ft4_tones, "FT2 must encode the identical tone sequence as FT4");
+        assert_eq!(ft2_tones.len(), Mode::Ft2.num_tones());
+
+        // The waveform itself differs only in symbol period (half FT4's),
+        // so it comes out roughly half the duration, not half the tones.
+        let signal = generate_signal("CQ K1ABC FN42", 1000.0, 12000, Mode::Ft2).unwrap();
+        assert_eq!(signal.len(), waveform_len_for(FT4_NN, 12000, Mode::Ft2.symbol_period()));
+        let expected_samples = (Mode::Ft2.audio_ms() as f64 / 1000.0 * 12000.0).round() as usize;
+        assert!(
+            (signal.len() as i64 - expected_samples as i64).unsigned_abs() < 200,
+            "FT2 signal length {} should be close to {} (2.52s @ 12kHz)",
+            signal.len(), expected_samples,
+        );
+    }
+
+    #[test]
     fn unpackable_text_returns_none_for_every_mode() {
         // An embedded NUL makes CString::new fail inside pack77 -- a reliable
         // way to force None regardless of pack77's own structured/free-text
@@ -261,5 +289,6 @@ mod tests {
         let unpackable = "bad\0text";
         assert!(generate_signal(unpackable, 1000.0, 12000, Mode::Ft8).is_none());
         assert!(generate_signal(unpackable, 1000.0, 12000, Mode::Ft4).is_none());
+        assert!(generate_signal(unpackable, 1000.0, 12000, Mode::Ft2).is_none());
     }
 }
