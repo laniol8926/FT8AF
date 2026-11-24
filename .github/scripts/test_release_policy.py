@@ -89,7 +89,9 @@ class ReleasePolicyTest(unittest.TestCase):
                     self.assertEqual(result["should_release"], str(internal or production or manual).lower())
                     self.assertEqual(result["is_prerelease"], str(internal or manual).lower())
                     self.assertEqual(result["release_tag"], "desktop-dev.81" if internal else "desktop-v2.7.1" if production else "desktop-manual.81" if manual else "")
-                    self.assertEqual(result["app_version"], "1.4.11-81" if internal else "2.7.1" if production else "1.4.11-81" if manual else "")
+                    # "+" not "-": RPM's version-string validator rejects a
+                    # literal hyphen (see desktop.yml's `version` job comment).
+                    self.assertEqual(result["app_version"], "1.4.11+81" if internal else "2.7.1" if production else "1.4.11+81" if manual else "")
 
     def test_internal_builds_without_production_tag_history(self):
         for branch in ("main",):
@@ -97,7 +99,7 @@ class ReleasePolicyTest(unittest.TestCase):
                 result = self.run_script("desktop", "tag", "push", f"refs/heads/{branch}", tagged=False)
                 self.assertEqual(result["release_tag"], "desktop-dev.81")
                 self.assertEqual(result["version_name"], "0.1.0-dev.81")
-                self.assertEqual(result["app_version"], "0.1.1-81")
+                self.assertEqual(result["app_version"], "0.1.1+81")
                 self.assertEqual(result["is_prerelease"], "true")
 
     def test_android_rerun_reuses_its_release_without_production_tag_or_extra_bump(self):

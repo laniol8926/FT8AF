@@ -12,13 +12,19 @@ import { dirname, join } from "node:path";
 
 // The MSI bundler only accepts major.minor.patch with an optional numeric
 // pre-release no greater than 65535, so the version must fit that on every OS.
-const MSI_SAFE = /^(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$/;
+// The separator before that numeric suffix can be "-" (semver pre-release) or
+// "+" (semver build metadata) -- desktop.yml's `version` job uses "+" for its
+// prerelease builds specifically because the RPM bundler's own version-string
+// validator rejects a literal hyphen (only alphanumeric/./_/+/%/{}/~/^ are
+// allowed), while deb/MSI tolerate either separator fine (MSI drops the
+// suffix entirely when deriving its own numeric ProductVersion).
+const MSI_SAFE = /^(\d+)\.(\d+)\.(\d+)(?:[-+](\d+))?$/;
 
 export function assertBundleSafeVersion(version) {
   const m = MSI_SAFE.exec(version);
   if (!m || (m[4] !== undefined && Number(m[4]) > 65535)) {
     throw new Error(
-      `"${version}" is not a bundle-safe version (x.y.z or x.y.z-N, N <= 65535)`,
+      `"${version}" is not a bundle-safe version (x.y.z, x.y.z-N, or x.y.z+N, N <= 65535)`,
     );
   }
   return version;

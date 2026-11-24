@@ -129,7 +129,11 @@ jobs:
             IFS='.' read -ra parts <<< "$base_ver"
             last_idx=$((${#parts[@]} - 1))
             parts[$last_idx]=$((parts[$last_idx] + 1))
-            echo "app_version=$(IFS=.; echo "${parts[*]}")-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            # "+" not "-": RPM's version-string validator rejects a literal
+            # hyphen (only alphanumeric/./_/+/%/{}/~/^ are allowed), and deb/
+            # WiX both tolerate "+" fine, so this one separator choice has to
+            # work for every bundler target at once.
+            echo "app_version=$(IFS=.; echo "${parts[*]}")+${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           elif [[ "$GITHUB_EVENT_NAME" == "push" && "${GITHUB_REF}" == refs/tags/desktop-v* ]]; then
@@ -146,12 +150,14 @@ jobs:
             base_ver="${base_ver:-0.1.0}"
             echo "release_tag=$new_tag" >> "$GITHUB_OUTPUT"
             echo "version_name=${base_ver}-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-            # The bundled app version must be MSI-safe (numeric pre-release only),
-            # and must sort below the next release, so stamp <next patch>-<run>.
+            # The bundled app version must sort below the next release, so
+            # stamp <next patch>+<run>. "+" not "-": RPM's version-string
+            # validator rejects a literal hyphen (only alphanumeric/./_/+/
+            # %/{}/~/^ are allowed), and deb/WiX both tolerate "+" fine.
             IFS='.' read -ra parts <<< "$base_ver"
             last_idx=$((${#parts[@]} - 1))
             parts[$last_idx]=$((parts[$last_idx] + 1))
-            echo "app_version=$(IFS=.; echo "${parts[*]}")-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "app_version=$(IFS=.; echo "${parts[*]}")+${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else

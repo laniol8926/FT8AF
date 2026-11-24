@@ -12,8 +12,20 @@ describe("assertBundleSafeVersion", () => {
     expect(assertBundleSafeVersion("1.0.0-65535")).toBe("1.0.0-65535");
   });
 
+  it("accepts the '+' separator CI uses (RPM rejects a literal hyphen)", () => {
+    expect(assertBundleSafeVersion("0.1.2+1312")).toBe("0.1.2+1312");
+    expect(assertBundleSafeVersion("1.0.0+65535")).toBe("1.0.0+65535");
+  });
+
   it("rejects versions the MSI bundler would refuse", () => {
-    for (const bad of ["", "0.1", "v0.1.2", "0.1.1-dev.1312", "0.1.2-65536"]) {
+    for (const bad of [
+      "",
+      "0.1",
+      "v0.1.2",
+      "0.1.1-dev.1312",
+      "0.1.2-65536",
+      "0.1.2+65536",
+    ]) {
       expect(() => assertBundleSafeVersion(bad)).toThrow();
     }
   });
