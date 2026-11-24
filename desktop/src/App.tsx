@@ -9,6 +9,7 @@ import {
   type WheelEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { Download, Share2, Upload } from "lucide-react";
 import {
   api,
   onEngineEvent,
@@ -3267,7 +3268,7 @@ function LogbookTopBar({
             Upload shows an honest "not available" notice instead of either
             silently doing nothing or faking a real sync. */}
         <button className="icon-button topbar-icon" title="Sync to logging services" onClick={onUpload}>
-          ↑
+          <Upload size={17} />
         </button>
         <button
           className="icon-button topbar-icon"
@@ -3275,10 +3276,10 @@ function LogbookTopBar({
           onClick={onImport}
           disabled={importBusy}
         >
-          ↓
+          <Download size={17} />
         </button>
         <button className="icon-button topbar-icon" title="Export QSOs" onClick={onExport}>
-          ↗
+          <Share2 size={17} />
         </button>
       </div>
       <SyncRow clock={clock} pct={pct} secondsLeft={secondsLeft} ntpDisciplineEnabled={ntpDisciplineEnabled} />

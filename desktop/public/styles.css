@@ -194,12 +194,16 @@ select option {
 .icon-button {
   background: transparent; border: none; color: var(--text); font-size: 16px;
   padding: 4px 6px; cursor: pointer; border-radius: var(--radius-sm);
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .icon-button:hover { background: var(--panel-2); }
 .icon-button:disabled { opacity: 0.4; cursor: not-allowed; }
 /* Logbook top bar's Upload/Download/Share icons (LogbookScreen.kt's TopBar
-   actions) -- muted until hovered, matching Android's TextMuted icon tint. */
-.topbar-icon { color: var(--muted); font-size: 17px; font-weight: 700; }
+   actions, Icons.Filled.CloudUpload/FileDownload/Share there -- lucide-react's
+   Upload/Download/Share2 here, the closest web equivalents since Compose's
+   Material Icons Extended are baked into that library, not portable asset
+   files) -- muted until hovered, matching Android's TextMuted icon tint. */
+.topbar-icon { color: var(--muted); }
 .topbar-icon:hover { color: var(--text); }
 
 /* Decode-list sort button (TIME/CALL/SNR/DX), matching Android's
