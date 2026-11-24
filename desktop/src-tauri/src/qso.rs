@@ -108,11 +108,12 @@ pub struct QsoEngine {
     pub auto_return_to_cq: bool,
     /// Settings -> Transmission's "TX Watchdog" ("Stop After" N unanswered
     /// attempts) -- ported in spirit from Android's `GeneralVariables.
-    /// noReplyLimit`/`shouldGiveUpTarget`. `0` = unlimited (Android's own
-    /// default), matching Android's own semantics exactly even though
-    /// desktop's stage model differs (see `should_give_up_target`'s doc
-    /// comment for why this re-derives the signal natively rather than
-    /// porting Android's numeric `functionOrder` arithmetic line for line).
+    /// noReplyLimit`/`shouldGiveUpTarget`, but deliberately NOT matching
+    /// Android's "0 = unlimited" semantics -- see
+    /// `effective_no_reply_limit`'s doc comment for why. Real callers
+    /// floor this via that function before comparing (see
+    /// `should_give_up_target`'s own doc comment for why it stays pure/
+    /// unfloored itself).
     pub no_reply_limit: u32,
     /// Settings -> Transmission's "Max 73 Sends" -- ported in spirit from
     /// Android's `GeneralVariables.max73Sends`/`hasReachedMax73Sends`.
@@ -129,10 +130,12 @@ pub struct QsoEngine {
     /// operator may want a flaky mid-QSO partner dropped quickly while
     /// still letting a bare CQ call run far longer (or forever) waiting to
     /// be heard, and conflating the two would silently couple those two
-    /// unrelated intents. `0` = unlimited -- the deliberate default, since
-    /// this is new functionality with no prior behavior to preserve except
-    /// "runs until stopped," which is also exactly what an unattended/
-    /// "robot" CQ operation needs.
+    /// unrelated intents. `0` floors to `DEFAULT_CQ_WATCHDOG_LIMIT` (see
+    /// `should_give_up_cq`'s doc comment) -- NOT unlimited, by deliberate
+    /// policy: "we do not want this app to become a BOT... there must be a
+    /// control operator present." A long stretch calling CQ is normal; an
+    /// unattended/"robot" CQ running indefinitely is exactly what this
+    /// floor exists to rule out.
     pub cq_no_reply_limit: u32,
     /// Settings -> Transmission's "CQ Answer Attempts" -- how many times to
     /// retry answering a CQ (`TxStage::Grid` retries specifically, i.e. he
@@ -143,13 +146,14 @@ pub struct QsoEngine {
     /// message. But if I'm replying to a station calling CQ how many times
     /// will I try to answer his CQ before giving up? No more than the TX
     /// Watchdog setting... want to avoid [a case like] the TX Watchdog
-    /// being set to unlimited so I keep calling him forever." `0` =
-    /// unconfigured -- defers entirely to `no_reply_limit` (today's exact
-    /// behavior, no change for anyone who hasn't touched this). A non-zero
-    /// value is the real cap on the Grid-stage retry count specifically,
-    /// but is never allowed to exceed `no_reply_limit` when THAT'S finite
-    /// (a CQ-answer cap higher than the general mid-QSO cap wouldn't make
-    /// sense) -- see `effective_cq_answer_limit`.
+    /// being set to unlimited so I keep calling him forever." `0` floors
+    /// to `DEFAULT_CQ_ANSWER_LIMIT` -- the "Same as TX Watchdog"
+    /// deferred-to-`no_reply_limit` behavior this used to have was removed
+    /// after it kept giving up after a single real attempt on a live
+    /// Windows run (see that constant's doc comment). Never allowed to
+    /// exceed `no_reply_limit` when finite (a CQ-answer cap higher than
+    /// the general mid-QSO cap wouldn't make sense) -- see
+    /// `effective_cq_answer_limit`.
     pub cq_answer_limit: u32,
 
     stage: TxStage,
@@ -846,16 +850,36 @@ impl QsoEngine {
             TxStage::Grid => {
                 self.no_reply_count = self.no_reply_count.saturating_add(1);
                 let limit = effective_cq_answer_limit(self.cq_answer_limit, self.no_reply_limit);
-                if should_give_up_target(limit, self.no_reply_count) {
+                let gave_up = should_give_up_target(limit, self.no_reply_count);
+                // TEMPORARY diagnostic (not meant to stay) -- tracking a
+                // live Windows-only report that this give-up fires after
+                // far fewer real misses than configured, possibly tied to
+                // alt-tabbing away and back. Prints the real wall-clock
+                // time and exact counter/limit at the moment of every
+                // miss, so the next occurrence gives hard evidence (a
+                // sudden count jump vs. real elapsed time, or genuinely
+                // 3 seconds apart misses) instead of another guess.
+                eprintln!(
+                    "[watchdog-diag] {} Grid miss #{} (limit {}) gave_up={}",
+                    util::now_unix_ms(), self.no_reply_count, limit, gave_up
+                );
+                if gave_up {
                     self.give_up_target();
                     return true;
                 }
             }
             // A confirmed, ongoing QSO (he has replied at least once) --
-            // governed by the broader no_reply_limit ("TX Watchdog").
+            // governed by the broader no_reply_limit ("TX Watchdog"),
+            // floored (effective_no_reply_limit) so 0 can't mean unlimited.
             TxStage::Report | TxStage::RReport => {
                 self.no_reply_count = self.no_reply_count.saturating_add(1);
-                if should_give_up_target(self.no_reply_limit, self.no_reply_count) {
+                let limit = effective_no_reply_limit(self.no_reply_limit);
+                let gave_up = should_give_up_target(limit, self.no_reply_count);
+                eprintln!(
+                    "[watchdog-diag] {} {:?} miss #{} (limit {}) gave_up={}",
+                    util::now_unix_ms(), self.stage, self.no_reply_count, limit, gave_up
+                );
+                if gave_up {
                     self.give_up_target();
                     return true;
                 }
@@ -1038,15 +1062,34 @@ impl QsoEngine {
     }
 }
 
-/// TX Watchdog ("Stop After" N unanswered attempts). Ported in spirit from
-/// Android's `FT8TransmitSignal.shouldGiveUpTarget` -- desktop's stage model
-/// differs enough (7 named `TxStage`s vs. Android's 6 numeric
-/// `functionOrder`s) that this re-derives the same "silence since the
-/// target last replied" signal natively via `no_reply_count` rather than
-/// porting Android's order-number arithmetic line for line. `0` = unlimited
-/// (Android's own `noReplyLimit=0` default) -- the operator's own Stop/
-/// Hunt-rotate remains the ultimate backstop, matching Android's documented
-/// reliance on its separate TX-supervision timeout for the unlimited case.
+/// TX Watchdog's floor when left at "unlimited" (0). Removed deliberately,
+/// not just defensively (see `DEFAULT_CQ_ANSWER_LIMIT`'s sibling removal):
+/// "we do not want this app to become a BOT... there must be a control
+/// operator present" -- an indefinitely-retransmitting mid-QSO exchange is
+/// exactly the unattended-operation risk that rule exists for, even though
+/// it's narrower than bare-CQ's (the partner answered at least once, so
+/// *something* is there). More generous than `DEFAULT_CQ_ANSWER_LIMIT`
+/// since a partner known to be present deserves more patience than a CQ
+/// caller who's never replied even once.
+pub const DEFAULT_TX_WATCHDOG_LIMIT: u32 = 5;
+
+/// TX Watchdog ("Stop After" N unanswered attempts), floored to
+/// `DEFAULT_TX_WATCHDOG_LIMIT` so a literal 0 can never mean "unlimited" --
+/// see that constant's doc comment. Ported in spirit from Android's
+/// `FT8TransmitSignal.shouldGiveUpTarget` -- desktop's stage model differs
+/// enough (7 named `TxStage`s vs. Android's 6 numeric `functionOrder`s)
+/// that this re-derives the same "silence since the target last replied"
+/// signal natively via `no_reply_count` rather than porting Android's
+/// order-number arithmetic line for line.
+pub fn effective_no_reply_limit(no_reply_limit: u32) -> u32 {
+    if no_reply_limit == 0 { DEFAULT_TX_WATCHDOG_LIMIT } else { no_reply_limit }
+}
+
+/// The actual give-up comparison, deliberately still pure/unfloored (a
+/// literal `no_reply_limit=0` genuinely means "never give up" to THIS
+/// function) -- every real call site floors its own `no_reply_limit`
+/// first, via `effective_no_reply_limit` or `effective_cq_answer_limit`,
+/// so 0 never reaches here from production code.
 pub fn should_give_up_target(no_reply_limit: u32, no_reply_count: u32) -> bool {
     no_reply_limit > 0 && no_reply_count >= no_reply_limit
 }
@@ -1067,25 +1110,31 @@ pub const DEFAULT_CQ_ANSWER_LIMIT: u32 = 3;
 
 /// The real cap on `TxStage::Grid` retries (answering a CQ that's never
 /// replied even once): never allowed to exceed `no_reply_limit` ("TX
-/// Watchdog") when that's finite (a CQ-answer cap higher than the general
-/// mid-QSO cap wouldn't make sense), and never actually unlimited --
-/// `DEFAULT_CQ_ANSWER_LIMIT` substitutes for a literal 0 defensively (see
-/// its own doc comment for why 0 no longer means "defer to TX Watchdog").
+/// Watchdog") -- both floored first (`DEFAULT_CQ_ANSWER_LIMIT`,
+/// `effective_no_reply_limit`), so neither side can mean "unlimited" and
+/// the clamp is always a real, finite comparison.
 pub fn effective_cq_answer_limit(cq_answer_limit: u32, no_reply_limit: u32) -> u32 {
     let limit = if cq_answer_limit == 0 { DEFAULT_CQ_ANSWER_LIMIT } else { cq_answer_limit };
-    if no_reply_limit == 0 {
-        limit
-    } else {
-        limit.min(no_reply_limit)
-    }
+    limit.min(effective_no_reply_limit(no_reply_limit))
 }
 
-/// CQ Watchdog cap -- see `QsoEngine::cq_no_reply_limit`'s doc comment for
-/// why this is a separate setting/counter from `should_give_up_target`'s.
-/// `0` = unlimited, same convention, so an unattended/"robot" CQ operation
-/// is unaffected unless the operator explicitly opts into a cap.
+/// CQ Watchdog's floor when left at "unlimited" (0). Removed deliberately:
+/// "we do not want this app to become a BOT... I've seen stations calling
+/// CQ for hours at night... there must be a control operator present" --
+/// this is the exact scenario that rule targets (bare CQ with nobody
+/// answering at all, the "robot" case this constant's old doc comment
+/// explicitly invited). A long stretch calling CQ is normal and expected;
+/// running all night unattended is not -- this cap is generous enough for
+/// the former while ruling out the latter.
+pub const DEFAULT_CQ_WATCHDOG_LIMIT: u32 = 40;
+
+/// CQ Watchdog cap, floored to `DEFAULT_CQ_WATCHDOG_LIMIT` so a literal 0
+/// can never mean "unlimited" -- see that constant's doc comment for why.
+/// See `QsoEngine::cq_no_reply_limit`'s doc comment for why this is a
+/// separate setting/counter from `should_give_up_target`'s.
 pub fn should_give_up_cq(cq_no_reply_limit: u32, cq_no_reply_count: u32) -> bool {
-    cq_no_reply_limit > 0 && cq_no_reply_count >= cq_no_reply_limit
+    let limit = if cq_no_reply_limit == 0 { DEFAULT_CQ_WATCHDOG_LIMIT } else { cq_no_reply_limit };
+    cq_no_reply_count >= limit
 }
 
 /// Max 73 Sends cap. Ported in spirit from Android's
@@ -1523,12 +1572,11 @@ mod tests {
         assert_eq!(effective_cq_answer_limit(0, 2), 2);
         assert_eq!(effective_cq_answer_limit(0, 5), DEFAULT_CQ_ANSWER_LIMIT);
 
-        // TX Watchdog unlimited (0) -- the CQ-answer cap is the only real
-        // limit here. This is the actual safety net the operator asked
-        // for: "avoid [a case like] the TX Watchdog being set to unlimited
-        // so I keep calling him forever."
-        assert_eq!(effective_cq_answer_limit(1, 0), 1);
-        assert_eq!(effective_cq_answer_limit(10, 0), 10);
+        // TX Watchdog left at its own "unlimited" (0) -- also removed
+        // (see DEFAULT_TX_WATCHDOG_LIMIT's doc comment), so this clamps to
+        // ITS floor too, not "no ceiling at all" like before.
+        assert_eq!(effective_cq_answer_limit(1, 0), 1); // below the floor either way
+        assert_eq!(effective_cq_answer_limit(10, 0), DEFAULT_TX_WATCHDOG_LIMIT); // clamped to the floor, not 10
 
         // Both finite -- never exceeds TX Watchdog's own value.
         assert_eq!(effective_cq_answer_limit(1, 5), 1); // "Personally I'd set it to one"
@@ -1587,7 +1635,12 @@ mod tests {
 
     #[test]
     fn should_give_up_cq_pure_cases() {
-        assert!(!should_give_up_cq(0, 1000)); // unlimited -- robot/unattended CQ never gives up
+        // 0 ("unlimited"/robot operation) is removed -- floors to
+        // DEFAULT_CQ_WATCHDOG_LIMIT instead of never giving up (see that
+        // constant's doc comment: "we do not want this app to become a
+        // BOT... there must be a control operator present").
+        assert!(!should_give_up_cq(0, DEFAULT_CQ_WATCHDOG_LIMIT - 1));
+        assert!(should_give_up_cq(0, DEFAULT_CQ_WATCHDOG_LIMIT));
         assert!(!should_give_up_cq(5, 4));
         assert!(should_give_up_cq(5, 5));
         assert!(should_give_up_cq(5, 6));
@@ -1615,15 +1668,25 @@ mod tests {
     }
 
     #[test]
-    fn cq_watchdog_disabled_calls_cq_forever() {
+    fn cq_watchdog_left_at_default_still_gives_up_eventually() {
+        // Was "cq_watchdog_disabled_calls_cq_forever" -- 0 used to mean
+        // truly unlimited (the removed "robot operation" default). "we do
+        // not want this app to become a BOT... there must be a control
+        // operator present" -- a bare, unanswered CQ now always gives up
+        // by DEFAULT_CQ_WATCHDOG_LIMIT, generous enough for a long stretch
+        // of calling but never indefinite.
         let mut e = QsoEngine::new("K0XYZ", "EN37");
-        e.cq_no_reply_limit = 0; // the "robot operation" default
+        e.cq_no_reply_limit = 0;
         e.start_cq();
-        for _ in 0..200 {
+        for _ in 0..(DEFAULT_CQ_WATCHDOG_LIMIT as usize - 1) {
             assert!(e.process_rx(&[]).is_none());
         }
-        assert!(e.status().active, "unlimited CQ Watchdog must never give up");
+        assert!(e.status().active, "must not give up before the default cap");
         assert_eq!(e.status().stage, TxStage::Cq);
+
+        assert!(e.process_rx(&[]).is_none());
+        assert!(!e.status().active, "must give up at the default cap, never run forever");
+        assert_eq!(e.status().stage, TxStage::Idle);
     }
 
     #[test]
@@ -1649,7 +1712,7 @@ mod tests {
         // counters/limits (see cq_no_reply_limit's doc comment).
         let mut e = QsoEngine::new("K0XYZ", "EN37");
         e.no_reply_limit = 1; // give up on a silent target almost immediately
-        e.cq_no_reply_limit = 0; // but let a bare CQ run unlimited
+        e.cq_no_reply_limit = 0; // floors to DEFAULT_CQ_WATCHDOG_LIMIT (40) -- well short of giving up within this test's 10 cycles
         e.start_cq();
         for _ in 0..10 {
             assert!(e.process_rx(&[]).is_none());

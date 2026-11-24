@@ -562,14 +562,18 @@ pub enum EngineCommand {
     /// The independent tune level itself (0.0-1.0, same scale as `tx_gain`).
     SetTuneLevel(f32),
     /// Settings -> Transmission's "TX Watchdog" ("Stop After" N unanswered
-    /// attempts) -- Android's `noReplyLimit`, 0 = unlimited.
+    /// attempts) -- Android's `noReplyLimit`. The UI enforces a minimum of
+    /// 1; a stray 0 floors to `qso::DEFAULT_TX_WATCHDOG_LIMIT` here too --
+    /// "unlimited" has been removed (see that constant's doc comment).
     SetTxWatchdog(u32),
     /// Settings -> Transmission's "Max 73 Sends" -- Android's `max73Sends`,
-    /// 0 = Auto/off.
+    /// 0 = Auto/off (unchanged: a hard failsafe already backstops this
+    /// even at Auto, unlike TX/CQ Watchdog's removed "unlimited").
     SetMax73Sends(u32),
     /// Settings -> Transmission's "CQ Watchdog" -- genuinely new, no Android
-    /// equivalent (see `QsoEngine::cq_no_reply_limit`'s doc comment). 0 =
-    /// unlimited, the deliberate default (unattended/"robot" CQ operation).
+    /// equivalent (see `qso::DEFAULT_CQ_WATCHDOG_LIMIT`'s doc comment). The
+    /// UI enforces a minimum of 1; a stray 0 floors to the default here too
+    /// -- "unlimited"/"robot" CQ operation has been removed.
     SetCqWatchdog(u32),
     /// Settings -> Transmission's "CQ Answer Attempts" -- genuinely new, no
     /// Android equivalent (see `qso::DEFAULT_CQ_ANSWER_LIMIT`'s doc comment).
@@ -1224,11 +1228,27 @@ impl Engine {
         qso.freq_mhz = bands::freq_mhz_string(dial_hz);
         qso.mode = mode.display_name().to_string();
         // Settings -> Transmission's TX Watchdog / Max 73 Sends -- Android's
-        // own key names, plain integer counts, 0 = unlimited/Auto (Android's
-        // own defaults).
-        qso.no_reply_limit = db.get_config("noReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        // own key names, plain integer counts. Max 73 Sends keeps Android's
+        // own 0 = Auto/off (a hard RR73_GIVEUP_CYCLES_FAILSAFE already
+        // backstops it even then); TX Watchdog and CQ Watchdog do NOT --
+        // "we do not want this app to become a BOT... there must be a
+        // control operator present" -- 0 ("unlimited") is migrated to a
+        // real default (DEFAULT_TX_WATCHDOG_LIMIT/DEFAULT_CQ_WATCHDOG_LIMIT)
+        // the same way cqAnswerLimit's removed "Same as TX Watchdog" was,
+        // and persisted back so Settings shows the explicit number
+        // immediately rather than a stale "0"/"Unlimited" the UI no longer
+        // labels that way.
         qso.max_73_sends = db.get_config("max73Sends").and_then(|s| s.parse().ok()).unwrap_or(0);
-        qso.cq_no_reply_limit = db.get_config("cqNoReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let stored_no_reply_limit: u32 = db.get_config("noReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        qso.no_reply_limit = crate::qso::effective_no_reply_limit(stored_no_reply_limit);
+        if stored_no_reply_limit == 0 {
+            let _ = db.set_config("noReplyLimit", &qso.no_reply_limit.to_string());
+        }
+        let stored_cq_watchdog: u32 = db.get_config("cqNoReplyLimit").and_then(|s| s.parse().ok()).unwrap_or(0);
+        qso.cq_no_reply_limit = if stored_cq_watchdog > 0 { stored_cq_watchdog } else { crate::qso::DEFAULT_CQ_WATCHDOG_LIMIT };
+        if stored_cq_watchdog == 0 {
+            let _ = db.set_config("cqNoReplyLimit", &qso.cq_no_reply_limit.to_string());
+        }
         // The "Same as TX Watchdog" (0) option has been removed (see
         // qso::DEFAULT_CQ_ANSWER_LIMIT's doc comment) -- migrate a
         // legacy-persisted 0/missing value to the real default once, and
@@ -3058,6 +3078,10 @@ impl Engine {
                 self.apply_live_tune_gain();
             }
             EngineCommand::SetTxWatchdog(limit) => {
+                // "Unlimited" (0) is gone (defense in depth; the UI is the
+                // primary enforcement point) -- see DEFAULT_TX_WATCHDOG_
+                // LIMIT's doc comment.
+                let limit = crate::qso::effective_no_reply_limit(limit);
                 self.qso.no_reply_limit = limit;
                 let _ = self.db.set_config("noReplyLimit", &limit.to_string());
             }
@@ -3066,6 +3090,10 @@ impl Engine {
                 let _ = self.db.set_config("max73Sends", &cap.to_string());
             }
             EngineCommand::SetCqWatchdog(limit) => {
+                // "Unlimited" (0) is gone (defense in depth; the UI is the
+                // primary enforcement point) -- see DEFAULT_CQ_WATCHDOG_
+                // LIMIT's doc comment.
+                let limit = if limit == 0 { crate::qso::DEFAULT_CQ_WATCHDOG_LIMIT } else { limit };
                 self.qso.cq_no_reply_limit = limit;
                 let _ = self.db.set_config("cqNoReplyLimit", &limit.to_string());
             }

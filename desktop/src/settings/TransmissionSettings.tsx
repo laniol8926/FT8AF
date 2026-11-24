@@ -4,11 +4,14 @@ import type { HuntPriority } from "../hunt";
 import { HUNT_PRIORITIES } from "../hunt";
 import { SettingsRow, NumberInputDialog, ListPickerDialog } from "./SettingsPrimitives";
 
-// Mirrors qso::DEFAULT_CQ_ANSWER_LIMIT -- the removed "Same as TX Watchdog"
-// (0) option's replacement floor, used here only so a config read that
-// still returns a stray/un-migrated 0 shows the same real number the
-// engine would actually use, never a confusing "0".
+// Mirror qso::DEFAULT_CQ_ANSWER_LIMIT / DEFAULT_TX_WATCHDOG_LIMIT /
+// DEFAULT_CQ_WATCHDOG_LIMIT -- the removed "unlimited"/"Same as TX
+// Watchdog" options' replacement floors, used here only so a config read
+// that still returns a stray/un-migrated 0 shows the same real number the
+// engine would actually use, never a confusing "0"/"Unlimited".
 const DEFAULT_CQ_ANSWER_LIMIT = 3;
+const DEFAULT_TX_WATCHDOG_LIMIT = 5;
+const DEFAULT_CQ_WATCHDOG_LIMIT = 40;
 
 const HUNT_PRIORITY_LABEL: Record<HuntPriority, string> = {
   latest: "Latest (most recent decode)",
@@ -142,9 +145,9 @@ export function TransmissionSettings({
   const [openDialog, setOpenDialog] = useState<OpenDialog>(null);
 
   const [clearOnChange, setClearOnChange] = useState(true);
-  const [stopAfter, setStopAfter] = useState(0);
+  const [stopAfter, setStopAfter] = useState(DEFAULT_TX_WATCHDOG_LIMIT);
   const [cqAnswerLimit, setCqAnswerLimit] = useState(DEFAULT_CQ_ANSWER_LIMIT);
-  const [cqWatchdog, setCqWatchdog] = useState(0);
+  const [cqWatchdog, setCqWatchdog] = useState(DEFAULT_CQ_WATCHDOG_LIMIT);
   const [max73, setMax73] = useState(0);
   const [swrHaltEnabled, setSwrHaltEnabled] = useState(false);
   const [swrThreshold, setSwrThreshold] = useState(3.0);
@@ -159,12 +162,18 @@ export function TransmissionSettings({
 
   useEffect(() => {
     api.getConfig("clearOnBandModeChange").then((v) => setClearOnChange(v !== "0"));
-    api.getConfig("noReplyLimit").then((v) => setStopAfter(v ? parseInt(v, 10) || 0 : 0));
+    api.getConfig("noReplyLimit").then((v) => {
+      const n = v ? parseInt(v, 10) || 0 : 0;
+      setStopAfter(n > 0 ? n : DEFAULT_TX_WATCHDOG_LIMIT);
+    });
     api.getConfig("cqAnswerLimit").then((v) => {
       const n = v ? parseInt(v, 10) || 0 : 0;
       setCqAnswerLimit(n > 0 ? n : DEFAULT_CQ_ANSWER_LIMIT);
     });
-    api.getConfig("cqNoReplyLimit").then((v) => setCqWatchdog(v ? parseInt(v, 10) || 0 : 0));
+    api.getConfig("cqNoReplyLimit").then((v) => {
+      const n = v ? parseInt(v, 10) || 0 : 0;
+      setCqWatchdog(n > 0 ? n : DEFAULT_CQ_WATCHDOG_LIMIT);
+    });
     api.getConfig("max73Sends").then((v) => setMax73(v ? parseInt(v, 10) || 0 : 0));
     api.getConfig("swrHaltEnabled").then((v) => setSwrHaltEnabled(v === "1"));
     api.getConfig("swrHaltThreshold").then((v) => setSwrThreshold(v ? parseFloat(v) || 3.0 : 3.0));
@@ -212,7 +221,7 @@ export function TransmissionSettings({
           <SettingsRow
             label="TX Watchdog"
             description="Stop calling after N unanswered attempts"
-            value={stopAfter === 0 ? "Off" : `${stopAfter} tries`}
+            value={`${stopAfter} tries`}
             onClick={() => setOpenDialog("stopAfter")}
           />
           <SettingsRow
@@ -223,8 +232,8 @@ export function TransmissionSettings({
           />
           <SettingsRow
             label="CQ Watchdog"
-            description="Stop calling CQ after N unanswered cycles with nobody replying -- 0/unlimited for unattended operation"
-            value={cqWatchdog === 0 ? "Unlimited" : `${cqWatchdog} cycles`}
+            description="Stop calling CQ after N unanswered cycles with nobody replying -- a control operator must be present, so this is never unlimited"
+            value={`${cqWatchdog} cycles`}
             onClick={() => setOpenDialog("cqWatchdog")}
           />
           <SettingsRow
@@ -387,9 +396,9 @@ export function TransmissionSettings({
       {openDialog === "stopAfter" && (
         <NumberInputDialog
           title="TX Watchdog"
-          description="Stop calling after this many unanswered attempts. 0 = unlimited."
+          description="Stop calling after this many unanswered attempts. Never unlimited -- a control operator must be present."
           value={stopAfter}
-          min={0}
+          min={1}
           max={30}
           onSave={(v) => {
             setStopAfter(v);
@@ -417,9 +426,9 @@ export function TransmissionSettings({
       {openDialog === "cqWatchdog" && (
         <NumberInputDialog
           title="CQ Watchdog"
-          description="Stop calling CQ after this many unanswered cycles (~15s each) with nobody replying. 0 = unlimited -- required for unattended/robot operation."
+          description="Stop calling CQ after this many unanswered cycles (~15s each) with nobody replying. Never unlimited -- a control operator must be present, not an unattended bot."
           value={cqWatchdog}
-          min={0}
+          min={1}
           max={200}
           onSave={(v) => {
             setCqWatchdog(v);
