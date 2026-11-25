@@ -32,7 +32,13 @@ const DECODE_TIER_OPTIONS: { value: DecodeTier; label: string }[] = [
  *   different, scattered times across many components with no central
  *   "re-hydrate everything" hook, so this honestly tells the operator to
  *   restart instead of pretending a live re-apply that isn't actually
- *   wired everywhere.
+ *   wired everywhere. The "Include sensitive data" checkbox's own on/off
+ *   choice is itself remembered now (`settingsBackupIncludeSensitive`) --
+ *   a genuine desktop-only enhancement beyond what Android does (its
+ *   equivalent checkbox is plain unpersisted Compose state, reset every
+ *   time that screen reopens) -- requested directly after an export/
+ *   import between two machines "lost" QRZ credentials that were never
+ *   actually in the file because this box was left unchecked.
  * - **Decode Depth**: real, now a Fast/Balanced/Deep 3-way picker matching
  *   Android's own labels. The underlying mechanism is still just one
  *   boolean (`decodeDeep`/`Decoder::set_deep` -- more LDPC iterations + a
@@ -139,7 +145,24 @@ export function AdvancedSettings({
     });
     api.getConfig("pttDelay").then((v) => setPttDelay(v ? parseInt(v, 10) || 100 : 100));
     api.getConfig("lateStartTolerance").then((v) => setLateStartTolerance(v ? parseInt(v, 10) || 0 : 0));
+    // Remembered across sessions -- a genuine desktop-only enhancement,
+    // not a port: Android's own equivalent checkbox is plain unpersisted
+    // Compose state (`remember { mutableStateOf(false) }`), reset every
+    // time that screen reopens, same as this used to be here. Requested
+    // directly: the checkbox's own on/off choice is itself a setting, so
+    // it should survive like any other rather than silently resetting to
+    // off every time (confirmed live: exporting without checking it
+    // first, then importing on another machine, "lost" the QRZ
+    // credentials that were never actually in the file -- expected given
+    // the deliberate sensitive-key exclusion, but the operator's own
+    // checkbox preference is still worth remembering for next time).
+    api.getConfig("settingsBackupIncludeSensitive").then((v) => setIncludeSensitive(v === "1"));
   }, []);
+
+  function setIncludeSensitiveAndPersist(v: boolean) {
+    setIncludeSensitive(v);
+    api.setConfig("settingsBackupIncludeSensitive", v ? "1" : "0");
+  }
 
   function setDecodeTier(tier: DecodeTier) {
     setDecodeTierState(tier);
@@ -284,7 +307,7 @@ export function AdvancedSettings({
                 <input
                   type="checkbox"
                   checked={includeSensitive}
-                  onChange={(e) => setIncludeSensitive(e.target.checked)}
+                  onChange={(e) => setIncludeSensitiveAndPersist(e.target.checked)}
                   style={{ width: "auto" }}
                 />
                 Include sensitive data
