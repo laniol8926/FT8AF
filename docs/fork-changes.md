@@ -1252,6 +1252,34 @@ for the Hamlib version workaround needed there.
   implementation (unlike the Fortran-backed WSJT-X modes) or still
   Fortran/C-dependent underneath.
 
+- **Deep decode tier now really does subtract-and-redecode, 2026-11-25.**
+  Settings -> Advanced's Decode Depth picker's Balanced and Deep tiers
+  were identical in effect (both just turned on more LDPC iterations);
+  Deep now also runs the real successive-interference-cancellation loop
+  Android's own Deep tier runs (`FT8SignalListener.java`), wiring up a
+  C implementation (`ft8af_glue/ft8_subtract.c`) that was already
+  compiled into Android and built with desktop FFI reuse in mind, but
+  until now not compiled into desktop's build at all. Algorithm
+  (confirmed identical between Android and the host `decode_bench.c`):
+  decode the slot, subtract every hit found so far out of the sample
+  buffer (coherent time-domain subtraction -- a complex-gain estimate
+  via a moving-average `samples * conj(reference)` filter, matching
+  WSJT-X's own "subtractft8" approach), fully rebuild the decoder's STFT
+  over the residual from scratch, redecode, repeat until a pass finds
+  nothing new or a budget (`max(2500ms, cycle_ms * 0.75)`, mirroring
+  Android's own `DeepDecodeBudget`) or a 16-loop hard cap is hit. New
+  `EngineCommand::SetDeepDecodeSic`, additive and separate from the
+  existing LDPC/OSD toggle so Balanced's existing behavior is untouched.
+  Deliberately did **not** replicate Android's early/late dual-buffer
+  decode threading (`LateDecode.java`) -- that solves an Android-specific
+  fast-TX-turnaround problem; desktop decodes once per slot, so the loop
+  just runs once, inline, inside the existing long-lived decoder thread.
+  New regression test (`dsp/decoder.rs`) ports `test_subtract.c`'s own
+  calibrated "masked same-frequency signal" fixture (a weak signal 2 Hz
+  under a strong one, 10 dB down, overlapping in time) end-to-end through
+  the real Rust decode path -- confirmed it's genuinely masked before
+  subtraction and genuinely recovered after, on the first run.
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now

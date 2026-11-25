@@ -459,6 +459,11 @@ pub enum EngineCommand {
     /// `switch_mode` already uses) since there's no live mid-stream config
     /// channel into it.
     SetDecodeDepth(bool),
+    /// Settings -> Advanced's "Deep" tier specifically -- the subtract-
+    /// and-redecode loop (see `spawn_decoder_thread`'s doc comment),
+    /// separate from `SetDecodeDepth`'s LDPC/OSD setting (Balanced sets
+    /// that alone, Deep sets both). Same respawn mechanism.
+    SetDeepDecodeSic(bool),
     SetStation { call: String, grid: String },
     SetBand(u64),
     SetBaseFreq(i32),
@@ -886,6 +891,11 @@ struct Engine {
     /// (mode switch or `EngineCommand::SetDecodeDepth`), same as `mode`
     /// itself -- the decoder thread has no live mid-stream config channel.
     decode_deep: bool,
+    /// The "Deep" decode tier specifically (subtract-and-redecode),
+    /// separate from `decode_deep`'s LDPC/OSD setting -- see
+    /// `EngineCommand::SetDeepDecodeSic`'s doc comment. Same respawn-only
+    /// semantics as `decode_deep`.
+    deep_decode_sic: bool,
     dial_hz: u64,
     tx_audio_hz: i32,
     /// TX output level (0.0–1.0) applied to the waveform before playback.
@@ -1118,14 +1128,66 @@ fn should_refresh_ptt(
         && since_last_on.map_or(true, |d| d >= PTT_KEEPALIVE_INTERVAL)
 }
 
+/// Time budget for the "Deep" tier's subtract-and-redecode (successive
+/// interference cancellation) loop -- its OWN elapsed time from the
+/// loop's start, not the whole decode. Mirrors Android's
+/// `ModeProfile.deepDecodeBudgetMillis`/`DeepDecodeBudget` exactly: scales
+/// with the slot (0.75x) rather than a flat constant, so FT8's full 15s
+/// cycle gets real budget while FT2's 3.75s one doesn't starve the
+/// fastest mode, with a floor keeping even that one useful.
+fn sic_budget_ms(cycle_ms: i64) -> u64 {
+    (cycle_ms * 3 / 4).max(2500) as u64
+}
+
+/// Hard backstop independent of the time budget -- matches the host
+/// `decode_bench.c`'s own `g_max_loops` (16): a slow device's budget
+/// check alone could in principle let an unbounded number of passes
+/// squeeze in if each one happens to run fast, so this caps iterations
+/// outright too.
+const SIC_MAX_LOOPS: u32 = 16;
+
+/// Whether the SIC loop has run longer than its own budget and should
+/// stop. `elapsed_ms` is the loop's own elapsed time (`loop_start.
+/// elapsed()`), never the whole decode's.
+fn sic_loop_exhausted(elapsed_ms: u64, budget_ms: u64) -> bool {
+    elapsed_ms > budget_ms
+}
+
+/// Filter a SIC pass's decodes down to the ones genuinely new this slot
+/// (not already found -- and about to be re-subtracted -- in an earlier
+/// pass), updating `seen` in place. Mirrors `Decoder::decode_all`'s own
+/// dedup rule: a blank `raw_text` (unrenderable content) is never
+/// deduped, only non-blank text is, by content.
+fn sic_dedup_pass(
+    seen: &mut std::collections::HashSet<String>,
+    pass: Vec<DecodedMessage>,
+) -> Vec<DecodedMessage> {
+    pass.into_iter()
+        .filter(|m| m.raw_text.is_empty() || seen.insert(m.raw_text.clone()))
+        .collect()
+}
+
 /// Spawn the decode worker: owns the (!Send) `Decoder` on its own thread so
 /// the heavy per-slot DSP never blocks the engine loop (which drives the live
 /// waterfall + UTC clock). Fed slot audio over the returned sender; decodes
 /// come back over the returned receiver. `protocol` selects the decode
 /// protocol (`Mode::ffi_protocol()`) -- called once from `Engine::new` and
 /// again from `switch_mode` whenever the operating mode changes, since a
-/// `Decoder` is built for one protocol for its whole lifetime.
-fn spawn_decoder_thread(protocol: std::os::raw::c_int, deep: bool) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
+/// `Decoder` is built for one protocol for its whole lifetime. `sic`
+/// (the "Deep" tier specifically, separate from `deep`'s LDPC/OSD
+/// setting) runs the subtract-and-redecode loop below after the normal
+/// decode -- the real algorithm already proven on Android
+/// (`FT8SignalListener.java`) and the host `decode_bench.c`: subtract
+/// EVERY hit from the previous pass, rebuild the STFT over the residual
+/// from scratch (`feed_slot` already does this), redecode once, repeat
+/// until a pass finds nothing new or the budget/loop cap is hit.
+/// `cycle_ms` feeds `sic_budget_ms`.
+fn spawn_decoder_thread(
+    protocol: std::os::raw::c_int,
+    deep: bool,
+    sic: bool,
+    cycle_ms: i64,
+) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
     let (slot_tx, slot_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let (dec_tx, dec_rx) = std::sync::mpsc::channel::<Vec<DecodedMessage>>();
     std::thread::Builder::new()
@@ -1133,7 +1195,8 @@ fn spawn_decoder_thread(protocol: std::os::raw::c_int, deep: bool) -> (Sender<Ve
         .spawn(move || {
             let mut decoder = Decoder::new(SAMPLE_RATE, protocol);
             decoder.set_deep(deep);
-            while let Ok(slot) = slot_rx.recv() {
+            let budget_ms = sic_budget_ms(cycle_ms);
+            while let Ok(mut slot) = slot_rx.recv() {
                 // A panic anywhere in here must not silently drop this
                 // slot's result: `self.pending_decode_slots` (engine.rs)
                 // already queued this slot's id the instant it was sent,
@@ -1152,10 +1215,35 @@ fn spawn_decoder_thread(protocol: std::os::raw::c_int, deep: bool) -> (Sender<Ve
                 // session the first time it happens (`slot_rx` drops,
                 // every future `slot_tx.send` fails silently) -- a real
                 // robustness gap on its own regardless of that report.
+                // This same guard now also covers the SIC loop below, for
+                // the identical reason.
                 let msgs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     decoder.feed_slot(&slot);
                     let n = decoder.find_sync();
-                    if n > 0 { decoder.decode_all() } else { Vec::new() }
+                    let mut all = if n > 0 { decoder.decode_all() } else { Vec::new() };
+
+                    if sic && !all.is_empty() {
+                        let loop_start = std::time::Instant::now();
+                        let mut seen: std::collections::HashSet<String> =
+                            all.iter().map(|m| m.raw_text.clone()).collect();
+                        let mut to_subtract = all.clone();
+                        let mut loops = 0u32;
+                        while !to_subtract.is_empty()
+                            && loops < SIC_MAX_LOOPS
+                            && !sic_loop_exhausted(loop_start.elapsed().as_millis() as u64, budget_ms)
+                        {
+                            loops += 1;
+                            for m in &to_subtract {
+                                decoder.subtract(&mut slot, m, SAMPLE_RATE);
+                            }
+                            decoder.feed_slot(&slot);
+                            let n = decoder.find_sync();
+                            let pass = if n > 0 { decoder.decode_all() } else { Vec::new() };
+                            to_subtract = sic_dedup_pass(&mut seen, pass);
+                            all.extend(to_subtract.iter().cloned());
+                        }
+                    }
+                    all
                 }))
                 .unwrap_or_default();
                 let _ = dec_tx.send(msgs);
@@ -1223,6 +1311,14 @@ impl Engine {
         // distinction, no separate BALANCED tier, so reusing Android's 3-
         // value encoding would be a false equivalence.
         let decode_deep = db.get_config("decodeDeep").as_deref() == Some("1");
+        // Settings -> Advanced's "Deep" tier specifically (subtract-and-
+        // redecode, see `spawn_decoder_thread`'s doc comment) -- a
+        // separate knob from `decode_deep` above: Balanced sets
+        // `decode_deep` alone, Deep sets both. Desktop-only key name (no
+        // Android config key to match -- Android bundles this into its
+        // own single `decodeDepthTier` 0/1/2 value instead of a second
+        // flag).
+        let deep_decode_sic = db.get_config("deepDecodeSic").as_deref() == Some("1");
         let mut qso = QsoEngine::new(my_call, my_grid);
         qso.band = bands::band_for_freq_hz(dial_hz).to_string();
         qso.freq_mhz = bands::freq_mhz_string(dial_hz);
@@ -1343,7 +1439,8 @@ impl Engine {
             .map(tx_protection::clamp_late_start_tolerance_ms)
             .unwrap_or(0);
 
-        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol(), decode_deep);
+        let (slot_tx, dec_rx) =
+            spawn_decoder_thread(mode.ffi_protocol(), decode_deep, deep_decode_sic, mode.cycle_ms());
 
         let psk_sender = PskReporterSender::new();
         {
@@ -1364,6 +1461,7 @@ impl Engine {
         let engine = Engine {
             db,
             decode_deep,
+            deep_decode_sic,
             evt,
             accum: Arc::new(SlotAccumulator::new()),
             slot_tx,
@@ -2206,7 +2304,12 @@ impl Engine {
         self.qso.stop();
         self.tx_parity = None;
 
-        let (slot_tx, dec_rx) = spawn_decoder_thread(mode.ffi_protocol(), self.decode_deep);
+        let (slot_tx, dec_rx) = spawn_decoder_thread(
+            mode.ffi_protocol(),
+            self.decode_deep,
+            self.deep_decode_sic,
+            mode.cycle_ms(),
+        );
         self.slot_tx = slot_tx;
         self.dec_rx = dec_rx;
 
@@ -2969,7 +3072,24 @@ impl Engine {
             EngineCommand::SetDecodeDepth(deep) => {
                 self.decode_deep = deep;
                 let _ = self.db.set_config("decodeDeep", if deep { "1" } else { "0" });
-                let (slot_tx, dec_rx) = spawn_decoder_thread(self.mode.ffi_protocol(), deep);
+                let (slot_tx, dec_rx) = spawn_decoder_thread(
+                    self.mode.ffi_protocol(),
+                    deep,
+                    self.deep_decode_sic,
+                    self.mode.cycle_ms(),
+                );
+                self.slot_tx = slot_tx;
+                self.dec_rx = dec_rx;
+            }
+            EngineCommand::SetDeepDecodeSic(sic) => {
+                self.deep_decode_sic = sic;
+                let _ = self.db.set_config("deepDecodeSic", if sic { "1" } else { "0" });
+                let (slot_tx, dec_rx) = spawn_decoder_thread(
+                    self.mode.ffi_protocol(),
+                    self.decode_deep,
+                    sic,
+                    self.mode.cycle_ms(),
+                );
                 self.slot_tx = slot_tx;
                 self.dec_rx = dec_rx;
             }
@@ -3395,9 +3515,10 @@ mod tests {
     use super::{
         clamp_rx_gain, clamp_tx_gain, effective_tune_gain, format_watts, reply_tx_audio_hz, rms_dbfs,
         should_default_qmx_cat_tones_on, should_refresh_ptt, resolve_tx_audio_channel,
-        waterfall_row_due, wf_boundary_row, AnswerArgs, CatToneTx, Engine, EngineCommand, EngineEvent,
-        TuneHandle, CLIP_PEAK, DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS,
-        MAX_TX_AUDIO_HZ, MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
+        sic_budget_ms, sic_dedup_pass, sic_loop_exhausted, waterfall_row_due, wf_boundary_row,
+        AnswerArgs, CatToneTx, Engine, EngineCommand, EngineEvent, TuneHandle, CLIP_PEAK,
+        DEFAULT_RX_GAIN, DEFAULT_TX_GAIN, HIGH_PEAK_DBFS, LOW_RMS_DBFS, MAX_TX_AUDIO_HZ,
+        MIN_TX_AUDIO_HZ, PTT_KEEPALIVE_INTERVAL, SILENCE_DBFS,
     };
     use crate::audio::channel_select;
     use crate::db::Db;
@@ -3408,6 +3529,51 @@ mod tests {
     use crate::rig::{RigBackend, QRPLABS_QMX_HAMLIB_MODEL};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn sic_budget_scales_with_the_cycle_but_floors_at_2500ms() {
+        // FT8's full 15s cycle: 0.75x, well above the floor.
+        assert_eq!(sic_budget_ms(15_000), 11_250);
+        // FT2's 3.75s cycle: 0.75x alone would be 2812ms, still above the
+        // floor -- the floor exists for even shorter/pathological inputs.
+        assert_eq!(sic_budget_ms(3_750), 2_812);
+        assert_eq!(sic_budget_ms(1_000), 2_500);
+        assert_eq!(sic_budget_ms(0), 2_500);
+    }
+
+    #[test]
+    fn sic_loop_exhausted_is_a_strict_over_budget_check() {
+        assert!(!sic_loop_exhausted(2_500, 2_500), "exactly at budget is not yet exhausted");
+        assert!(sic_loop_exhausted(2_501, 2_500), "one ms over budget is exhausted");
+        assert!(!sic_loop_exhausted(0, 2_500));
+    }
+
+    #[test]
+    fn sic_dedup_pass_drops_a_message_already_seen_in_an_earlier_pass() {
+        let mut seen: std::collections::HashSet<String> =
+            ["CQ K1ABC FN42".to_string()].into_iter().collect();
+        let pass = vec![
+            DecodedMessage { raw_text: "CQ K1ABC FN42".into(), ..Default::default() },
+            DecodedMessage { raw_text: "CQ W9XYZ EN37".into(), ..Default::default() },
+        ];
+        let new = sic_dedup_pass(&mut seen, pass);
+        assert_eq!(new.len(), 1, "the already-seen message must be dropped");
+        assert_eq!(new[0].raw_text, "CQ W9XYZ EN37");
+        assert!(seen.contains("CQ W9XYZ EN37"), "the new message is now tracked too");
+    }
+
+    #[test]
+    fn sic_dedup_pass_never_dedupes_blank_raw_text_messages() {
+        // Mirrors `Decoder::decode_all`'s own permissive rule: unrenderable
+        // content (blank raw_text) is always treated as new.
+        let mut seen = std::collections::HashSet::new();
+        let pass = vec![
+            DecodedMessage { raw_text: String::new(), ..Default::default() },
+            DecodedMessage { raw_text: String::new(), ..Default::default() },
+        ];
+        let new = sic_dedup_pass(&mut seen, pass);
+        assert_eq!(new.len(), 2, "blank raw_text messages are never collapsed together");
+    }
 
     #[test]
     fn tx_audio_channel_auto_detects_left_for_a_qmx_when_unset() {

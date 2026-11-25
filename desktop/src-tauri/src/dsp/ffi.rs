@@ -174,4 +174,19 @@ extern "C" {
         signal: *mut f32,
         offset: c_int,
     );
+
+    // Coherent time-domain subtraction (ft8af_glue/ft8_subtract.h) -- the
+    // "Deep" decode tier's subtract-and-redecode loop. `samples` is
+    // modified in place; `mon` is read-only (its STFT geometry only).
+    // `a91` is the 12-byte payload+CRC block (CRC bits cleared
+    // internally) -- only the 77 payload bits are used.
+    pub fn ft8_subtract_signal_time(
+        mon: *const monitor_t,
+        samples: *mut f32,
+        num_samples: c_int,
+        sample_rate: c_int,
+        a91: *const u8,
+        freq_hz: f32,
+        time_sec: f32,
+    ) -> bool;
 }

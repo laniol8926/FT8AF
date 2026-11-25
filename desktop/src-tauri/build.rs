@@ -66,6 +66,12 @@ fn main() {
     }
     // FT8CN glue: GFSK waveform synthesis with the trailing `offset` param.
     build.file(glue.join("gfsk.c"));
+    // Coherent time-domain signal subtraction (successive interference
+    // cancellation) for the "Deep" decode tier's subtract-and-redecode
+    // loop -- already shipped on Android, newly wired up on desktop (see
+    // engine.rs's decoder thread). Depends on gfsk.c's
+    // synth_gfsk_dphi_alloc, already compiled above.
+    build.file(glue.join("ft8_subtract.c"));
 
     // MSVC needs _USE_MATH_DEFINES for M_PI; silence CRT string warnings.
     build.define("_USE_MATH_DEFINES", None);

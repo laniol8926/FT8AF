@@ -172,6 +172,13 @@ fn set_decode_depth(state: State<AppState>, deep: bool) {
     state.engine.send(EngineCommand::SetDecodeDepth(deep));
 }
 
+/// Settings -> Advanced's "Deep" tier specifically -- the subtract-and-
+/// redecode loop, separate from `set_decode_depth`'s LDPC/OSD setting.
+#[tauri::command]
+fn set_deep_decode_sic(state: State<AppState>, sic: bool) {
+    state.engine.send(EngineCommand::SetDeepDecodeSic(sic));
+}
+
 #[tauri::command]
 fn set_tx_audio_channel(state: State<AppState>, channel: i32) {
     state.engine.send(EngineCommand::SetTxAudioChannel(channel));
@@ -1381,6 +1388,7 @@ fn main() {
             set_output_device,
             set_rx_audio_channel,
             set_decode_depth,
+            set_deep_decode_sic,
             set_tx_audio_channel,
             set_qmx_cat_tones,
             select_rig,

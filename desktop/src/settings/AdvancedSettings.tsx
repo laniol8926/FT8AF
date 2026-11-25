@@ -39,22 +39,26 @@ const DECODE_TIER_OPTIONS: { value: DecodeTier; label: string }[] = [
  *   time that screen reopens) -- requested directly after an export/
  *   import between two machines "lost" QRZ credentials that were never
  *   actually in the file because this box was left unchecked.
- * - **Decode Depth**: real, now a Fast/Balanced/Deep 3-way picker matching
- *   Android's own labels. The underlying mechanism is still just one
- *   boolean (`decodeDeep`/`Decoder::set_deep` -- more LDPC iterations + a
- *   lower sync threshold), stored under its own pre-existing key; a new,
+ * - **Decode Depth**: real, a Fast/Balanced/Deep 3-way picker matching
+ *   Android's own labels, and now with Android's own real DISTINCTION
+ *   between Balanced and Deep too (previously disclosed as identical --
+ *   see git history). Two independent knobs: `decodeDeep`/`Decoder::
+ *   set_deep` (more LDPC iterations + a lower sync threshold -- Balanced
+ *   and Deep both set this) and `deepDecodeSic` (the real subtract-and-
+ *   redecode loop -- successive interference cancellation: strip each
+ *   decoded signal from the slot's audio and redecode the residual to
+ *   dig out a weaker/overlapping one -- Deep only). The underlying C
+ *   implementation (`ft8af_glue/ft8_subtract.c`) was already shipped on
+ *   Android; this wires the same proven algorithm into desktop's decoder
+ *   thread (see `engine.rs`'s `spawn_decoder_thread` doc comment). A
  *   separate `decodeDepthTier` key remembers which *label* the operator
- *   picked (Balanced vs. Deep), since the boolean alone can't distinguish
- *   them. Balanced and Deep are honestly disclosed as currently identical
- *   in effect -- Android's real Deep tier adds a subtract-and-redecode
- *   second pass (dig a weaker signal out from under a stronger one on the
- *   same frequency) that doesn't exist in this decoder at all; building
- *   that is real new DSP/FFI work, not a Settings relabel, and is left for
- *   a future pass rather than faked. An install from before this 3-tier
- *   picker existed (tier key unset) migrates its old boolean 1:1 onto the
- *   label that preserves its prior meaning (off -> Fast, on -> Deep, not
- *   Balanced -- "Deep Decode" was the only on-state that setting's name
- *   ever had).
+ *   picked, since the two booleans alone don't carry a label. An install
+ *   from before this 3-tier picker existed (tier key unset) migrates its
+ *   old boolean 1:1 onto the label that preserves its prior meaning
+ *   (off -> Fast, on -> Deep, not Balanced -- "Deep Decode" was the only
+ *   on-state that setting's name ever had); the migration predates
+ *   `deepDecodeSic` existing at all, so it defaults to off regardless
+ *   until the operator explicitly picks Deep again.
  * - **PTT Delay / Late-start Tolerance**: real. Checked carefully against
  *   this project's own `AGENTS.md` (which documents two real historical
  *   TX-timing bugs from exactly this class of calculation) before
@@ -167,11 +171,12 @@ export function AdvancedSettings({
   function setDecodeTier(tier: DecodeTier) {
     setDecodeTierState(tier);
     api.setConfig("decodeDepthTier", tier);
-    // Balanced and Deep currently behave identically (see this row's own
-    // description) -- both just mean "the existing deep-decode boolean is
-    // on".
+    // Balanced and Deep both turn on the LDPC/OSD deep-decode boolean;
+    // Deep alone also turns on the subtract-and-redecode loop (see this
+    // row's own description).
     onDecodeDeep(tier !== "fast");
     api.setDecodeDepth(tier !== "fast");
+    api.setDeepDecodeSic(tier === "deep");
   }
 
   async function doExport() {

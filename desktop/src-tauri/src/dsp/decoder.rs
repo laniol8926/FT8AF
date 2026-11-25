@@ -171,6 +171,29 @@ impl Decoder {
         out
     }
 
+    /// Coherent time-domain subtraction of an already-decoded message from
+    /// `samples` (modified in place) -- the "Deep" tier's subtract-and-
+    /// redecode loop (see `engine.rs`'s decoder-thread loop). `&self.mon`
+    /// is read-only here (its STFT geometry only, per
+    /// `ft8_subtract_signal_time`'s own contract) -- the caller must
+    /// `feed_slot` the modified buffer back through before the next
+    /// `find_sync`/`decode_all` pass to rebuild the STFT from the
+    /// residual. Returns `false` on degenerate input (samples then
+    /// unchanged) -- matches the native function's own contract exactly.
+    pub fn subtract(&self, samples: &mut [f32], msg: &DecodedMessage, sample_rate: i32) -> bool {
+        unsafe {
+            ffi::ft8_subtract_signal_time(
+                &self.mon,
+                samples.as_mut_ptr(),
+                samples.len() as i32,
+                sample_rate,
+                msg.a91.as_ptr(),
+                msg.freq_hz,
+                msg.time_sec,
+            )
+        }
+    }
+
     /// Downsample the monitor's waterfall magnitudes (populated by the last
     /// `feed_slot`) into a `rows x cols` heatmap of 0..=255 values for display.
     /// Returns (bins, rows, cols, hz_per_col).
@@ -318,4 +341,112 @@ fn looks_like_grid(s: &str) -> bool {
         && (b'A'..=b'R').contains(&b[1])
         && b[2].is_ascii_digit()
         && b[3].is_ascii_digit()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsp::encode::generate_signal;
+    use crate::dsp::SAMPLE_RATE;
+    use crate::mode::Mode;
+
+    const NSAMPLES: usize = (SAMPLE_RATE as usize) * 15;
+
+    /// Deterministic uniform noise in [-amp, amp] -- same LCG shape as
+    /// `ft8af_glue/test_subtract.c`'s own `add_noise` (exact bit-for-bit
+    /// reproduction isn't the point; a repeatable, non-degenerate noise
+    /// floor is).
+    fn add_noise(buf: &mut [f32], amp: f32, seed: u32) {
+        let mut s = seed;
+        for x in buf.iter_mut() {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *x += amp * (2.0 * ((s >> 8) & 0xFFFF) as f32 / 65535.0 - 1.0);
+        }
+    }
+
+    /// Encode `text` and mix its GFSK waveform into `buf` at (f0, dt, amp).
+    fn add_message(buf: &mut [f32], text: &str, f0: f32, dt: f32, amp: f32) {
+        let wave = generate_signal(text, f0, SAMPLE_RATE, Mode::Ft8).expect("text packs as a structured message");
+        let off = (dt * SAMPLE_RATE as f32).round() as isize;
+        for (i, &s) in wave.iter().enumerate() {
+            let j = off + i as isize;
+            if j >= 0 && (j as usize) < buf.len() {
+                buf[j as usize] += amp * s;
+            }
+        }
+    }
+
+    fn decode_slot(decoder: &mut Decoder, samples: &[f32]) -> Vec<DecodedMessage> {
+        decoder.feed_slot(samples);
+        let n = decoder.find_sync();
+        if n > 0 { decoder.decode_all() } else { Vec::new() }
+    }
+
+    #[test]
+    fn subtract_recovers_a_weak_signal_masked_by_a_strong_one_at_nearly_the_same_frequency() {
+        // Direct port of `ft8af_glue/test_subtract.c`'s
+        // "test_td_same_freq_recovery" (property 6, the real reason the
+        // time-domain subtraction path exists over a waterfall-domain
+        // one): B sits 2 Hz above A -- deep inside every tone bin A
+        // occupies -- 10 dB weaker, and shifted 0.7s in time. No
+        // waterfall-domain trick can separate them; only coherent
+        // sample-domain subtraction can. This is the actual mechanism the
+        // "Deep" decode tier's subtract-and-redecode loop (`engine.rs`'s
+        // `spawn_decoder_thread`) exists to exploit.
+        let mut signal = vec![0.0f32; NSAMPLES];
+        add_noise(&mut signal, 0.02, 47);
+        add_message(&mut signal, "CQ K1ABC FN42", 1500.0, 0.2, 1.0);
+        add_message(&mut signal, "CQ W9XYZ EN37", 1502.0, 0.9, 0.3);
+
+        let mut decoder = Decoder::new(SAMPLE_RATE, Mode::Ft8.ffi_protocol());
+        decoder.set_deep(true);
+
+        let pass0 = decode_slot(&mut decoder, &signal);
+        let a = pass0.iter().find(|m| m.raw_text.contains("K1ABC"));
+        assert!(a.is_some(), "strong signal must decode in pass 1");
+        assert!(
+            !pass0.iter().any(|m| m.raw_text.contains("W9XYZ")),
+            "weak same-frequency signal must be masked in pass 1 (otherwise this test proves nothing)"
+        );
+        let a = a.unwrap().clone();
+
+        assert!(
+            decoder.subtract(&mut signal, &a, SAMPLE_RATE),
+            "subtraction must report success"
+        );
+
+        let pass1 = decode_slot(&mut decoder, &signal);
+        assert!(
+            pass1.iter().any(|m| m.raw_text.contains("W9XYZ")),
+            "masked same-frequency signal must be recovered after subtraction"
+        );
+        assert!(
+            !pass1.iter().any(|m| m.raw_text.contains("K1ABC")),
+            "the strong signal itself must be gone after being subtracted"
+        );
+    }
+
+    #[test]
+    fn subtract_leaves_a_neighbor_100hz_away_undamaged() {
+        // Port of test_subtract.c's "test_td_neighbor_survives": subtracting
+        // one signal must not collaterally damage an unrelated one well
+        // outside its own tone track.
+        let mut signal = vec![0.0f32; NSAMPLES];
+        add_noise(&mut signal, 0.02, 48);
+        add_message(&mut signal, "CQ K1ABC FN42", 1500.0, 0.5, 1.0);
+        add_message(&mut signal, "CQ W9XYZ EN37", 1600.0, 0.5, 0.5);
+
+        let mut decoder = Decoder::new(SAMPLE_RATE, Mode::Ft8.ffi_protocol());
+        decoder.set_deep(true);
+
+        let pass0 = decode_slot(&mut decoder, &signal);
+        let a = pass0.iter().find(|m| m.raw_text.contains("K1ABC"));
+        assert!(a.is_some() && pass0.iter().any(|m| m.raw_text.contains("W9XYZ")), "both decode initially");
+        let a = a.unwrap().clone();
+
+        decoder.subtract(&mut signal, &a, SAMPLE_RATE);
+        let pass1 = decode_slot(&mut decoder, &signal);
+        assert!(pass1.iter().any(|m| m.raw_text.contains("W9XYZ")), "neighbor still decodes after subtracting A");
+        assert!(!pass1.iter().any(|m| m.raw_text.contains("K1ABC")), "A itself is gone");
+    }
 }

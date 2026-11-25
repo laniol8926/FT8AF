@@ -511,6 +511,8 @@ export const api = {
     invoke<void>("apply_settings_backup", { config, followCallsigns }),
   /** Settings -> Advanced's "Decode Depth" toggle. */
   setDecodeDepth: (deep: boolean) => invoke("set_decode_depth", { deep }),
+  /** Settings -> Advanced's "Deep" tier specifically (subtract-and-redecode). */
+  setDeepDecodeSic: (sic: boolean) => invoke("set_deep_decode_sic", { sic }),
 
   /** Rows in the callsign/grid cache -- 0 means the FCC/Census seed hasn't run yet. */
   callsignQthCount: () => invoke<number>("callsign_qth_count"),
