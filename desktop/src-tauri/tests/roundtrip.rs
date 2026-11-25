@@ -97,8 +97,8 @@ fn directional_cq_modifier_does_not_leak_into_call_from_or_grid() {
     payload[3] = (((n29a_new & 0x1F) << 3) as u8) | (real[3] & 0x07);
 
     let msg = ffi::ftx_message_t { payload, hash: 0 };
-    let mut table = Box::new(hashtable::HashTable::new());
-    let table_ptr: *mut hashtable::HashTable = &mut *table;
+    let table = parking_lot::Mutex::new(hashtable::HashTable::new());
+    let table_ptr: *const parking_lot::Mutex<hashtable::HashTable> = &table;
     // SAFETY: `table` outlives the guard and the decode_std call below.
     let _guard = unsafe { hashtable::HashGuard::new(table_ptr) };
     let mut iface = hashtable::interface();
