@@ -10,6 +10,24 @@ export, rig control (**Hamlib** embedded library, **FLrig** XML-RPC, or a
 safety-hardened direct Xiegu G106 CI-V profile), audio device selection, and a
 waterfall. Deferred: map, POTA, QRZ photos, Bluetooth, PSKReporter upload.
 
+### Project history and current scope
+
+The initial goal was straightforward: give the Android app a desktop
+counterpart with the same appearance and functionality. Along the way the
+scope grew well past that MVP — logging/awards uploads (LoTW, QRZ, Cloudlog,
+Club Log, HRDLog, eQSL, WRL, HamQTH), a map tracker with callsign/grid
+lookups, Call CQ/Answer CQ sequencing, and real decode-sensitivity and
+performance work (a ported OSD decoder, "MyCall known" a priori decoding,
+subtract-and-redecode for overlapping signals, and candidate-level decode
+parallelism across CPU cores) — alongside a number of real software bugs found
+and fixed live along the way. The full, dated history of all of this is in
+[`docs/fork-changes.md`](../docs/fork-changes.md).
+
+**Testing scope:** live, on-air testing so far has been against a **QRP Labs
+QMX** transceiver only. Other rigs go through Hamlib's own wide model support
+(see "Rig control: Hamlib" below) and should work, but haven't been verified
+against real hardware the way the QMX path has.
+
 ## Layout
 
 ```
