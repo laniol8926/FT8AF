@@ -1322,9 +1322,20 @@ for the Hamlib version workaround needed there.
   separately on every Windows machine the built MSI/EXE was deployed to.
   Fixed by also mirroring the DLLs into a stable `hamlib-dist/` dir next
   to `tauri.conf.json`, declared as a Windows-only bundle resource via
-  `tauri.windows.conf.json` (Tauri places declared resources next to the
-  installed exe on Windows -- the same location `load_hamlib()`'s DLL
-  search already checks first).
+  `tauri.windows.conf.json` (`$RESOURCES` on Windows is the exe's own
+  directory -- confirmed in `tauri-utils`' own `resource_dir` -- the same
+  place `load_hamlib()`'s bare-filename DLL search already checks first).
+
+  **Real-world follow-up, confirmed on an actual Windows install:** the
+  first version of this fix declared `resources` as a plain glob array
+  (`["hamlib-dist/*"]`), which per Tauri's own docs preserves each
+  matched file's relative directory component -- so the DLLs landed in
+  `<exe_dir>\hamlib-dist\`, a subfolder, not `<exe_dir>\` itself. Adding
+  `hamlib-dist` to `%PATH%` by hand made every rig (not just one) appear
+  in the picker, confirming Hamlib was failing to load at all, not just
+  missing QMX specifically. Fixed by switching to the *map* form of
+  `resources` (`{"hamlib-dist/*": "./"}`), which Tauri explicitly
+  documents as flattening instead of preserving structure.
 
 ## Smaller fixes
 

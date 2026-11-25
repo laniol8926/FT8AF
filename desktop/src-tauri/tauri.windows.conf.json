@@ -1,5 +1,7 @@
 {
   "bundle": {
-    "resources": ["hamlib-dist/*"]
+    "resources": {
+      "hamlib-dist/*": "./"
+    }
   }
 }
