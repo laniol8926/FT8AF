@@ -1280,6 +1280,38 @@ for the Hamlib version workaround needed there.
   the real Rust decode path -- confirmed it's genuinely masked before
   subtraction and genuinely recovered after, on the first run.
 
+- **"MyCall known" a priori (AP) decoding, 2026-11-25.** When a
+  candidate's blind decode fails, retries it once assuming the message is
+  addressed to us -- payload bits 0..28 (a standard message's call_to
+  field) forced to our own callsign's known encoding before BP runs.
+  WSJT-X's own documented technique (`a2` in its own UI), worth up to
+  ~4 dB of sensitivity specifically on replies addressed to the operator
+  -- a different, complementary gain to the SIC work above (SIC helps
+  overlapping signals, AP helps a single weak signal that's addressed to
+  you). New `message.c` export (`ftx_pack_call_ap_bits`) computes the 29
+  known bits from a callsign string alone (no live hash table needed);
+  new `decode.c` export (`ft8_decode_ap`) retries a candidate with those
+  bits forced, reusing the existing BP/CRC/unpack pipeline unchanged.
+  `Decoder::decode_all` only attempts this on candidates that already
+  failed blindly, so it costs nothing in the common case -- no new
+  Settings toggle needed, unlike Decode Depth. Decoder thread respawns on
+  a station-callsign change (`EngineCommand::SetStation`), same
+  mechanism Decode Depth/SIC already use.
+
+  **A real sign-convention bug was caught and fixed during testing, not
+  shipped.** `ldpc.c`'s own doc comment ("codeword[i] = log(P(0)/P(1))")
+  turned out to be stale and wrong -- directly contradicted by
+  `ft8_extract_symbol`'s own comment ("log(p(1)/p(0))") one function
+  away, which is what the real, working decode path has actually been
+  built on. The first implementation trusted the wrong comment, forcing
+  the 29 known bits backwards -- confirmed by a synthetic regression test
+  (hand-built, genuinely valid codewords via a newly-exposed `encode174`,
+  bypassing any audio/waterfall simulation) that even a *zero-corruption*
+  codeword failed to decode until the sign was flipped. Found before this
+  ever reached a real signal, but a reminder that a decoder's own
+  internal comments aren't automatically authoritative -- the function
+  that actually produces the real values in production is.
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now

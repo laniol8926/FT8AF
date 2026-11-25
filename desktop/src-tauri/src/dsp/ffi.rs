@@ -189,4 +189,32 @@ extern "C" {
         freq_hz: f32,
         time_sec: f32,
     ) -> bool;
+
+    // a priori (AP) decoding (message.h/decode.h) -- see Decoder::set_my_call.
+    pub fn ftx_pack_call_ap_bits(callsign: *const c_char, bits_out: *mut u8) -> bool;
+    pub fn ft8_decode_ap(
+        power: *const waterfall_t,
+        cand: *const candidate_t,
+        max_iterations: c_int,
+        osd_depth: c_int,
+        osd_err_gate: c_int,
+        ap_bits: *const u8,
+        message: *mut ftx_message_t,
+        status: *mut decode_status_t,
+    ) -> bool;
+
+    // Test-only reuse (encode.h/decode.h): build and decode a log174 array
+    // by hand, bypassing the waterfall entirely. See their own doc
+    // comments for the normalization-order contract.
+    pub fn encode174(message: *const u8, codeword: *mut u8);
+    pub fn ftx_normalize_logl(log174: *mut f32);
+    pub fn ftx_decode_normalized_llrs(
+        protocol: c_int,
+        log174: *mut f32,
+        max_iterations: c_int,
+        osd_depth: c_int,
+        osd_err_gate: c_int,
+        message: *mut ftx_message_t,
+        status: *mut decode_status_t,
+    ) -> bool;
 }

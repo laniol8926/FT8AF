@@ -34,6 +34,15 @@ void ft8_encode(const uint8_t* payload, uint8_t* tones);
 /// @param[out] tones  - array of FT4_NN (105) bytes to store the generated tones (encoded as 0..3)
 void ft4_encode(const uint8_t* payload, uint8_t* tones);
 
+/// Encode a 91-bit message (77-bit payload + 14-bit CRC, from ftx_add_crc)
+/// into its full 174-bit systematic LDPC codeword. Exposed (originally
+/// file-local) so tests can construct a genuine, valid codeword directly
+/// -- e.g. to build controlled, deterministic LLR arrays for exercising
+/// decode.c's BP/OSD/AP paths without a real waterfall at all.
+/// @param[in] message  - 91 bits stored as 12 bytes (MSB first)
+/// @param[out] codeword - 174 bits stored as 22 bytes (MSB first)
+void encode174(const uint8_t* message, uint8_t* codeword);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1262,6 +1262,25 @@ static int32_t pack28(const char* callsign, const ftx_callsign_hash_interface_t*
     return -1; // Error
 }
 
+bool ftx_pack_call_ap_bits(const char* callsign, uint8_t bits_out[29])
+{
+    uint8_t ip;
+    // hash_if = NULL: pack28's hash fallback (save_callsign) only uses it
+    // for the optional save_hash() side effect -- the returned token is a
+    // pure function of the string either way, so no live hash table is
+    // needed just to compute it.
+    int32_t n28 = pack28(callsign, NULL, &ip);
+    if (n28 < 0)
+        return false;
+
+    uint32_t n29 = ((uint32_t)n28 << 1) | ip;
+    for (int i = 0; i < 29; ++i)
+    {
+        bits_out[i] = (uint8_t)((n29 >> (28 - i)) & 1u);
+    }
+    return true;
+}
+
 static int unpack28(uint32_t n28, uint8_t ip, uint8_t i3, const ftx_callsign_hash_interface_t* hash_if, char* result)
 {
     LOG(LOG_DEBUG, "unpack28() n28=%d i3=%d\n", n28, i3);

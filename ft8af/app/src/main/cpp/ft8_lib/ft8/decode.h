@@ -86,6 +86,40 @@ bool ft8_decode_osd(const waterfall_t* power, const candidate_t* cand, int max_i
 bool ftx_decode_llrs(ftx_protocol_t protocol, const float* llrs, int max_iterations,
                      int osd_depth, int osd_err_gate, ftx_message_t* message, decode_status_t* status);
 
+/// Normalize a raw 174-entry log-likelihood array in place (scales it to
+/// an experimentally-chosen target variance). Exposed so a caller that
+/// wants to override specific bits with a priori information can
+/// normalize on genuine channel statistics FIRST and override after --
+/// doing it in the other order would let the overridden bits' extreme
+/// values skew the variance estimate this function computes across all
+/// 174 entries, under-scaling the real channel bits too.
+void ftx_normalize_logl(float* log174);
+
+/// Like ft8_decode_osd, but with a priori (AP) information: payload bits
+/// 0..28 (a standard message's call_to field) are forced to the given
+/// hypothesis before decoding, rather than taken from the channel. Useful
+/// when blind decode already failed and the message is plausibly
+/// addressed to a known callsign (see ftx_pack_call_ap_bits, message.h,
+/// for computing ap_bits). The existing CRC check is the safety net
+/// against a wrong hypothesis manufacturing a false decode -- forcing 29
+/// bits alone can't satisfy it on its own.
+bool ft8_decode_ap(const waterfall_t* power, const candidate_t* cand, int max_iterations,
+                   int osd_depth, int osd_err_gate, const uint8_t ap_bits[29],
+                   ftx_message_t* message, decode_status_t* status);
+
+/// The BP(+OSD)+CRC+unpack tail shared by ftx_decode_llrs and ft8_decode_ap,
+/// exposed for tests that need to construct a log174 array by hand (e.g.
+/// with controlled/deterministic bit errors, together with encode174 from
+/// encode.h to get a genuinely valid codeword) and decode it exactly like
+/// production code would, including an a priori override. CONTRACT:
+/// log174 must already be normalized (ftx_normalize_logl) before any a
+/// priori bits are overridden in it -- overriding first would skew the
+/// normalization's variance estimate across the other, genuine bits too.
+/// ftx_decode_llrs and ft8_decode_ap both already follow this; a test
+/// calling this directly must too.
+bool ftx_decode_normalized_llrs(ftx_protocol_t protocol, float* log174, int max_iterations,
+                                int osd_depth, int osd_err_gate, ftx_message_t* message, decode_status_t* status);
+
 #ifdef __cplusplus
 }
 #endif

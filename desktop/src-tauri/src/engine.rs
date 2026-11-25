@@ -1181,12 +1181,15 @@ fn sic_dedup_pass(
 /// EVERY hit from the previous pass, rebuild the STFT over the residual
 /// from scratch (`feed_slot` already does this), redecode once, repeat
 /// until a pass finds nothing new or the budget/loop cap is hit.
-/// `cycle_ms` feeds `sic_budget_ms`.
+/// `cycle_ms` feeds `sic_budget_ms`. `my_call` seeds "MyCall known" a
+/// priori decoding (`Decoder::set_my_call`) -- respawn on a callsign
+/// change too (`EngineCommand::SetStation`), same as any other field here.
 fn spawn_decoder_thread(
     protocol: std::os::raw::c_int,
     deep: bool,
     sic: bool,
     cycle_ms: i64,
+    my_call: String,
 ) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
     let (slot_tx, slot_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let (dec_tx, dec_rx) = std::sync::mpsc::channel::<Vec<DecodedMessage>>();
@@ -1195,6 +1198,12 @@ fn spawn_decoder_thread(
         .spawn(move || {
             let mut decoder = Decoder::new(SAMPLE_RATE, protocol);
             decoder.set_deep(deep);
+            // "MyCall known" a priori decoding (see Decoder::set_my_call):
+            // retries a candidate whose blind decode failed assuming it's
+            // addressed to us. Set once at thread start; a later callsign
+            // change (EngineCommand::SetStation) respawns this thread the
+            // same way a Decode Depth change does.
+            decoder.set_my_call(&my_call);
             let budget_ms = sic_budget_ms(cycle_ms);
             while let Ok(mut slot) = slot_rx.recv() {
                 // A panic anywhere in here must not silently drop this
@@ -1439,8 +1448,13 @@ impl Engine {
             .map(tx_protection::clamp_late_start_tolerance_ms)
             .unwrap_or(0);
 
-        let (slot_tx, dec_rx) =
-            spawn_decoder_thread(mode.ffi_protocol(), decode_deep, deep_decode_sic, mode.cycle_ms());
+        let (slot_tx, dec_rx) = spawn_decoder_thread(
+            mode.ffi_protocol(),
+            decode_deep,
+            deep_decode_sic,
+            mode.cycle_ms(),
+            qso.my_call.clone(),
+        );
 
         let psk_sender = PskReporterSender::new();
         {
@@ -2309,6 +2323,7 @@ impl Engine {
             self.decode_deep,
             self.deep_decode_sic,
             mode.cycle_ms(),
+            self.qso.my_call.clone(),
         );
         self.slot_tx = slot_tx;
         self.dec_rx = dec_rx;
@@ -3077,6 +3092,7 @@ impl Engine {
                     deep,
                     self.deep_decode_sic,
                     self.mode.cycle_ms(),
+                    self.qso.my_call.clone(),
                 );
                 self.slot_tx = slot_tx;
                 self.dec_rx = dec_rx;
@@ -3089,6 +3105,7 @@ impl Engine {
                     self.decode_deep,
                     sic,
                     self.mode.cycle_ms(),
+                    self.qso.my_call.clone(),
                 );
                 self.slot_tx = slot_tx;
                 self.dec_rx = dec_rx;
@@ -3103,10 +3120,28 @@ impl Engine {
                 // on restart, QsoEngine::new re-derives the same truncation
                 // from this same full-precision config value.
                 let grid_full = grid.to_uppercase();
-                self.qso.my_call = call.to_uppercase();
+                let new_call = call.to_uppercase();
+                let call_changed = new_call != self.qso.my_call;
+                self.qso.my_call = new_call;
                 self.qso.my_grid = util::grid4(&grid_full);
                 let _ = self.db.set_config("my_call", &self.qso.my_call);
                 let _ = self.db.set_config("my_grid", &grid_full);
+                if call_changed {
+                    // The decoder thread cached our callsign's a priori
+                    // ("MyCall known") encoding at spawn time (see
+                    // `spawn_decoder_thread`'s doc comment) -- respawn so
+                    // it picks up the new one, same mechanism a Decode
+                    // Depth change already uses.
+                    let (slot_tx, dec_rx) = spawn_decoder_thread(
+                        self.mode.ffi_protocol(),
+                        self.decode_deep,
+                        self.deep_decode_sic,
+                        self.mode.cycle_ms(),
+                        self.qso.my_call.clone(),
+                    );
+                    self.slot_tx = slot_tx;
+                    self.dec_rx = dec_rx;
+                }
             }
             EngineCommand::SetBand(hz) => {
                 self.dial_hz = hz;

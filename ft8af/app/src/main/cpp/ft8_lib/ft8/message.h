@@ -102,6 +102,16 @@ ftx_message_rc_t ftx_message_encode_std(ftx_message_t* msg, ftx_callsign_hash_in
 /// Pack Type 4 (One nonstandard call and one hashed call) message
 ftx_message_rc_t ftx_message_encode_nonstd(ftx_message_t* msg, ftx_callsign_hash_interface_t* hash_if, const char* call_to, const char* call_de, const char* extra);
 
+/// Compute the 29-bit a priori encoding of `callsign` as it would appear
+/// in a standard (type 1/2) message's call_to field -- payload bits 0..28
+/// -- assuming no /P or /R suffix. `bits_out[i]` receives bit i's value
+/// (0 or 1). Pure function of `callsign` alone (no hash table needed:
+/// pack28's hash fallback for non-"standard" calls is itself a stateless
+/// hash of the string). Returns false only if `callsign` itself can't be
+/// packed at all (<3 or >11 characters, or characters outside pack28's
+/// alphanumeric+slash set) -- never happens for a real callsign.
+bool ftx_pack_call_ap_bits(const char* callsign, uint8_t bits_out[29]);
+
 void ftx_message_encode_free(const char* text);
 void ftx_message_encode_telemetry_hex(const char* telemetry_hex);
 void ftx_message_encode_telemetry(const uint8_t* telemetry);

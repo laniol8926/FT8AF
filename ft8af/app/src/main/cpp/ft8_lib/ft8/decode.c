@@ -115,7 +115,6 @@ static float max4(float a, float b, float c, float d);
 static void heapify_down(candidate_t heap[], int heap_size);
 static void heapify_up(candidate_t heap[], int heap_size);
 
-static void ftx_normalize_logl(float* log174);
 static void ft4_extract_symbol(const uint8_t* wf, float* logl);
 static void ft8_extract_symbol(const uint8_t* wf, float* logl);
 static void ft8_decode_multi_symbols(const uint8_t* wf, int num_bins, int n_syms, int bit_idx, float* log174);
@@ -536,7 +535,7 @@ static void ft8_extract_likelihood(const waterfall_t* wf, const candidate_t* can
     }
 }
 
-static void ftx_normalize_logl(float* log174)
+void ftx_normalize_logl(float* log174)
 {
     // Compute the variance of log174
     float sum = 0;
@@ -557,16 +556,12 @@ static void ftx_normalize_logl(float* log174)
     }
 }
 
-bool ftx_decode_llrs(ftx_protocol_t protocol, const float* llrs, int max_iterations,
-                     int osd_depth, int osd_err_gate, ftx_message_t* message, decode_status_t* status)
+// BP(+OSD)+CRC+unpack tail shared by ftx_decode_llrs and ft8_decode_ap (see
+// decode.h's own doc comment on this function for the normalization-order
+// contract callers must respect).
+bool ftx_decode_normalized_llrs(ftx_protocol_t protocol, float* log174, int max_iterations,
+                                int osd_depth, int osd_err_gate, ftx_message_t* message, decode_status_t* status)
 {
-    // Work on a normalized copy: callers hand in raw log-likelihoods on
-    // whatever scale their demodulator produced.
-    float log174[FTX_LDPC_N];
-    for (int i = 0; i < FTX_LDPC_N; ++i)
-        log174[i] = llrs[i];
-    ftx_normalize_logl(log174);
-
     uint8_t plain174[FTX_LDPC_N]; // message bits (0/1)
     bp_decode(log174, max_iterations, plain174, &status->ldpc_errors);
     // ldpc_decode(log174, max_iterations, plain174, &status->ldpc_errors);
@@ -628,6 +623,56 @@ bool ftx_decode_llrs(ftx_protocol_t protocol, const float* llrs, int max_iterati
 
     // LOG(LOG_DEBUG, "Decoded message (CRC %04x), trying to unpack...\n", status->crc_extracted);
     return true;
+}
+
+bool ftx_decode_llrs(ftx_protocol_t protocol, const float* llrs, int max_iterations,
+                     int osd_depth, int osd_err_gate, ftx_message_t* message, decode_status_t* status)
+{
+    // Work on a normalized copy: callers hand in raw log-likelihoods on
+    // whatever scale their demodulator produced.
+    float log174[FTX_LDPC_N];
+    for (int i = 0; i < FTX_LDPC_N; ++i)
+        log174[i] = llrs[i];
+    ftx_normalize_logl(log174);
+
+    return ftx_decode_normalized_llrs(protocol, log174, max_iterations, osd_depth, osd_err_gate, message, status);
+}
+
+bool ft8_decode_ap(const waterfall_t* wf, const candidate_t* cand, int max_iterations,
+                   int osd_depth, int osd_err_gate, const uint8_t ap_bits[29],
+                   ftx_message_t* message, decode_status_t* status)
+{
+    float log174[FTX_LDPC_N];
+    if (wf->protocol != FTX_PROTOCOL_FT8) // FT4 and FT2 share the 2-bit/symbol layout
+    {
+        ft4_extract_likelihood(wf, cand, log174);
+    }
+    else
+    {
+        ft8_extract_likelihood(wf, cand, log174);
+    }
+    // Normalize on genuine channel statistics BEFORE overriding the known
+    // bits -- see this function's own doc comment (decode.h) for why the
+    // order matters.
+    ftx_normalize_logl(log174);
+
+    // Force payload bits 0..28 (the call_to field of a standard message)
+    // to a near-certain value matching the a priori hypothesis. The real,
+    // empirically-confirmed convention (ldpc.c's own "log(P(0)/P(1))"
+    // doc comment is STALE/wrong -- directly contradicted by
+    // ft8_extract_symbol's "log(p(1)/p(0))" above it, which is what the
+    // whole rest of this file's working decode path is actually built
+    // on): bit 1 -> strongly positive, bit 0 -> strongly negative. The
+    // magnitude is comfortably outside ftx_normalize_logl's ~sqrt(24)
+    // target scale but finite, so ldpc.c's fast_tanh/fast_atanh never
+    // see an infinity.
+    static const float AP_LLR_MAGNITUDE = 20.0f;
+    for (int i = 0; i < 29; ++i)
+    {
+        log174[i] = ap_bits[i] ? AP_LLR_MAGNITUDE : -AP_LLR_MAGNITUDE;
+    }
+
+    return ftx_decode_normalized_llrs(wf->protocol, log174, max_iterations, osd_depth, osd_err_gate, message, status);
 }
 
 bool ft8_decode_osd(const waterfall_t* wf, const candidate_t* cand, int max_iterations,
