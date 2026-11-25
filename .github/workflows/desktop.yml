@@ -401,6 +401,106 @@ jobs:
           prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}
           args: --config '{"bundle":{"active":true,"targets":["deb"]}}'
 
+  build-debian-armhf:
+    name: Build (debian-bookworm-armhf)
+    # A genuine Debian 12 (Bookworm) armhf .deb for 32-bit ARM boards (e.g.
+    # a Raspberry Pi Zero 2 W running the 32-bit Raspberry Pi OS). Unlike
+    # the arm64 leg above, this CROSS-compiles rather than running armhf
+    # code directly: GitHub's arm64 hosted runners are Ampere Altra, which
+    # drops AArch32 (32-bit ARM) hardware support entirely, so an armhf
+    # container/binary can't execute here at all without QEMU emulation.
+    # Debian's multiarch support makes cross-compiling clean instead:
+    # armhf is added as a second dpkg architecture inside the SAME
+    # debian:bookworm container the arm64 leg uses (armhf/arm64 is one of
+    # the best-supported Debian multiarch pairs, no conflict installing
+    # both side by side), and gcc-arm-linux-gnueabihf + the matching Rust
+    # target cross-compile the whole app -- nothing in this job ever
+    # executes an armhf instruction itself.
+    #
+    # NON-GATING (left out of desktop-gate's needs, same as the arm64 leg
+    # and `coverage` below) -- first time this exact cross-compilation
+    # combination has been exercised in CI; promote once proven reliable.
+    needs: [detect, version]
+    if: ${{ needs.detect.outputs.run == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    container: debian:bookworm
+    env:
+      PKG_CONFIG_ALLOW_CROSS: '1'
+      PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig
+      PKG_CONFIG_LIBDIR: /usr/lib/arm-linux-gnueabihf/pkgconfig
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+      CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+      CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
+    steps:
+      # Installed before checkout: a fresh container image has neither.
+      - name: Install cross-compilation toolchain and armhf dev packages
+        run: |
+          dpkg --add-architecture armhf
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl wget \
+            gcc-arm-linux-gnueabihf \
+            libwebkit2gtk-4.1-dev:armhf \
+            libgtk-3-dev:armhf \
+            librsvg2-dev:armhf \
+            libayatana-appindicator3-dev:armhf \
+            libudev-dev:armhf \
+            libasound2-dev:armhf \
+            patchelf \
+            file \
+            build-essential \
+            pkg-config
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          key: debian-bookworm-armhf
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Test frontend logic
+        working-directory: desktop
+        run: npm test
+
+      - name: Compile check (no bundle)
+        if: ${{ needs.version.outputs.should_release != 'true' }}
+        working-directory: desktop
+        run: npm run tauri build -- --no-bundle --target armv7-unknown-linux-gnueabihf
+
+      - name: Stamp release version
+        if: ${{ needs.version.outputs.should_release == 'true' }}
+        working-directory: desktop
+        run: node ci/stamp-version.mjs "${{ needs.version.outputs.app_version }}"
+
+      - name: Build & publish release bundles
+        if: ${{ needs.version.outputs.should_release == 'true' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tagName: ${{ needs.version.outputs.release_tag }}
+          releaseName: ${{ needs.version.outputs.release_tag }}
+          releaseBody: 'FT8AF desktop build ${{ needs.version.outputs.version_name }}.'
+          prerelease: ${{ needs.version.outputs.is_prerelease == 'true' }}
+          args: --target armv7-unknown-linux-gnueabihf --config '{"bundle":{"active":true,"targets":["deb"]}}'
+
   coverage:
     name: Rust coverage
     # Best-effort, NON-GATING desktop coverage: runs the src-tauri crate's unit
