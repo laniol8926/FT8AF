@@ -1312,6 +1312,20 @@ for the Hamlib version workaround needed there.
   internal comments aren't automatically authoritative -- the function
   that actually produces the real values in production is.
 
+- **Windows MSI/NSIS installers now ship Hamlib, not just dev builds.**
+  `build.rs` has copied the arch-correct vendored Hamlib DLLs next to the
+  exe since the Windows port landed, but only into `target/<profile>/` --
+  that made `cargo run`/`tauri dev` work out of the box while silently
+  leaving the actual installed app with no DLL next to it, since the
+  Tauri bundler only packages the exe plus whatever's declared under
+  `bundle.resources`. Real-world symptom: Hamlib had to be installed
+  separately on every Windows machine the built MSI/EXE was deployed to.
+  Fixed by also mirroring the DLLs into a stable `hamlib-dist/` dir next
+  to `tauri.conf.json`, declared as a Windows-only bundle resource via
+  `tauri.windows.conf.json` (Tauri places declared resources next to the
+  installed exe on Windows -- the same location `load_hamlib()`'s DLL
+  search already checks first).
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now

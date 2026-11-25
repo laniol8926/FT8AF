@@ -1,6 +1,10 @@
 # Rust
 /src-tauri/target/
 
+# Generated at build time by build.rs (arch-correct Hamlib DLL copy for the
+# Windows bundle resources declared in tauri.windows.conf.json).
+/src-tauri/hamlib-dist/
+
 # Node / frontend
 /node_modules/
 /dist/

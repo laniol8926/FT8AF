@@ -83,9 +83,17 @@ fn main() {
     // On Windows, copy the vendored Hamlib DLLs next to the output exe so the
     // app loads rig support out of the box (no separate Hamlib install). The
     // exe's own directory is first in the DLL search order, so libhamlib-4.dll
-    // and its dependencies resolve automatically.
+    // and its dependencies resolve automatically. This covers `cargo
+    // run`/`tauri dev`, but NOT the installed MSI/NSIS bundle -- the Tauri
+    // bundler only packages the exe plus whatever is declared under
+    // `bundle.resources`, so it never picks up files that just happen to be
+    // sitting in target/. `hamlib-dist/` is the resource dir
+    // `tauri.windows.conf.json` declares for that purpose; Tauri places
+    // declared resources next to the installed exe on Windows, which is the
+    // same location `load_hamlib()`'s DLL search already checks first.
     if target.contains("windows") {
         copy_hamlib_dlls(&manifest, &target);
+        copy_hamlib_dlls_to_resource_dir(&manifest, &target);
     }
 
     println!("cargo:rerun-if-changed={}", cpp.display());
@@ -107,31 +115,40 @@ fn main() {
     tauri_build::build();
 }
 
-fn copy_hamlib_dlls(manifest: &std::path::Path, target: &str) {
+/// The vendored DLL set matching the target process architecture (`hamlib/x86`
+/// or `hamlib/x64`), falling back to the flat `hamlib/` layout for older
+/// checkouts without the split. `None` means nothing to copy (non-Windows, or
+/// no `hamlib/` dir at all).
+fn hamlib_src_dir(manifest: &std::path::Path, target: &str) -> Option<PathBuf> {
     let hamlib = manifest.join("hamlib");
     if !hamlib.is_dir() {
-        return;
+        return None;
     }
-    // Pick the DLL set matching the target process architecture. The DLLs live
-    // in arch subdirs (hamlib/x86, hamlib/x64) so the 32-bit build can't pick up
-    // the win64 DLLs (which won't load into an i686 process) and vice-versa. Fall
-    // back to the flat hamlib/ layout for older checkouts without the split.
-    let src = match hamlib_arch_subdir(target) {
-        Some(arch) => {
-            let sub = hamlib.join(arch);
-            if sub.is_dir() {
-                sub
-            } else {
-                hamlib.clone()
+    let arch = hamlib_arch_subdir(target)?;
+    let sub = hamlib.join(arch);
+    Some(if sub.is_dir() { sub } else { hamlib })
+}
+
+fn copy_dlls(src: &std::path::Path, dst: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(src) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("dll") {
+                if let Some(name) = p.file_name() {
+                    let _ = std::fs::copy(&p, dst.join(name));
+                }
             }
         }
-        // Non-Windows: nothing to copy (Hamlib is a system package there).
-        None => return,
-    };
+    }
+}
+
+fn copy_hamlib_dlls(manifest: &std::path::Path, target: &str) {
     // If the arch dir exists but ships no DLLs yet (e.g. the 32-bit set hasn't
     // been vendored), copy nothing — the app still builds and rig control
     // degrades cleanly to "Hamlib unavailable" via load_hamlib()'s fallback.
-    //
+    let Some(src) = hamlib_src_dir(manifest, target) else {
+        return;
+    };
     // OUT_DIR = target/<profile>/build/<pkg>/out  -> exe dir is 3 parents up.
     let out_dir = match std::env::var("OUT_DIR") {
         Ok(d) => PathBuf::from(d),
@@ -141,16 +158,29 @@ fn copy_hamlib_dlls(manifest: &std::path::Path, target: &str) {
         Some(p) => p.to_path_buf(),
         None => return,
     };
-    if let Ok(entries) = std::fs::read_dir(&src) {
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("dll") {
-                if let Some(name) = p.file_name() {
-                    let _ = std::fs::copy(&p, exe_dir.join(name));
-                }
-            }
-        }
+    copy_dlls(&src, &exe_dir);
+}
+
+/// Mirrors the arch-correct Hamlib DLLs into a stable `hamlib-dist/` dir next
+/// to `tauri.conf.json`, which `tauri.windows.conf.json` declares as a bundle
+/// resource. `copy_hamlib_dlls` above puts the DLLs next to the exe for
+/// `cargo run`/`tauri dev`, but the Tauri bundler only packages the exe plus
+/// declared `bundle.resources` -- it doesn't sweep up arbitrary files sitting
+/// in `target/`, so without this step the installed MSI/NSIS app has no DLL
+/// next to it and rig control silently needs a separate system Hamlib
+/// install. Cleared and repopulated every build so a stale wrong-arch DLL
+/// from a previous target can't linger (e.g. a local x64 build followed by a
+/// CI x86 cross-build sharing this checkout).
+fn copy_hamlib_dlls_to_resource_dir(manifest: &std::path::Path, target: &str) {
+    let Some(src) = hamlib_src_dir(manifest, target) else {
+        return;
+    };
+    let dist = manifest.join("hamlib-dist");
+    let _ = std::fs::remove_dir_all(&dist);
+    if std::fs::create_dir_all(&dist).is_err() {
+        return;
     }
+    copy_dlls(&src, &dist);
 }
 
 /// Locate clang-cl: honor an explicit CLANG_CL env override, otherwise try PATH
