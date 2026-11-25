@@ -435,6 +435,21 @@ jobs:
       # Installed before checkout: a fresh container image has neither.
       - name: Install cross-compilation toolchain and armhf dev packages
         run: |
+          # qemu-user-static (native arm64 package -- the emulator itself,
+          # not the thing being emulated) registers binfmt_misc handlers so
+          # any armhf ELF executed in this container transparently runs
+          # under QEMU. Required even though the actual app build is a pure
+          # cross-compile: some :armhf -dev packages' own dependency chain
+          # (gobject-introspection -> build-essential:armhf, pulled in by
+          # libgtk-3-dev:armhf) has maintainer (postinst) scripts that need
+          # to genuinely execute armhf code during installation/
+          # configuration, not just provide headers/libraries to link
+          # against -- that's a real execution need dpkg/apt can't route
+          # around on its own, confirmed by the first attempt here failing
+          # apt's dependency resolution outright ("not installable") with
+          # this package missing.
+          apt-get update
+          apt-get install -y --no-install-recommends qemu-user-static binfmt-support
           dpkg --add-architecture armhf
           apt-get update
           apt-get install -y --no-install-recommends \
