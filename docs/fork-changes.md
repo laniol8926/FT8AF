@@ -1382,6 +1382,17 @@ for the Hamlib version workaround needed there.
   instead of always restarting at Grid. New regression test
   (`engine.rs`) reproduces the exact scenario end to end.
 
+- **Decode Threads (the new candidate-parallelism worker-count setting)
+  is covered by Settings backup/export.** No code change needed --
+  export/import is architected as a blanket dump of the whole `config`
+  key/value table minus an explicit `SENSITIVE_KEYS` exclusion list
+  (`settings_backup.rs`), and `decodeThreadsReserved` is a plain flat
+  key, same shape as `decodeDeep`/`deepDecodeSic` it was modeled after,
+  not in that exclusion list. Added a regression test confirming it
+  round-trips and is never accidentally marked sensitive, guarding
+  against a future `SENSITIVE_KEYS` edit silently dropping it from
+  every export.
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now

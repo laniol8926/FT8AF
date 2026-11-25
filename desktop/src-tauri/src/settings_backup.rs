@@ -245,6 +245,23 @@ mod tests {
     }
 
     #[test]
+    fn decode_threads_reserved_is_not_sensitive_and_round_trips() {
+        // Settings -> Advanced's "Decode Threads" row persists as a plain
+        // flat key (same shape as decodeDeep/deepDecodeSic, which it was
+        // modeled after) -- export/import here are a blanket whole-config
+        // dump minus SENSITIVE_KEYS, so this should already round-trip
+        // with no special-case code. Guards against a future accidental
+        // addition to SENSITIVE_KEYS (which would silently drop it from
+        // every export) and against this setting being missed if the
+        // backup mechanism ever stops being a blanket dump.
+        assert!(!is_sensitive_key("decodeThreadsReserved"));
+        let config = vec![("decodeThreadsReserved".to_string(), "2".to_string())];
+        let json = build_backup_json(&config, false, "0.1.2", "now", vec![]);
+        let parsed = parse_backup_json(&json).unwrap();
+        assert_eq!(parsed.config.get("decodeThreadsReserved"), Some(&"2".to_string()));
+    }
+
+    #[test]
     fn parse_rejects_an_empty_config() {
         let err = parse_backup_json(r#"{"appName":"FT8AF","formatVersion":1,"config":{}}"#).unwrap_err();
         assert!(err.contains("no settings to restore"));
