@@ -658,6 +658,7 @@ export default function App() {
     if (m.is_cq) seedCqRef.current = m;
     api.answer({
       call_from: m.call_from, grid: m.grid, snr: m.snr,
+      extra: m.extra, is_cq: m.is_cq,
       delta_freq: holdTxFreq ? 0 : Math.round(m.freq_hz),
       msg_utc_ms: m.utc_ms,
     });
@@ -1105,7 +1106,11 @@ export default function App() {
     const chosen = selectHuntCandidate(candidates, priority, avoidPileups, minSnr);
     if (!chosen) return;
     const target = eligible[chosen.index];
-    api.answer({ call_from: target.call_from, grid: target.grid, snr: target.snr, msg_utc_ms: target.utc_ms });
+    api.answer({
+      call_from: target.call_from, grid: target.grid, snr: target.snr,
+      extra: target.extra, is_cq: true, // `eligible` above is filtered to m.is_cq already
+      msg_utc_ms: target.utc_ms,
+    });
   }
 
   // Needed-DX Alerts (Settings -> Decode & Filters), ported from Android's
@@ -2639,6 +2644,8 @@ function MapScreen({
                 call_from: marker.message.callFrom,
                 grid: marker.message.grid,
                 snr: marker.message.snr,
+                extra: "", // CqMarker is always a CQ (gridTrackerSlot.ts); is_cq below is what matters
+                is_cq: true,
                 msg_utc_ms: marker.message.utcMs,
               })
             }

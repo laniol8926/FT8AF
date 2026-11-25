@@ -435,6 +435,26 @@ pub struct AnswerArgs {
     /// the old click-time behavior.
     #[serde(default)]
     pub msg_utc_ms: Option<i64>,
+    /// The clicked message's own `extra` field (report/RRR/RR73/73/...) --
+    /// needed so `classify()` can tell what stage a non-CQ click is
+    /// actually answering. `#[serde(default)]` only for schema stability;
+    /// the frontend always sends the real value.
+    #[serde(default)]
+    pub extra: String,
+    /// Was the clicked decode a CQ bulletin (true) or a directed reply
+    /// naming our own callsign (false)? Decides which `qso.rs` entry point
+    /// applies -- see `answer_message`'s doc comment. Real bug, found
+    /// live: every decode-row click used `answer()` (always "HISCALL
+    /// MYCALL MYGRID", correct only for breaking into someone ELSE's CQ
+    /// bulletin) even when the clicked row was a directed reply that
+    /// already told us everything needed to answer with a report
+    /// immediately -- e.g. resuming a stalled QSO by clicking the other
+    /// station's signal-report reply after a manual Stop TX sent our own
+    /// call again instead of his report. `AnswerQueuedCaller` already got
+    /// this right (see its own doc comment); this brings the plain
+    /// decode-row click path to the same fix.
+    #[serde(default)]
+    pub is_cq: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3417,13 +3437,21 @@ impl Engine {
                 self.publish_tx_state();
             }
             EngineCommand::Answer(args) => {
+                // A CQ bulletin (nothing from him yet) uses answer()'s
+                // grid-first reply; a directed message naming us (he
+                // already told us something -- a grid, a report, RRR...)
+                // uses answer_caller()'s content-aware jump instead, same
+                // as a caller-queue tap -- see AnswerArgs::is_cq's doc
+                // comment for the live bug this fixes.
+                let is_cq = args.is_cq;
                 let msg = DecodedMessage {
                     call_from: args.call_from,
                     grid: args.grid,
                     snr: args.snr,
+                    extra: args.extra,
                     ..Default::default()
                 };
-                self.answer_message(msg, args.delta_freq, args.msg_utc_ms, false);
+                self.answer_message(msg, args.delta_freq, args.msg_utc_ms, !is_cq);
             }
             EngineCommand::AnswerQueuedCaller { callsign } => {
                 // Caller-queue (pileup-while-busy): the operator tapped a
@@ -3825,6 +3853,8 @@ mod tests {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
+            extra: String::new(),
+            is_cq: true, // every existing test here is "answer a CQ" -- see AnswerArgs::is_cq's doc comment
             delta_freq: 0,
             msg_utc_ms: None,
         }));
@@ -3866,6 +3896,8 @@ mod tests {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
+            extra: String::new(),
+            is_cq: true, // every existing test here is "answer a CQ" -- see AnswerArgs::is_cq's doc comment
             delta_freq: 0,
             msg_utc_ms: Some(his_decode_ms),
         }));
@@ -3964,6 +3996,56 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_directed_report_reply_jumps_to_r_report_not_grid() {
+        // Real bug, found live: answered K1ABC's CQ (Grid stage sent), he
+        // didn't reply in time so the operator stopped TX, then his signal-
+        // report reply decoded a cycle later and showed up in the decode
+        // list (is_cq=false, to_me=true -- not a fresh CQ bulletin). The
+        // decode-row click still went through the plain Answer path, which
+        // used to always restart the exchange with our own grid instead of
+        // recognizing his report and replying with one of our own -- the
+        // same bug AnswerQueuedCaller was already fixed for (see its own
+        // doc comment), just reachable through a second entry point this
+        // didn't cover yet.
+        let mut engine = test_engine();
+        engine.qso.my_call = "K0XYZ".into();
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: "FN42".into(),
+            snr: -5,
+            extra: String::new(),
+            is_cq: true,
+            delta_freq: 0,
+            msg_utc_ms: None,
+        }));
+        assert_eq!(engine.qso.status().stage, TxStage::Grid, "sanity: the initial CQ answer is unaffected");
+
+        // His report reply decodes later; the operator clicks it directly
+        // from the decode list (is_cq: false -- a directed message naming
+        // us, not a CQ).
+        engine.handle(EngineCommand::Answer(AnswerArgs {
+            call_from: "K1ABC".into(),
+            grid: String::new(),
+            snr: -8,
+            extra: "-12".into(),
+            is_cq: false,
+            delta_freq: 0,
+            msg_utc_ms: None,
+        }));
+        assert_eq!(engine.qso.status().target.as_deref(), Some("K1ABC"));
+        assert_eq!(
+            engine.qso.status().stage,
+            TxStage::RReport,
+            "his report must be acknowledged with ours, not re-answered with our grid"
+        );
+        // The report WE send back is built from `snr` (how strongly we
+        // measured his signal), not `extra` (what he reported about ours)
+        // -- same convention answer_caller's own existing test already
+        // relies on.
+        assert_eq!(engine.qso.status().tx_message.as_deref(), Some("K1ABC K0XYZ R-08"));
+    }
+
+    #[test]
     fn tx_watchdog_give_up_restores_the_pre_answer_tx_period_preference() {
         // Real UX requirement, stated live: "should the slot setting only
         // change for the duration of the QSO or potential QSO and then
@@ -3987,6 +4069,8 @@ mod tests {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
+            extra: String::new(),
+            is_cq: true, // every existing test here is "answer a CQ" -- see AnswerArgs::is_cq's doc comment
             delta_freq: 0,
             msg_utc_ms: Some(his_slot * cycle_ms),
         }));
@@ -4035,6 +4119,8 @@ mod tests {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
+            extra: String::new(),
+            is_cq: true, // every existing test here is "answer a CQ" -- see AnswerArgs::is_cq's doc comment
             delta_freq: 0,
             msg_utc_ms: Some(his_slot * cycle_ms),
         }));
@@ -4073,6 +4159,8 @@ mod tests {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
+            extra: String::new(),
+            is_cq: true, // every existing test here is "answer a CQ" -- see AnswerArgs::is_cq's doc comment
             delta_freq: 0,
             msg_utc_ms: Some(his_slot * cycle_ms),
         }));
@@ -4103,6 +4191,8 @@ mod tests {
             call_from: "K1ABC".into(),
             grid: "FN42".into(),
             snr: -5,
+            extra: String::new(),
+            is_cq: true, // every existing test here is "answer a CQ" -- see AnswerArgs::is_cq's doc comment
             delta_freq: 0,
             msg_utc_ms: Some(his_slot * cycle_ms),
         }));

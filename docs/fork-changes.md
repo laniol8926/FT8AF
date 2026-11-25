@@ -1367,6 +1367,21 @@ for the Hamlib version workaround needed there.
   respawning the decoder thread on change (same mechanism Decode Depth/
   Deep SIC/MyCall already use).
 
+- **Clicking a directed reply in the decode list no longer re-answers
+  with our own grid.** Real bug, found live: answered a station's CQ
+  (grid sent), he didn't reply in time so the operator stopped TX, then
+  his signal-report reply decoded a cycle later and showed up in the
+  decode list (`to_me`, not a fresh CQ). Clicking it went through the
+  plain `Answer` path, which always assumed "breaking into someone
+  else's CQ bulletin" and re-sent our own grid instead of recognizing
+  his report and replying with one of our own -- the same bug class
+  `AnswerQueuedCaller` (caller-queue chips) was already fixed for, just
+  reachable through a second entry point that fix didn't cover.
+  `AnswerArgs` now carries `extra`/`is_cq` from the clicked message, and
+  a non-CQ click uses `answer_caller()`'s content-aware stage jump
+  instead of always restarting at Grid. New regression test
+  (`engine.rs`) reproduces the exact scenario end to end.
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now

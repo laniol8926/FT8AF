@@ -438,8 +438,19 @@ export const api = {
   startCq: () => invoke("start_cq"),
   /** `delta_freq`: audio offset (Hz) to answer on, 0 (default) = keep the
    *  current TX offset -- see Settings -> Transmission's "Hold TX freq". */
-  answer: (args: { call_from: string; grid: string; snr: number; delta_freq?: number; msg_utc_ms?: number }) =>
-    invoke("answer", { args }),
+  /** `extra`/`is_cq` decide which qso.rs entry point the backend uses --
+   *  `is_cq` false (a directed reply, not a fresh CQ bulletin) jumps
+   *  straight to the stage his own content calls for instead of always
+   *  re-sending our grid. See `AnswerArgs::is_cq`'s doc comment. */
+  answer: (args: {
+    call_from: string;
+    grid: string;
+    snr: number;
+    extra: string;
+    is_cq: boolean;
+    delta_freq?: number;
+    msg_utc_ms?: number;
+  }) => invoke("answer", { args }),
   /** Operator tapped a caller-queue chip (a station calling us while busy
    *  with a different target) -- see `QueuedCaller`. */
   answerQueuedCaller: (callsign: string) => invoke("answer_queued_caller", { callsign }),

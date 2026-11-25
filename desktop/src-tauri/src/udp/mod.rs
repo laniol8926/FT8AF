@@ -241,8 +241,13 @@ fn to_command(buf: &[u8]) -> Option<EngineCommand> {
         codec::Inbound::Reply { call, grid, snr, delta_freq } => Some(EngineCommand::Answer(
             // WSJT-X's Reply packet carries no decode timestamp, so this
             // falls back to the click-time parity -- see `AnswerArgs::
-            // msg_utc_ms`'s own doc comment.
-            AnswerArgs { call_from: call, grid, snr, delta_freq, msg_utc_ms: None },
+            // msg_utc_ms`'s own doc comment. It also carries no `extra`/
+            // CQ-or-not content, so there's nothing to classify -- keep
+            // this path's existing grid-first behavior (`is_cq: true`)
+            // rather than guess; a companion app can only improve on this
+            // once the UDP protocol itself carries the clicked message's
+            // own content.
+            AnswerArgs { call_from: call, grid, snr, delta_freq, msg_utc_ms: None, extra: String::new(), is_cq: true },
         )),
         // We only support a global halt; `auto_only` doesn't map to a separate
         // manual-TX path here, so any halt request stops TX.
