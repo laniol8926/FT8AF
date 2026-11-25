@@ -18,7 +18,7 @@ use crate::clublog;
 use crate::cloudlog;
 use crate::db::{Db, QsoRecord};
 use crate::dsp::encode;
-use crate::dsp::{DecodedMessage, Decoder, SAMPLE_RATE};
+use crate::dsp::{decode_worker_count, DecodedMessage, Decoder, SAMPLE_RATE};
 use crate::dxcc;
 use crate::eqsl;
 use crate::hrdlog;
@@ -464,6 +464,12 @@ pub enum EngineCommand {
     /// separate from `SetDecodeDepth`'s LDPC/OSD setting (Balanced sets
     /// that alone, Deep sets both). Same respawn mechanism.
     SetDeepDecodeSic(bool),
+    /// Settings -> Advanced's "Reserve N CPU cores" row: CPU cores to leave
+    /// for everything else when sizing `decode_all`'s candidate-parallelism
+    /// worker pool (`dsp::decoder::decode_worker_count`). Same respawn
+    /// mechanism as `SetDecodeDepth`/`SetDeepDecodeSic` above -- the worker
+    /// count is only read once, at decoder-thread spawn time.
+    SetDecodeThreadsReserved(u32),
     SetStation { call: String, grid: String },
     SetBand(u64),
     SetBaseFreq(i32),
@@ -896,6 +902,11 @@ struct Engine {
     /// `EngineCommand::SetDeepDecodeSic`'s doc comment. Same respawn-only
     /// semantics as `decode_deep`.
     deep_decode_sic: bool,
+    /// CPU cores to leave for everything else (engine/audio/UI/rig threads)
+    /// when sizing `decode_all`'s candidate-parallelism worker pool -- see
+    /// `EngineCommand::SetDecodeThreadsReserved`'s doc comment. Same
+    /// respawn-only semantics as `decode_deep`/`deep_decode_sic`.
+    decode_threads_reserved: u32,
     dial_hz: u64,
     tx_audio_hz: i32,
     /// TX output level (0.0–1.0) applied to the waveform before playback.
@@ -1184,12 +1195,16 @@ fn sic_dedup_pass(
 /// `cycle_ms` feeds `sic_budget_ms`. `my_call` seeds "MyCall known" a
 /// priori decoding (`Decoder::set_my_call`) -- respawn on a callsign
 /// change too (`EngineCommand::SetStation`), same as any other field here.
+/// `threads_reserved` sizes `decode_all`'s candidate-parallelism worker
+/// pool (`Decoder::set_worker_threads`/`dsp::decoder::decode_worker_count`)
+/// -- respawn on `EngineCommand::SetDecodeThreadsReserved` too.
 fn spawn_decoder_thread(
     protocol: std::os::raw::c_int,
     deep: bool,
     sic: bool,
     cycle_ms: i64,
     my_call: String,
+    threads_reserved: u32,
 ) -> (Sender<Vec<f32>>, Receiver<Vec<DecodedMessage>>) {
     let (slot_tx, slot_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let (dec_tx, dec_rx) = std::sync::mpsc::channel::<Vec<DecodedMessage>>();
@@ -1198,6 +1213,7 @@ fn spawn_decoder_thread(
         .spawn(move || {
             let mut decoder = Decoder::new(SAMPLE_RATE, protocol);
             decoder.set_deep(deep);
+            decoder.set_worker_threads(decode_worker_count(threads_reserved));
             // "MyCall known" a priori decoding (see Decoder::set_my_call):
             // retries a candidate whose blind decode failed assuming it's
             // addressed to us. Set once at thread start; a later callsign
@@ -1328,6 +1344,12 @@ impl Engine {
         // own single `decodeDepthTier` 0/1/2 value instead of a second
         // flag).
         let deep_decode_sic = db.get_config("deepDecodeSic").as_deref() == Some("1");
+        // Default 1: leaves one core for the engine/audio/UI/rig threads
+        // rather than handing every detected core to decode parallelism.
+        let decode_threads_reserved = db
+            .get_config("decodeThreadsReserved")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
         let mut qso = QsoEngine::new(my_call, my_grid);
         qso.band = bands::band_for_freq_hz(dial_hz).to_string();
         qso.freq_mhz = bands::freq_mhz_string(dial_hz);
@@ -1454,6 +1476,7 @@ impl Engine {
             deep_decode_sic,
             mode.cycle_ms(),
             qso.my_call.clone(),
+            decode_threads_reserved,
         );
 
         let psk_sender = PskReporterSender::new();
@@ -1476,6 +1499,7 @@ impl Engine {
             db,
             decode_deep,
             deep_decode_sic,
+            decode_threads_reserved,
             evt,
             accum: Arc::new(SlotAccumulator::new()),
             slot_tx,
@@ -2324,6 +2348,7 @@ impl Engine {
             self.deep_decode_sic,
             mode.cycle_ms(),
             self.qso.my_call.clone(),
+            self.decode_threads_reserved,
         );
         self.slot_tx = slot_tx;
         self.dec_rx = dec_rx;
@@ -3093,6 +3118,7 @@ impl Engine {
                     self.deep_decode_sic,
                     self.mode.cycle_ms(),
                     self.qso.my_call.clone(),
+                    self.decode_threads_reserved,
                 );
                 self.slot_tx = slot_tx;
                 self.dec_rx = dec_rx;
@@ -3106,6 +3132,26 @@ impl Engine {
                     sic,
                     self.mode.cycle_ms(),
                     self.qso.my_call.clone(),
+                    self.decode_threads_reserved,
+                );
+                self.slot_tx = slot_tx;
+                self.dec_rx = dec_rx;
+            }
+            EngineCommand::SetDecodeThreadsReserved(reserved) => {
+                // Respawn-only setting, same as Decode Depth/Deep SIC above
+                // -- `Decoder::set_worker_threads` is only read once, at
+                // spawn_decoder_thread's own decoder construction.
+                self.decode_threads_reserved = reserved;
+                let _ = self
+                    .db
+                    .set_config("decodeThreadsReserved", &reserved.to_string());
+                let (slot_tx, dec_rx) = spawn_decoder_thread(
+                    self.mode.ffi_protocol(),
+                    self.decode_deep,
+                    self.deep_decode_sic,
+                    self.mode.cycle_ms(),
+                    self.qso.my_call.clone(),
+                    reserved,
                 );
                 self.slot_tx = slot_tx;
                 self.dec_rx = dec_rx;
@@ -3138,6 +3184,7 @@ impl Engine {
                         self.deep_decode_sic,
                         self.mode.cycle_ms(),
                         self.qso.my_call.clone(),
+                        self.decode_threads_reserved,
                     );
                     self.slot_tx = slot_tx;
                     self.dec_rx = dec_rx;

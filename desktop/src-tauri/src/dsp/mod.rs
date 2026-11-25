@@ -5,7 +5,7 @@ pub mod encode;
 pub mod ffi;
 pub mod hashtable;
 
-pub use decoder::{DecodedMessage, Decoder};
+pub use decoder::{decode_worker_count, DecodedMessage, Decoder};
 
 /// Sample rate the FT8 codec runs at (fixed).
 pub const SAMPLE_RATE: i32 = 12000;

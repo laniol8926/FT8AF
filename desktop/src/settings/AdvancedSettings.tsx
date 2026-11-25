@@ -134,7 +134,11 @@ export function AdvancedSettings({
   const [decodeTier, setDecodeTierState] = useState<DecodeTier>(decodeDeep ? "deep" : "fast");
   const [pttDelay, setPttDelay] = useState(100);
   const [lateStartTolerance, setLateStartTolerance] = useState(0);
-  const [openDialog, setOpenDialog] = useState<null | "decodeTier" | "pttDelay" | "lateStartTolerance">(null);
+  const [decodeThreadsReserved, setDecodeThreadsReservedState] = useState(1);
+  const [cpuCount, setCpuCount] = useState(1);
+  const [openDialog, setOpenDialog] = useState<
+    null | "decodeTier" | "pttDelay" | "lateStartTolerance" | "decodeThreadsReserved"
+  >(null);
 
   useEffect(() => {
     // `decodeDepthTier` only remembers which of the 3 *labels* the operator
@@ -149,6 +153,8 @@ export function AdvancedSettings({
     });
     api.getConfig("pttDelay").then((v) => setPttDelay(v ? parseInt(v, 10) || 100 : 100));
     api.getConfig("lateStartTolerance").then((v) => setLateStartTolerance(v ? parseInt(v, 10) || 0 : 0));
+    api.getConfig("decodeThreadsReserved").then((v) => setDecodeThreadsReservedState(v ? parseInt(v, 10) || 1 : 1));
+    api.cpuCount().then(setCpuCount);
     // Remembered across sessions -- a genuine desktop-only enhancement,
     // not a port: Android's own equivalent checkbox is plain unpersisted
     // Compose state (`remember { mutableStateOf(false) }`), reset every
@@ -260,6 +266,12 @@ export function AdvancedSettings({
             description="Balanced and Deep both run more LDPC iterations and a lower sync threshold to dig out weak signals, at higher CPU cost than Fast. Deep's own subtract-and-redecode second pass (digging a weaker signal out from under a stronger one on the same frequency) doesn't exist in this decoder yet, so Balanced and Deep currently behave identically -- a real future enhancement, not silently dropped."
             value={DECODE_TIER_OPTIONS.find((o) => o.value === decodeTier)?.label ?? "Fast Decode"}
             onClick={() => setOpenDialog("decodeTier")}
+          />
+          <SettingsRow
+            label="Decode Threads"
+            description={`Each decode pass splits its candidates across multiple CPU cores. Reserve cores here for everything else (audio, UI, rig control) -- the rest go to decoding. This machine has ${cpuCount} core${cpuCount === 1 ? "" : "s"}.`}
+            value={`Reserve ${decodeThreadsReserved} (using ${Math.max(1, cpuCount - decodeThreadsReserved)} of ${cpuCount})`}
+            onClick={() => setOpenDialog("decodeThreadsReserved")}
           />
         </div>
       </div>
@@ -384,6 +396,22 @@ export function AdvancedSettings({
           onSave={(v) => {
             setLateStartTolerance(v);
             api.setLateStartToleranceMs(v);
+            setOpenDialog(null);
+          }}
+          onCancel={() => setOpenDialog(null)}
+        />
+      )}
+      {openDialog === "decodeThreadsReserved" && (
+        <NumberInputDialog
+          title="Decode Threads"
+          description={`How many of this machine's ${cpuCount} CPU core${cpuCount === 1 ? "" : "s"} to reserve for everything else (audio, UI, rig control) instead of handing them to decoding. Takes effect on the next decode cycle, no restart needed.`}
+          value={decodeThreadsReserved}
+          min={0}
+          max={Math.max(0, cpuCount - 1)}
+          unit={`of ${cpuCount} cores`}
+          onSave={(v) => {
+            setDecodeThreadsReservedState(v);
+            api.setDecodeThreadsReserved(v);
             setOpenDialog(null);
           }}
           onCancel={() => setOpenDialog(null)}

@@ -513,6 +513,13 @@ export const api = {
   setDecodeDepth: (deep: boolean) => invoke("set_decode_depth", { deep }),
   /** Settings -> Advanced's "Deep" tier specifically (subtract-and-redecode). */
   setDeepDecodeSic: (sic: boolean) => invoke("set_deep_decode_sic", { sic }),
+  /** Settings -> Advanced's "Reserve N CPU cores" row -- cores to leave for
+   *  everything else when sizing decode_all's candidate-parallelism worker
+   *  pool. Respawn-only, same mechanism as the two settings above. */
+  setDecodeThreadsReserved: (reserved: number) => invoke("set_decode_threads_reserved", { reserved }),
+  /** Detected CPU core count, for showing "decoding uses N of M cores"
+   *  context next to the reservation number above. */
+  cpuCount: () => invoke<number>("cpu_count"),
 
   /** Rows in the callsign/grid cache -- 0 means the FCC/Census seed hasn't run yet. */
   callsignQthCount: () => invoke<number>("callsign_qth_count"),

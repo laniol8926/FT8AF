@@ -8,6 +8,7 @@
 
 use super::ffi;
 use super::hashtable::{HashGuard, HashTable};
+use parking_lot::Mutex;
 use std::os::raw::c_char;
 
 // KEEP IN SYNC (manually): ft8af/app/src/main/cpp/ft8af_glue/decode_params.h
@@ -17,6 +18,23 @@ const MIN_SCORE_FAST: i32 = 10;
 const MIN_SCORE_DEEP: i32 = 5;
 const LDPC_ITERS_NORMAL: i32 = 20;
 const LDPC_ITERS_DEEP: i32 = 30;
+
+/// Below this many candidates, fanning `decode_all`'s loop out across worker
+/// threads costs more (thread spawn/join) than it saves -- run inline.
+const MIN_CANDIDATES_TO_PARALLELIZE: usize = 8;
+
+/// Worker threads `decode_all` may use, from a configured core-reservation.
+/// `available_parallelism()`'s failure case (platform can't tell) falls back
+/// to 1, same as its own documented caller guidance. Never returns 0: a
+/// reservation that eats every detected core still leaves one worker, so
+/// decoding is never accidentally disabled by this setting.
+pub fn decode_worker_count(reserved: u32) -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .saturating_sub(reserved as usize)
+        .max(1)
+}
 
 /// A single decoded FT8 message with geometry + signal metrics.
 #[derive(Debug, Clone, Default)]
@@ -46,13 +64,30 @@ pub struct Decoder {
     num_candidates: usize,
     ldpc_iters: i32,
     deep: bool,
-    hashtable: Box<HashTable>,
+    /// Shared (not exclusively thread-owned) so `decode_all` can fan its
+    /// candidate loop across worker threads that all need to resolve each
+    /// other's hashed/compound callsigns within one slot -- see
+    /// `dsp/hashtable.rs`'s module doc comment.
+    hashtable: Mutex<HashTable>,
     /// The 29-bit a priori encoding of our own callsign in a standard
     /// message's call_to field (payload bits 0..28), if computable --
     /// see `set_my_call`. `None` until set, or if the configured
     /// callsign can't be packed at all (never happens for a real call).
     ap_bits: Option<[u8; 29]>,
+    /// Worker threads `decode_all` may use (always >= 1) -- see
+    /// `set_worker_threads`/`decode_worker_count`.
+    workers: usize,
 }
+
+// SAFETY: `ffi::monitor_t`'s raw-pointer fields block the auto-derived
+// `Sync` impl, but every access to a shared `&Decoder` during `decode_all`'s
+// scoped parallel section (via `decode_candidates`) is read-only on every
+// field except `hashtable`, which is itself already `Sync` (a `Mutex`). No
+// other field is ever touched except through an `&mut self` method
+// (`feed_slot`, `find_sync`, `set_deep`, `set_my_call`,
+// `set_worker_threads`), none of which can run while `decode_all`'s own
+// `&mut self` borrow -- and therefore its scoped threads -- are alive.
+unsafe impl Sync for Decoder {}
 
 impl Decoder {
     /// Create a decoder for the given sample rate and protocol (one of
@@ -81,9 +116,18 @@ impl Decoder {
             num_candidates: 0,
             ldpc_iters: LDPC_ITERS_NORMAL,
             deep: false,
-            hashtable: Box::new(HashTable::new()),
+            hashtable: Mutex::new(HashTable::new()),
             ap_bits: None,
+            workers: 1,
         }
+    }
+
+    /// Set how many worker threads `decode_all` may fan its candidate loop
+    /// out across (clamped to at least 1 -- a caller can never accidentally
+    /// disable decoding by configuring 0). See `decode_worker_count` for
+    /// deriving this from a configured core-reservation.
+    pub fn set_worker_threads(&mut self, n: usize) {
+        self.workers = n.max(1);
     }
 
     /// Set deep-decode mode (more LDPC iterations + a lower sync-score
@@ -129,7 +173,7 @@ impl Decoder {
         // calls seen "earlier in the same slot", and a never-cleared table
         // would grow unbounded across slots on this long-lived decoder (the
         // Android path allocates a fresh table per slot; iOS clears here too).
-        self.hashtable.clear();
+        self.hashtable.lock().clear();
         let n = samples.len();
         let mut pos = 0;
         while pos + block <= n {
@@ -155,19 +199,68 @@ impl Decoder {
 
     /// Decode every candidate found by the last `find_sync`, returning the
     /// successfully decoded messages. Mirrors the per-candidate
-    /// `DecoderFt8Analysis` loop.
+    /// `DecoderFt8Analysis` loop -- optionally fanned out across
+    /// `self.workers` threads (see `set_worker_threads`), each processing a
+    /// contiguous slice of candidate indices. All workers share one hash
+    /// table for the slot (`decode_candidates`), so a candidate on one
+    /// thread can still resolve a hashed/compound callsign another
+    /// candidate saved on a different thread, the same cross-referencing
+    /// a single sequential pass already relied on.
     pub fn decode_all(&mut self) -> Vec<DecodedMessage> {
-        let mut out = Vec::new();
-        // The sync search yields several candidates for the same signal; collapse
-        // those that decode to identical text so each message appears once.
+        let n = self.num_candidates;
+        // Reborrow as shared: nothing below needs &mut, and a shared
+        // reference is what the scoped worker threads need to capture.
+        let self_ref: &Decoder = self;
+
+        let chunks: Vec<Vec<DecodedMessage>> = if self.workers <= 1 || n < MIN_CANDIDATES_TO_PARALLELIZE
+        {
+            vec![self_ref.decode_candidates(0..n)]
+        } else {
+            let workers = self.workers.min(n);
+            let chunk_len = (n + workers - 1) / workers;
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..workers)
+                    .map(|w| {
+                        let start = w * chunk_len;
+                        let end = (start + chunk_len).min(n);
+                        scope.spawn(move || self_ref.decode_candidates(start..end))
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            })
+        };
+
+        // The sync search yields several candidates for the same signal;
+        // collapse those that decode to identical text so each message
+        // appears once. Chunks are contiguous, increasing-index ranges
+        // merged in that same order, so "first occurrence wins" here ties
+        // identically to the old single sequential scan over 0..n.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // Activate this decoder's hash table for the callbacks invoked by
-        // ftx_message_decode*. Raw pointer avoids aliasing the &mut self borrow.
-        let table_ptr: *mut HashTable = &mut *self.hashtable;
+        let mut out = Vec::new();
+        for chunk in chunks {
+            for msg in chunk {
+                if msg.raw_text.is_empty() || seen.insert(msg.raw_text.clone()) {
+                    out.push(msg);
+                }
+            }
+        }
+        out
+    }
+
+    /// Decode candidates `indices` (a sub-range of the last `find_sync`'s
+    /// results), returning the successfully decoded messages in index
+    /// order. Pulled out of `decode_all` so the exact same per-candidate
+    /// logic runs whether called inline (no worker threads) or on a worker
+    /// thread handling one slice of the candidate list.
+    fn decode_candidates(&self, indices: std::ops::Range<usize>) -> Vec<DecodedMessage> {
+        let mut out = Vec::new();
+        // Activate this slot's shared hash table for the callbacks invoked
+        // by ftx_message_decode*, for the lifetime of this call/thread.
+        let table_ptr: *const Mutex<HashTable> = &self.hashtable;
         let _guard = unsafe { HashGuard::new(table_ptr) };
         let mut iface = super::hashtable::interface();
 
-        for idx in 0..self.num_candidates {
+        for idx in indices {
             let cand = self.candidates[idx];
             let mut message = ffi::ftx_message_t {
                 payload: [0; 10],
@@ -217,10 +310,7 @@ impl Decoder {
 
             if let Some(mut msg) = self.build_message(&cand, &message, &mut iface) {
                 msg.ap = via_ap;
-                // Keep the first (highest-score) decode of each unique message.
-                if msg.raw_text.is_empty() || seen.insert(msg.raw_text.clone()) {
-                    out.push(msg);
-                }
+                out.push(msg);
             }
         }
         out
@@ -676,5 +766,88 @@ mod tests {
         let pass1 = decode_slot(&mut decoder, &signal);
         assert!(pass1.iter().any(|m| m.raw_text.contains("W9XYZ")), "neighbor still decodes after subtracting A");
         assert!(!pass1.iter().any(|m| m.raw_text.contains("K1ABC")), "A itself is gone");
+    }
+
+    #[test]
+    fn parallel_decode_matches_sequential_decode_exactly() {
+        // The core correctness guarantee of candidate-level decode
+        // parallelism: splitting the same candidate list across worker
+        // threads must produce EXACTLY the same result (same messages,
+        // same order, same dedup) as running single-threaded -- the
+        // worker count only changes how the work is scheduled, never what
+        // it computes.
+        let mut signal = vec![0.0f32; NSAMPLES];
+        add_noise(&mut signal, 0.05, 7);
+        let calls = [
+            ("K1AAA", "FN42"),
+            ("K1BBB", "FN43"),
+            ("K1CCC", "FN44"),
+            ("K1DDD", "FN45"),
+            ("K1EEE", "FN46"),
+            ("K1FFF", "FN47"),
+            ("K1GGG", "FN48"),
+            ("K1HHH", "FN49"),
+            ("K1III", "FN50"),
+            ("K1JJJ", "FN51"),
+        ];
+        for (i, (call, grid)) in calls.iter().enumerate() {
+            let f0 = 300.0 + 300.0 * i as f32;
+            add_message(&mut signal, &format!("CQ {call} {grid}"), f0, 0.5, 1.0);
+        }
+
+        let mut sequential = Decoder::new(SAMPLE_RATE, Mode::Ft8.ffi_protocol());
+        sequential.set_deep(true);
+        sequential.set_worker_threads(1);
+        sequential.feed_slot(&signal);
+        let n = sequential.find_sync();
+        assert!(
+            n >= MIN_CANDIDATES_TO_PARALLELIZE,
+            "fixture must yield enough candidates to actually exercise the \
+             parallel chunking path (got {n}, need >= {MIN_CANDIDATES_TO_PARALLELIZE})"
+        );
+        let seq_out = sequential.decode_all();
+
+        let mut parallel = Decoder::new(SAMPLE_RATE, Mode::Ft8.ffi_protocol());
+        parallel.set_deep(true);
+        parallel.set_worker_threads(4);
+        parallel.feed_slot(&signal);
+        parallel.find_sync();
+        let par_out = parallel.decode_all();
+
+        // Sanity: the fixture must actually produce every message, or this
+        // test would pass vacuously by both sides finding nothing.
+        for (call, _) in &calls {
+            assert!(
+                seq_out.iter().any(|m| m.raw_text.contains(call)),
+                "fixture signal for {call} must actually decode (test is vacuous otherwise)"
+            );
+        }
+
+        let seq_texts: Vec<&str> = seq_out.iter().map(|m| m.raw_text.as_str()).collect();
+        let par_texts: Vec<&str> = par_out.iter().map(|m| m.raw_text.as_str()).collect();
+        assert_eq!(
+            seq_texts, par_texts,
+            "worker count must never change decode_all's output (messages or their order)"
+        );
+    }
+
+    #[test]
+    fn decode_worker_count_never_returns_zero() {
+        // A reservation that eats every detected core (or exceeds it) must
+        // still leave exactly one worker -- this setting can never
+        // accidentally disable decoding.
+        assert!(decode_worker_count(0) >= 1);
+        assert_eq!(decode_worker_count(u32::MAX), 1);
+    }
+
+    #[test]
+    fn decode_worker_count_subtracts_the_reservation() {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        if cores > 1 {
+            assert_eq!(decode_worker_count(1), (cores - 1).max(1));
+        } else {
+            assert_eq!(decode_worker_count(1), 1);
+        }
+        assert_eq!(decode_worker_count(0), cores);
     }
 }

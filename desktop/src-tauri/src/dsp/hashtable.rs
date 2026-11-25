@@ -9,9 +9,22 @@
 //! thread-local at the table that's active for the current `decode_all` call.
 //! A `HashGuard` sets and clears it (RAII), and both callbacks `catch_unwind` so
 //! a Rust panic can never unwind across the C frame.
+//!
+//! Candidate-level decode parallelism (`Decoder::decode_all` splitting its
+//! candidate loop across worker threads) means several threads can have this
+//! guard set *at once*, all pointing at the *same* table for the slot — a
+//! candidate on one thread needs to resolve a hash another candidate saved on
+//! a different thread, same as it already could against an earlier candidate
+//! processed earlier in the same (formerly single-threaded) pass. So the
+//! thread-local now holds a pointer to a `Mutex`-guarded table, not an
+//! exclusively-owned one: each thread's `ACTIVE` differs (it's still
+//! thread-local), but what it points to is shared. `save`/`lookup` lock for
+//! their O(256) linear scan only — brief enough that contention across a
+//! handful of cores should be negligible.
 
 use std::cell::Cell;
 use std::os::raw::{c_char, c_int};
+use parking_lot::Mutex;
 
 pub const HASHTABLE_SIZE: usize = 256;
 
@@ -89,16 +102,18 @@ impl HashTable {
 }
 
 thread_local! {
-    static ACTIVE: Cell<*mut HashTable> = const { Cell::new(std::ptr::null_mut()) };
+    static ACTIVE: Cell<*const Mutex<HashTable>> = const { Cell::new(std::ptr::null()) };
 }
 
-/// Sets the thread-local active table for the lifetime of a decode pass.
+/// Sets the thread-local active table for the lifetime of a decode pass (or
+/// one worker thread's slice of one). Several threads may hold a guard at
+/// once, all pointing at the same shared table -- see the module doc comment.
 pub struct HashGuard;
 
 impl HashGuard {
     /// # Safety
     /// `table` must remain valid (not moved/dropped) for the lifetime of the guard.
-    pub unsafe fn new(table: *mut HashTable) -> Self {
+    pub unsafe fn new(table: *const Mutex<HashTable>) -> Self {
         ACTIVE.with(|a| a.set(table));
         HashGuard
     }
@@ -106,7 +121,7 @@ impl HashGuard {
 
 impl Drop for HashGuard {
     fn drop(&mut self) {
-        ACTIVE.with(|a| a.set(std::ptr::null_mut()));
+        ACTIVE.with(|a| a.set(std::ptr::null()));
     }
 }
 
@@ -120,7 +135,7 @@ pub extern "C" fn save_hash_cb(callsign: *const c_char, n22: u32) {
         let cs = unsafe { std::ffi::CStr::from_ptr(callsign) }
             .to_string_lossy()
             .into_owned();
-        unsafe { (*t).save(&cs, n22) };
+        unsafe { &*t }.lock().save(&cs, n22);
     });
 }
 
@@ -137,7 +152,7 @@ pub extern "C" fn lookup_hash_cb(hash_type: c_int, hash: u32, out: *mut c_char) 
             x if x == super::ffi::FTX_CALLSIGN_HASH_12_BITS => 10,
             _ => 0,
         };
-        unsafe { (*t).lookup(shift, hash) }
+        unsafe { &*t }.lock().lookup(shift, hash)
     })
     .unwrap_or(None);
 
@@ -278,5 +293,41 @@ mod tests {
         assert!(t.lookup(0, 5).is_none());
         t.save("K1ABC", 42);
         assert_eq!(t.lookup(0, 42).as_deref(), Some("K1ABC"));
+    }
+
+    #[test]
+    fn concurrent_saves_through_a_shared_table_all_survive() {
+        // Regression for candidate-level decode parallelism: several threads
+        // (standing in for worker threads each decoding a different
+        // candidate in the same slot) each set their own thread-local
+        // HashGuard pointing at the SAME shared table, then save through the
+        // real C-callback entry point (save_hash_cb), exactly as
+        // ftx_message_decode*'s unpack path would. Every entry must survive
+        // with no loss or corruption -- the whole point of moving from an
+        // exclusively-owned thread-local table to a Mutex-guarded shared one.
+        use std::sync::Arc;
+        const THREADS: u32 = 8;
+        let shared = Arc::new(Mutex::new(HashTable::new()));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let shared = Arc::clone(&shared);
+                thread::spawn(move || {
+                    let ptr: *const Mutex<HashTable> = Arc::as_ptr(&shared);
+                    let _guard = unsafe { HashGuard::new(ptr) };
+                    let call = format!("W{i}TEST");
+                    let cstr = std::ffi::CString::new(call.clone()).unwrap();
+                    let hash = (0x1000 + i) & 0x3F_FFFF;
+                    save_hash_cb(cstr.as_ptr(), hash);
+                    (call, hash)
+                })
+            })
+            .collect();
+
+        let saved: Vec<(String, u32)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let table = shared.lock();
+        for (call, hash) in saved {
+            assert_eq!(table.lookup(0, hash).as_deref(), Some(call.as_str()));
+        }
     }
 }

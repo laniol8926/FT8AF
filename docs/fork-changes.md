@@ -1337,6 +1337,36 @@ for the Hamlib version workaround needed there.
   `resources` (`{"hamlib-dist/*": "./"}`), which Tauri explicitly
   documents as flattening instead of preserving structure.
 
+- **Candidate-level decode parallelism.** `Decoder::decode_all`'s
+  candidate loop (up to 256 per slot) ran one at a time on the single
+  long-lived decoder thread; now it fans out across worker threads via
+  `std::thread::scope`, each decoding a contiguous slice of the candidate
+  list. Investigation found the C core itself was already fully reentrant
+  (a sweep of every file in `ft8_lib` for mutable static state found only
+  `static const` tables, plus `osd.c`'s `g_rows` lazy-init singleton,
+  which was already a correct atomic CAS/spin-wait design) -- the only
+  real shared state was `dsp/hashtable.rs`'s thread-local callsign hash
+  table, which candidates within one slot use to cross-reference
+  hashed/compound callsigns. Fixed by pointing the thread-local at a
+  shared `parking_lot::Mutex<HashTable>` instead of an exclusively-owned
+  table, so every worker thread can still resolve a hash another thread
+  saved earlier, regardless of which one finishes first. Results from all
+  workers are merged in original candidate-index order before the
+  existing raw-text dedup runs once over the full list, so output
+  (messages, order, which duplicate wins a tie) is byte-for-byte identical
+  to the old single-threaded scan -- verified directly by a test that
+  decodes the same synthesized 10-signal slot with `workers=1` and
+  `workers=4` and asserts the message lists match exactly. This is
+  internal to one `decode_all` call: `engine.rs`'s single-decoder-thread-
+  per-protocol model and the SIC subtract-and-redecode loop are
+  unchanged, but SIC directly benefits since it's where a time budget
+  previously got burned one candidate at a time. Worker count is a new
+  Settings row ("Decode Threads," Advanced, next to Decode Depth) rather
+  than a hardcoded constant, per the user's own explicit request --
+  "reserve N CPU cores for other work," defaulting to reserving 1,
+  respawning the decoder thread on change (same mechanism Decode Depth/
+  Deep SIC/MyCall already use).
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now

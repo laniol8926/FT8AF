@@ -179,6 +179,25 @@ fn set_deep_decode_sic(state: State<AppState>, sic: bool) {
     state.engine.send(EngineCommand::SetDeepDecodeSic(sic));
 }
 
+/// Settings -> Advanced's "Reserve N CPU cores" row -- see
+/// `EngineCommand::SetDecodeThreadsReserved`'s doc comment.
+#[tauri::command]
+fn set_decode_threads_reserved(state: State<AppState>, reserved: u32) {
+    state
+        .engine
+        .send(EngineCommand::SetDecodeThreadsReserved(reserved));
+}
+
+/// Detected CPU core count, for the Settings row to show "decoding uses N
+/// of M cores" context next to the reservation number. Read-only -- not
+/// routed through the engine, since it's not engine state.
+#[tauri::command]
+fn cpu_count() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
+}
+
 #[tauri::command]
 fn set_tx_audio_channel(state: State<AppState>, channel: i32) {
     state.engine.send(EngineCommand::SetTxAudioChannel(channel));
@@ -1389,6 +1408,8 @@ fn main() {
             set_rx_audio_channel,
             set_decode_depth,
             set_deep_decode_sic,
+            set_decode_threads_reserved,
+            cpu_count,
             set_tx_audio_channel,
             set_qmx_cat_tones,
             select_rig,
