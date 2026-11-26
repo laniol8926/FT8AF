@@ -1412,6 +1412,29 @@ for the Hamlib version workaround needed there.
   guard (version too *high* to ever trigger the ALTER statements), not
   the actual crash path.
 
+## 32-bit ARM desktop build (Raspberry Pi Zero 2W)
+
+Confirmed working end to end: the desktop app, cross-compiled for `armhf`
+and deployed to a Raspberry Pi Zero 2W, renders the full UI, decodes FT8,
+and controls a QRP Labs QMX via Hamlib. See
+[`docs/armhf-pi-zero-build.md`](armhf-pi-zero-build.md) for the full recipe
+— briefly: a Docker-based cross-compile (GitHub's arm64 runners have no
+32-bit ARM execution, and the distro's armhf toolchain packages
+hard-conflict with the cross-compiler's), a sysroot built with `apt-get
+download` + `dpkg -x` instead of `apt-get install` (works around an
+unfixable `gobject-introspection:armhf` dependency gap in Bookworm),
+`-Wl,--allow-shlib-undefined` (a hand-built sysroot can't replicate
+WebKitGTK's full transitive dependency closure, and doesn't need to — the
+real device supplies it at runtime), and `--features tauri/custom-protocol`
+(without it, the binary launches but tries to load a dev server instead of
+the bundled frontend). Also required: a from-source Hamlib 4.7.1 at
+`/usr/local/lib/libhamlib.so.4` — the Pi's distro Hamlib package (4.5.4) has
+no QRP Labs QMX support at all, and `rig.rs`'s `load_hamlib()` already
+checks that exact path first for precisely this situation.
+
+Not yet ported into CI (`build-debian-armhf` in
+`.github/workflows/desktop.yml` still has an earlier, non-working attempt).
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now
