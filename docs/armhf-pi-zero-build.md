@@ -4,6 +4,11 @@ Confirmed working end to end on a Raspberry Pi Zero 2W (armv7l, Raspbian
 Bookworm, `labwc`/Wayland desktop): the app launches, the waterfall renders,
 and FT8 decodes appear with a QRP Labs QMX connected via Hamlib.
 
+A ready-built `.deb` (binary + bundled Hamlib 4.7.1, `dpkg -i`-installable)
+is attached to the `desktop-manual.157` release as
+`FT8AF_0.1.2+157_armhf.deb` — this document is for rebuilding it, not a
+prerequisite for installing it.
+
 There is no native armhf toolchain on the build host (an aarch64 SBC) and
 GitHub's hosted arm64 runners have no 32-bit ARM execution support at all, so
 this is a pure cross-compile, done in a `debian:bookworm` Docker container.
