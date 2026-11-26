@@ -1393,6 +1393,25 @@ for the Hamlib version workaround needed there.
   against a future `SENSITIVE_KEYS` edit silently dropping it from
   every export.
 
+- **Fixed a real crash on launch: "failed to open database: duplicate
+  column name: tx_pwr."** `db.rs`'s own comments already documented the
+  "real incident" that causes this -- an older binary's migration
+  overwriting `PRAGMA user_version` downward, leaving a database whose
+  recorded version is lower than what its physical schema actually
+  reflects -- and a write-side guard already existed (never write a
+  *lower* version). What was missing: v9 (`tx_pwr`), v10 (`synced_wrl`)
+  and v11 (`synced_hamqth`/`synced_clublog`/`synced_hrdlog`) were all
+  added without the idempotent "ignore duplicate column name" guard v2
+  and v4's migrations already used -- so a database already in that
+  desynced state (e.g. from testing across many binary versions in one
+  session) hit a *fatal* error on every subsequent launch instead of a
+  harmless no-op. All three now use the same ignore-if-duplicate pattern
+  as v2/v4. New regression test reproduces the exact desynced state (low
+  recorded version, columns already physically present) end to end --
+  the existing test with a similar name only covered the write-side
+  guard (version too *high* to ever trigger the ALTER statements), not
+  the actual crash path.
+
 ## Smaller fixes
 
 - The "Radio not linked" chip shows after a restart (control mode is now

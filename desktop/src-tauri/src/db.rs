@@ -482,27 +482,55 @@ impl Db {
             // Station setting (which a QMX keeps live-updated from its own
             // measured output, see `engine.rs`'s `poll_meters`) gets copied
             // into the log the moment a QSO completes.
-            conn.execute_batch("ALTER TABLE qso_log ADD COLUMN tx_pwr TEXT;")?;
+            //
+            // Real bug, found live: this (and v10/v11 below) were added
+            // without the idempotent "ignore duplicate column" guard v2/v4
+            // above already established -- so a database whose recorded
+            // `user_version` ever desyncs from its actual physical schema
+            // (the exact "real incident" this function's own comment below
+            // describes, from an older binary overwriting the version
+            // number downward before that write-guard existed) hits
+            // "duplicate column name: tx_pwr" and refuses to open at all,
+            // not just silently re-run a harmless no-op. Matches v2/v4's
+            // own established idiom now.
+            match conn.execute("ALTER TABLE qso_log ADD COLUMN tx_pwr TEXT", []) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(ref m)))
+                    if m.contains("duplicate column name") => {}
+                Err(e) => return Err(e.into()),
+            }
         }
         if version < 10 {
             // v10: World Radio League sync tracking (`synced_wrl`), matching
             // Android's own `QSLTable.synced_wrl` -- added alongside the real
             // Cloudlog/Wavelog/Nextlog and World Radio League upload support
             // in `cloudlog.rs`/`wrl.rs`. `synced_cloudlog`/`synced_qrz` (v2)
-            // already covers those two.
-            conn.execute_batch("ALTER TABLE qso_log ADD COLUMN synced_wrl INTEGER NOT NULL DEFAULT 0;")?;
+            // already covers those two. See v9's own comment on why this
+            // needs the same idempotent guard as v2/v4.
+            match conn.execute("ALTER TABLE qso_log ADD COLUMN synced_wrl INTEGER NOT NULL DEFAULT 0", []) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(ref m)))
+                    if m.contains("duplicate column name") => {}
+                Err(e) => return Err(e.into()),
+            }
         }
         if version < 11 {
             // v11: HamQTH, Club Log and HRDLog.net sync tracking, same shape
             // as v10's `synced_wrl` -- added alongside real upload support
             // in `hamqth.rs`/`clublog.rs`/`hrdlog.rs`. eQSL already has its
             // own `eqsl_sent`/`eqsl_rcvd` (v4) and needs no new column here.
+            // Same idempotent-guard fix as v9/v10 above.
             for col in [
                 "ALTER TABLE qso_log ADD COLUMN synced_hamqth INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE qso_log ADD COLUMN synced_clublog INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE qso_log ADD COLUMN synced_hrdlog INTEGER NOT NULL DEFAULT 0",
             ] {
-                conn.execute(col, [])?;
+                match conn.execute(col, []) {
+                    Ok(_) => {}
+                    Err(rusqlite::Error::SqliteFailure(_, Some(ref m)))
+                        if m.contains("duplicate column name") => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
         // Never write a LOWER version than what's already there. Real
@@ -4526,6 +4554,62 @@ mod tests {
         let db = Db::from_conn(conn).unwrap();
         let version: i64 = db.conn.lock().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(version, 99, "a future/newer version must never be lowered by this binary's migrate()");
+    }
+
+    #[test]
+    fn migrate_tolerates_a_desynced_version_with_columns_already_present() {
+        // Real bug, found live (crash report: "failed to open database:
+        // duplicate column name: tx_pwr"): the OTHER half of the "real
+        // incident" the previous test guards against. That test confirms
+        // this binary never WRITES user_version backward; this one confirms
+        // migrate() survives a database some EARLIER binary already wrote
+        // backward (before that write-guard existed, or from a build that
+        // predates it) -- recorded `user_version` is low (8, so v9/v10/v11's
+        // `ALTER TABLE` statements would normally fire), but the columns
+        // those migrations add are ALREADY physically present, exactly the
+        // mismatch a prior downward overwrite leaves behind. v9/v10/v11 must
+        // treat "duplicate column name" as a harmless no-op, same as v2/v4
+        // already did -- not propagate it as a fatal open-database error.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE qso_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call TEXT NOT NULL, gridsquare TEXT, mode TEXT, rst_sent TEXT,
+                rst_rcvd TEXT, qso_date TEXT, time_on TEXT, qso_date_off TEXT,
+                time_off TEXT, band TEXT, freq TEXT, station_callsign TEXT,
+                my_gridsquare TEXT, comment TEXT, created_at INTEGER,
+                qsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                synced_cloudlog INTEGER NOT NULL DEFAULT 0,
+                synced_qrz INTEGER NOT NULL DEFAULT 0,
+                qsl_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_sent INTEGER NOT NULL DEFAULT 0,
+                lotw_rcvd INTEGER NOT NULL DEFAULT 0,
+                eqsl_sent INTEGER NOT NULL DEFAULT 0,
+                eqsl_rcvd INTEGER NOT NULL DEFAULT 0,
+                qrz_qsl INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT '',
+                country TEXT NOT NULL DEFAULT '',
+                tx_pwr TEXT,
+                synced_wrl INTEGER NOT NULL DEFAULT 0,
+                synced_hamqth INTEGER NOT NULL DEFAULT 0,
+                synced_clublog INTEGER NOT NULL DEFAULT 0,
+                synced_hrdlog INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO qso_log(call, mode, qso_date, time_on)
+                VALUES('K1ABC', 'FT8', '20260604', '120000');
+            PRAGMA user_version = 8;
+            "#,
+        )
+        .unwrap();
+        let db = Db::from_conn(conn).expect(
+            "migrate() must tolerate a desynced version whose columns already exist, \
+             not crash on \"duplicate column name\"",
+        );
+        let qsos = db.list_qsos(10, 0);
+        assert_eq!(qsos.len(), 1, "existing rows must survive");
+        let version: i64 = db.conn.lock().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION, "version must be corrected forward once migrate() succeeds");
     }
 
     #[test]
